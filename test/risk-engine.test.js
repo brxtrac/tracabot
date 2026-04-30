@@ -57,9 +57,10 @@ test('formats stats like a readable risk summary', () => {
     byEventType: { fraud_finding: 18, risk_query: 15, ban_executed: 5 },
     byRiskType: { impersonation: 34, other: 20 }
   });
-  assert.match(text, /DKG stats for the last 7 days: HIGH ACTIVITY/);
-  assert.match(text, /Signals: 43 high-confidence \/ 54 total fraud intel events \(80%\)/);
-  assert.match(text, /Events: Fraud Finding: 18, Risk Query: 15, Ban Executed: 5/);
-  assert.match(text, /Risk types: Impersonation: 34, Other: 20/);
+  assert.match(text, /Shield report \(7d\): hot week/);
+  assert.match(text, /43 high-confidence busts from 54 DKG events \(80%\)/);
+  assert.match(text, /Top pattern: Impersonation \(34\)/);
+  assert.match(text, /Actions: 5 bans, 0 reports, 15 scans/);
+  assert.match(text, /DKG vault has receipts/);
   assert.doesNotMatch(text, /\{"fraud_finding"/);
 });

@@ -90,31 +90,43 @@ function labelStatKey(key = '') {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function formatStatList(values = {}, empty = 'None') {
-  const entries = Object.entries(values)
+function sortedStats(values = {}) {
+  return Object.entries(values)
     .filter(([, count]) => Number(count) > 0)
     .sort((a, b) => Number(b[1]) - Number(a[1]) || a[0].localeCompare(b[0]));
-  if (!entries.length) return empty;
-  return entries.map(([key, count]) => `${labelStatKey(key)}: ${count}`).join(', ');
+}
+
+function topStat(values = {}, empty = 'no dominant pattern') {
+  const [key, count] = sortedStats(values)[0] || [];
+  return key ? `${labelStatKey(key)} (${count})` : empty;
+}
+
+function countStat(values = {}, key = '') {
+  return Number(values[key] || 0);
+}
+
+function plural(count, singular, pluralWord = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : pluralWord}`;
 }
 
 export function formatStatsReply(stats) {
   const high = stats.highConfidence || 0;
   const total = stats.total || 0;
   if (!total) {
-    return '🛡️ Last 7 days from DKG: LOW RISK. No fraud intel events found. No high-confidence findings, reports, or bans in Shared Memory.';
+    return '📊 Shield report (7d): all quiet. DKG shows 0 shady events and 0 high-confidence busts.\nVault is looking solid. Want me to /scan someone specific?';
   }
-  const review = Math.max(0, total - high);
   const highRate = Math.round((high / total) * 100);
-  const verdict = high >= 10 || highRate >= 50 ? 'HIGH ACTIVITY' : high >= 3 ? 'REVIEW' : 'LOW ACTIVITY';
-  const action = high
-    ? 'Review recent high-confidence findings and ban evidence before promoting anything to Verified Memory.'
-    : 'No high-confidence action needed right now.';
+  const verdict = high >= 10 || highRate >= 50 ? 'hot week' : high >= 3 ? 'active watch' : 'mostly calm';
+  const bans = countStat(stats.byEventType, 'ban_executed');
+  const reports = countStat(stats.byEventType, 'report_submitted');
+  const scans = countStat(stats.byEventType, 'risk_query') + countStat(stats.byEventType, 'risk_check');
+  const topRisk = topStat(stats.byRiskType);
+  const closing = high
+    ? 'DKG vault has receipts. Use /scan on anyone suspicious.'
+    : 'No urgent action on my radar. Use /scan if someone feels off.';
   return [
-    `📊 DKG stats for the last 7 days: ${verdict}.`,
-    `Signals: ${high} high-confidence / ${total} total fraud intel events (${highRate}%). ${review} review-level or audit events.`,
-    `Events: ${formatStatList(stats.byEventType)}`,
-    `Risk types: ${formatStatList(stats.byRiskType, 'No risk types recorded')}`,
-    `Recommendation: ${action}`
+    `📊 Shield report (7d): ${verdict}. ${plural(high, 'high-confidence bust')} from ${plural(total, 'DKG event')} (${highRate}%).`,
+    `Top pattern: ${topRisk}. Actions: ${plural(bans, 'ban')}, ${plural(reports, 'report')}, ${plural(scans, 'scan')}.`,
+    closing
   ].join('\n');
 }

@@ -259,7 +259,7 @@ test('/stats pulls DKG aggregate data', async () => {
     message_id: 13,
     text: '/stats'
   });
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('DKG stats for the last 7 days')));
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('2 high-confidence / 3 total fraud intel events')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Shield report (7d)')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('2 high-confidence busts from 3 DKG events')));
   assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('{"fraud_finding"')), false);
 });
