@@ -1,3 +1,12 @@
+export function displayName(target) {
+  if (!target) return 'this account';
+  if (target.label) return target.label;
+  if (target.username) return `@${target.username}`;
+  const fullName = [target.first_name, target.last_name].filter(Boolean).join(' ').trim();
+  if (fullName) return fullName;
+  return target.id || 'this account';
+}
+
 export function combineRisk({ analysis, dkgIntel, threshold = 85 }) {
   const evidence = [...(analysis.evidence || [])];
   const dkgEvidence = dkgIntel?.evidence || [];
@@ -31,14 +40,14 @@ export function combineRisk({ analysis, dkgIntel, threshold = 85 }) {
 }
 
 export function formatRiskAssessment({ target, risk }) {
-  const name = target?.label || (target?.username ? `@${target.username}` : target?.id || 'this account');
+  const name = displayName(target);
   const verdict = risk.confidence >= 85 ? 'HIGH RISK' : risk.confidence >= 60 ? 'REVIEW' : 'LOW RISK';
   const evidence = risk.evidence?.length ? risk.evidence.slice(0, 6).join('; ') : 'No matching DKG evidence or high-confidence pattern found.';
   return `tracabot risk for ${name}: ${verdict} (${risk.confidence}%). Type: ${risk.scam_type}. Evidence: ${evidence}. Recommendation: ${risk.recommended_action}.`;
 }
 
 export function formatScanReply({ target, risk, eventId = '', findingId = '' }) {
-  const name = target?.label || (target?.username ? `@${target.username}` : target?.id || 'this account');
+  const name = displayName(target);
   if (risk.confidence < 60) {
     return `🛡️ ${name} looks clean! DKG scan came back ${risk.confidence}% risk — no strong matches. Safe to chat. Event: ${eventId}`;
   }
@@ -54,7 +63,7 @@ export function formatReportReply(eventId) {
 }
 
 export function formatBanReply(target, eventId) {
-  const name = target?.username ? `@${target.username}` : target?.id || 'that account';
+  const name = displayName(target);
   return `🔨 Banned ${name} + evidence logged to DKG v10 (event ID: ${eventId}). This one won't bother us again.`;
 }
 
