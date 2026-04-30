@@ -46,9 +46,9 @@ Logs all ClawShield activity to DKG v10 **Context Graph** "claw-shield-intel" (o
 
 ## Inputs
 
-- `event_type`: "scam_detection" | "impersonator_detected" | "ban_executed" | "report_submitted" | "false_positive"
+- `event_type`: "risk_check" | "risk_query" | "scam_detection" | "fraud_finding" | "impersonator_detected" | "ban_executed" | "report_submitted" | "false_positive"
 
-- `payload`: JSON object with details (user_id, username, group_id, evidence, confidence, action_taken, timestamp, admin_approver?, group_category="crypto| nft|general")
+- `payload`: JSON object with details (user_id, username, wallets, patterns, group_id, evidence, confidence, action_taken, timestamp, admin_approver?, group_category="crypto|nft|general")
 
 - `context_graph_id`: Optional, default "claw-shield-intel" (the **global shared graph** — this is what enables cross-community intelligence)
 
@@ -142,7 +142,12 @@ Logs all ClawShield activity to DKG v10 **Context Graph** "claw-shield-intel" (o
 
 
 
-5. **Error Handling**:
+5. **Query Before Action**:
+
+   - On message, join, proactive scan, or @query, query the Context Graph for actor username, Telegram user ID when known, wallet addresses, scam patterns, and communityVerifiedFlag values.
+   - Return risk score + evidence to the caller.
+
+6. **Error Handling**:
 
    - If node down: Queue locally + retry (cron skill).
 

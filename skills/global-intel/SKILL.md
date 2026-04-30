@@ -29,6 +29,8 @@ This skill lets the agent **pull live intelligence from the entire network** bef
 - "What are the hottest new scam tactics across Telegram right now?"
 
 - "Reputation score for this account based on global history?"
+- "Is this wallet blacklisted or connected to prior fraud reports?"
+- "Does this message match community-verified scam patterns?"
 
 
 
@@ -45,12 +47,15 @@ No other TG bot has this. This is pure DKG Shared Memory power.
 - "Check reputation of @username"
 
 - "What giveaway scams are trending network-wide?"
+- "Is 0x... blacklisted?"
 
 
 
 ## Workflow
 
-1. **Query the Shared Graph** (use DKG HTTP query endpoints or SPARQL-like on assertions in "claw-shield-intel"):
+1. **Query the Shared Graph** (use DKG CLI/query endpoints or SPARQL-like on assertions in "claw-shield-intel"):
+
+   - Query actor username, Telegram ID, wallet addresses, scamPattern values, and communityVerifiedFlag values.
 
    - Example for user reputation:
 

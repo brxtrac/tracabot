@@ -44,11 +44,13 @@ author: ClawShield Team (template)
 
 3. **Confirm High Confidence**: If <85% or ambiguous → "⚠️ Recommendation: ban? Evidence: [list]. Reply YES to proceed or provide override."
 
-4. **Execute Ban** (if approved or auto high-conf):
+4. **Execute Ban** (if approved or confidence >=85):
 
    - Use OpenClaw Telegram channel tools or Bot API: `banChatMember` with until_date if temporary.
 
    - Confirm success via TG API response.
+
+   - If bot lacks admin rights, immediately report to group admins with DKG evidence, message context, and recommended action.
 
 5. **Log to DKG** (MANDATORY, via dkg-logger skill):
 
@@ -57,6 +59,8 @@ author: ClawShield Team (template)
    - payload: {target_user, reason, evidence_from_analyzer, confidence, executed_by: "admin|auto", timestamp, group_id}
 
    - This creates immutable record: "Why was this user banned? Full provenance."
+
+   - High-confidence findings are also published as `fraud_finding` Knowledge Asset-shaped records in Shared Memory for cross-community reuse.
 
 6. **Notify Group**: "🛡️ @scammer banned for [reason]. Logged to DKG for community transparency. UAL: [link]"
 
@@ -90,7 +94,7 @@ author: ClawShield Team (template)
 
 - Commands restricted to group admins (check via TG API is_admin).
 
-- Sandbox: No auto-ban without confirmation unless confidence >95% + whitelisted patterns.
+- Sandbox: Auto-ban only at confidence >=85 and only when bot admin rights are confirmed.
 
 - Audit: Every decision logged → full transparency, reduces abuse claims.
 

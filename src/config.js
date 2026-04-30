@@ -13,7 +13,9 @@ export function loadConfig(env = process.env) {
   return {
     telegramToken: env.TELEGRAM_BOT_TOKEN || '',
     adminIds: new Set((env.TRACABOT_ADMINS || '').split(',').map((id) => id.trim()).filter(Boolean)),
-    autoBan: env.TRACABOT_AUTO_BAN === 'true',
+    autoBan: env.TRACABOT_AUTO_BAN !== 'false',
+    actionThreshold: Number(env.TRACABOT_ACTION_THRESHOLD || 85),
+    proactiveScanMinutes: Number(env.TRACABOT_PROACTIVE_SCAN_MINUTES || 30),
     contextGraph,
     dkgMode: env.TRACABOT_DKG_MODE || 'cli',
     dkgNodeUrl: env.DKG_NODE_URL || 'http://127.0.0.1:9200',

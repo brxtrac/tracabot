@@ -23,8 +23,10 @@ author: ClawShield Team (template)
 ## When to Use
 
 - Automatically on every new message in protected groups (configure via agent routing).
+- Automatically on every new Telegram join event and periodic proactive scan of recently observed users.
 
 - On explicit commands: /scan @username or /analyze [message text].
+- On natural queries such as "@tracabot is @username a fraudster?" or replies asking "is this scam?".
 
 - Before any ban or report action.
 
@@ -62,7 +64,7 @@ author: ClawShield Team (template)
 
    - Prompt the core model: "You are a veteran Telegram scam hunter. Analyze this message and user for fraud indicators. Consider context of crypto communities. Output ONLY valid JSON: {\"is_scam\": boolean, \"confidence\": 0-100, \"scam_type\": \"giveaway|impersonation|phishing|other\", \"evidence\": [\"list of reasons\"], \"recommended_action\": \"ban|warn|ignore|report\", \"explanation\": \"short human-readable\"}"
 
-   - Cross-reference with known patterns from DKG query if available (future: tool call to dkg-logger stats).
+   - Cross-reference with DKG v10 Context Graph evidence for the actor, wallets, scam patterns, blacklisted addresses, and community-verified flags.
 
 
 
@@ -91,6 +93,8 @@ author: ClawShield Team (template)
 
 
 4. **Edge Cases**:
+
+   - Confidence >=85: publish finding to DKG v10 and ban if admin rights are available; otherwise alert group admins with DKG evidence.
 
    - Low confidence (<70): Log as "suspicious" only, no auto-ban. Suggest admin review.
 

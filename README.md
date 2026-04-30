@@ -7,9 +7,12 @@ The default Context Graph is `claw-shield-intel`. Events are written to DKG v10 
 ## What It Does
 
 - Detects Telegram scam patterns: fake airdrops, urgency language, phishing links, and admin/support impersonation.
-- Supports `/scan`, `/report`, `/ban`, and `/stats`.
+- Supports `/scan`, `/report`, `/ban`, `/stats`, reply-thread risk checks, and `@tracabot is @username a fraudster?`.
+- Checks every observed message and Telegram join event against DKG v10 Shared Memory before deciding.
+- Applies the Shieldy action path at 85% confidence: ban immediately when the bot has Telegram admin rights, otherwise alert admins with DKG evidence and message context.
+- Proactively rescans observed users on a configurable interval.
 - Writes scam detections, reports, and moderation actions to DKG v10 Shared Memory with `dkg shared-memory write`.
-- Queries DKG Shared Memory before scoring a user, so reports from other communities can raise confidence.
+- Queries DKG Shared Memory before scoring a user, wallet, or scam pattern, so reports from other communities can raise confidence.
 - Keeps a persistent JSONL audit log for retry, review, and demo workflows.
 - Runs as a normal Node.js service and keeps secrets outside Git.
 
@@ -61,7 +64,9 @@ Edit `.env` locally:
 ```bash
 TELEGRAM_BOT_TOKEN=...
 TRACABOT_CONTEXT_GRAPH=claw-shield-intel
-TRACABOT_AUTO_BAN=false
+TRACABOT_AUTO_BAN=true
+TRACABOT_ACTION_THRESHOLD=85
+TRACABOT_PROACTIVE_SCAN_MINUTES=30
 TRACABOT_STORE_PATH=./data/tracabot-events.jsonl
 ```
 
@@ -109,7 +114,7 @@ Restart=always
 - No token or wallet secret is committed.
 - No runtime dependencies, no install scripts, no dynamic code loading.
 - Network egress is limited to `api.telegram.org` and the configured DKG node.
-- DKG writes use `context-graph create` and `shared-memory write`.
+- DKG writes use `context-graph create` and `shared-memory write`; DKG reads use `query --include-shared-memory`.
 - `PUBLISH` to Verified Memory is intentionally not automatic; it belongs to Curator-controlled promotion.
 
 ## Tests

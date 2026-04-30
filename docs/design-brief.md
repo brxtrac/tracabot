@@ -39,7 +39,8 @@ Working Memory:
 Shared Memory:
 
 - Events are written to `claw-shield-intel` with `dkg shared-memory write`.
-- The agent queries Shared Memory before scoring a user so cross-community reports can influence local decisions.
+- The agent queries Shared Memory before scoring a user, wallet, or scam pattern so cross-community reports can influence local decisions.
+- At 85% confidence, the agent publishes a high-confidence `fraud_finding` Knowledge Asset-shaped event and either bans immediately with Telegram admin rights or reports the full DKG evidence to group admins.
 
 Verified Memory:
 

@@ -6,7 +6,7 @@ test('detects high-confidence crypto giveaway impersonation scams', () => {
   const result = analyzeMessage({
     text: 'URGENT free 1000 USDT airdrop, claim now at t.me/fakeclaim and DM support admin',
     user: { username: 'support_admin_bonus' },
-    globalIntel: { reportsAcrossCommunities: 3 }
+    globalIntel: { reportsAcrossCommunities: 3, evidence: [] }
   });
   assert.equal(result.is_scam, true);
   assert.equal(result.recommended_action, 'ban');
