@@ -81,6 +81,20 @@ export class TelegramShieldBot {
     return { id: '', username, kind: 'user' };
   }
 
+  targetFromPlainArgument(argText = '') {
+    const firstToken = argText.trim().split(/\s+/)[0] || '';
+    const normalized = firstToken.replace(/^@/, '').replace(/[^\p{L}\p{N}_-]/gu, '');
+    if (!normalized || /^(tracabot|tracethembot)$/i.test(normalized)) return null;
+    if (extractWallets(firstToken).length) return null;
+    if (/^https?:/i.test(firstToken)) return null;
+    return {
+      id: '',
+      username: normalized,
+      label: normalized.startsWith('@') ? normalized : `@${normalized}`,
+      kind: 'user'
+    };
+  }
+
   targetFromWallet(text = '') {
     const wallet = extractWallets(text)[0];
     return wallet ? { id: wallet, label: wallet, kind: 'wallet' } : null;
@@ -95,7 +109,8 @@ export class TelegramShieldBot {
     const reply = message.reply_to_message;
     const mentioned = this.targetFromMention(message);
     const walletTarget = this.targetFromWallet(argText || reply?.text || '');
-    const target = mentioned || walletTarget || (reply ? actorFromMessage(reply) : actorFromMessage(message));
+    const plainTarget = this.targetFromPlainArgument(argText);
+    const target = mentioned || walletTarget || plainTarget || (reply ? actorFromMessage(reply) : actorFromMessage(message));
     const text = [argText, reply?.text || ''].filter(Boolean).join('\n') || message.text || '';
     return { target, text, reply };
   }
@@ -209,9 +224,15 @@ export class TelegramShieldBot {
       return;
     }
     if (text.startsWith('/ban')) {
+      const { target, text: targetText } = this.resolveCommandTarget(message, 'ban');
       const replyUser = message.reply_to_message?.from;
       if (!replyUser) {
-        await this.send(chatId, 'Reply to a user message with /ban <reason> so tracabot can preserve evidence.');
+        const risk = await this.assess({ ...message, from: target, text: targetText }, target, targetText);
+        const event = await this.record('ban_requested_no_reply', { ...message, from: target }, {
+          ...risk,
+          evidence: [...risk.evidence, 'manual /ban requested without a replied Telegram user ID']
+        });
+        await this.send(chatId, `⚠️ I can scan/report ${target.label || target.username || 'that target'}, but Telegram needs a replied message so I can ban the exact user. Evidence logged to DKG event ${event.id}.`, { reply_to_message_id: message.message_id });
         return;
       }
       const reason = this.commandText(message, 'ban') || 'admin requested ban';

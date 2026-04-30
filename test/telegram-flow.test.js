@@ -107,6 +107,20 @@ test('/scan checks a wallet without banning', async () => {
   assert.ok(bot.store.all().some((event) => event.event_type === 'fraud_finding'));
 });
 
+test('/scan with a plain name scans that name, not the command sender', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  await bot.handleCommand({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 86, username: 'BRX86' },
+    message_id: 14,
+    text: '/scan Dmitry'
+  });
+  const riskEvent = bot.store.all().find((event) => event.event_type === 'risk_query');
+  assert.equal(riskEvent.user.username, 'Dmitry');
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('@Dmitry')));
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('@BRX86 looks clean')), false);
+});
+
 test('/report publishes wallet findings without attempting a Telegram ban', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   await bot.handleCommand({
@@ -136,6 +150,19 @@ test('/ban bans replied user and publishes ban evidence', async () => {
   const ban = bot.store.all().find((event) => event.event_type === 'ban_executed');
   assert.ok(ban);
   assert.match(JSON.stringify(ban.payload.evidence), /manual \/ban command/);
+});
+
+test('/ban with a plain name does not ban the sender without a replied user', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  await bot.handleCommand({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 86, username: 'BRX86' },
+    message_id: 15,
+    text: '/ban Dmitry'
+  });
+  assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
+  assert.ok(bot.store.all().some((event) => event.event_type === 'ban_requested_no_reply' && event.user.username === 'Dmitry'));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('needs a replied message')));
 });
 
 test('/stats pulls DKG aggregate data', async () => {
