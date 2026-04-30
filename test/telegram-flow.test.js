@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { TelegramShieldBot } from '../src/telegram.js';
+import { TELEGRAM_COMMANDS, TelegramShieldBot } from '../src/telegram.js';
 import { EventStore } from '../src/store.js';
 
 function makeBot({ canBan }) {
@@ -73,4 +73,57 @@ test('new high-risk join alerts admins when bot lacks ban rights', async () => {
   assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('admin alert')));
   assert.ok(bot.store.all().some((event) => event.event_type === 'fraud_finding'));
+});
+
+test('telegram command descriptions match the public bot command list', () => {
+  assert.deepEqual(TELEGRAM_COMMANDS, [
+    { command: 'scan', description: 'Check a user, wallet, or replied message for scam risk' },
+    { command: 'report', description: 'Report a suspicious user, wallet, or message to DKG' },
+    { command: 'ban', description: 'Ban a replied user and publish ban evidence' },
+    { command: 'stats', description: 'Show recent fraud checks and detections' }
+  ]);
+});
+
+test('/scan checks a wallet without banning', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  await bot.handleCommand({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 1, username: 'admin' },
+    message_id: 10,
+    text: '/scan 0x1111111111111111111111111111111111111111'
+  });
+  assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('DKG scan event')));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'risk_query'));
+});
+
+test('/report publishes wallet findings without attempting a Telegram ban', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  await bot.handleCommand({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 1, username: 'admin' },
+    message_id: 11,
+    text: '/report 0x1111111111111111111111111111111111111111 fake airdrop wallet'
+  });
+  assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
+  assert.ok(bot.store.all().some((event) => event.event_type === 'report_submitted'));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'fraud_finding'));
+});
+
+test('/ban bans replied user and publishes ban evidence', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  await bot.handleCommand({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 1, username: 'admin' },
+    message_id: 12,
+    text: '/ban fake support impersonation',
+    reply_to_message: {
+      text: 'DM support admin to verify wallet',
+      from: { id: 55, username: 'fake_support', is_bot: false }
+    }
+  });
+  assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 55));
+  const ban = bot.store.all().find((event) => event.event_type === 'ban_executed');
+  assert.ok(ban);
+  assert.match(JSON.stringify(ban.payload.evidence), /manual \/ban command/);
 });

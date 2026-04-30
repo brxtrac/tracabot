@@ -1,5 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { combineRisk, formatRiskAssessment } from './risk-engine.js';
+import { extractWallets } from './dkg-client.js';
+
+export const TELEGRAM_COMMANDS = [
+  { command: 'scan', description: 'Check a user, wallet, or replied message for scam risk' },
+  { command: 'report', description: 'Report a suspicious user, wallet, or message to DKG' },
+  { command: 'ban', description: 'Ban a replied user and publish ban evidence' },
+  { command: 'stats', description: 'Show recent fraud checks and detections' }
+];
 
 async function telegram(token, method, payload) {
   const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
@@ -57,7 +65,7 @@ export class TelegramShieldBot {
   }
 
   rememberUser(chat, user, context = '') {
-    if (user?.id && user.is_bot !== true) {
+    if (user?.id && !user.label && user.is_bot !== true) {
       this.observedUsers.set(`${chat.id}:${user.id}`, {
         chat,
         user,
@@ -70,7 +78,26 @@ export class TelegramShieldBot {
   targetFromMention(message) {
     const username = (message.text || '').match(/@([A-Za-z0-9_]{3,32})/)?.[1];
     if (!username || /^(tracabot|tracethembot)$/i.test(username)) return null;
-    return { id: '', username };
+    return { id: '', username, kind: 'user' };
+  }
+
+  targetFromWallet(text = '') {
+    const wallet = extractWallets(text)[0];
+    return wallet ? { id: wallet, label: wallet, kind: 'wallet' } : null;
+  }
+
+  commandText(message, command) {
+    return (message.text || '').replace(new RegExp(`^/${command}(?:@\\w+)?\\s*`, 'i'), '').trim();
+  }
+
+  resolveCommandTarget(message, command) {
+    const argText = this.commandText(message, command);
+    const reply = message.reply_to_message;
+    const mentioned = this.targetFromMention(message);
+    const walletTarget = this.targetFromWallet(argText || reply?.text || '');
+    const target = mentioned || walletTarget || (reply ? actorFromMessage(reply) : actorFromMessage(message));
+    const text = [argText, reply?.text || ''].filter(Boolean).join('\n') || message.text || '';
+    return { target, text, reply };
   }
 
   async alertAdmins(message, risk, event) {
@@ -155,18 +182,37 @@ export class TelegramShieldBot {
     const chatId = message.chat.id;
     if (text.startsWith('/stats')) {
       const stats = this.store.stats();
-      await this.send(chatId, `tracabot stats: ${stats.total} local events in 7 days. Types: ${JSON.stringify(stats.byType)}`);
+      await this.send(
+        chatId,
+        [
+          `tracabot stats: ${stats.total} events in 7 days`,
+          `High-confidence findings: ${stats.highConfidence}`,
+          `Event types: ${JSON.stringify(stats.byEventType)}`,
+          `Risk types: ${JSON.stringify(stats.byType)}`
+        ].join('\n')
+      );
       return;
     }
-    if (text.startsWith('/scan') || text.startsWith('/report')) {
-      const targetMessage = message.reply_to_message || message;
-      const mentionedTarget = this.targetFromMention(message);
-      const target = mentionedTarget || actorFromMessage(targetMessage);
-      const targetText = text.replace(/^\/(scan|report)(@\w+)?\s*/i, '') || targetMessage.text || '';
-      const risk = await this.assess({ ...message, from: target }, target, targetText);
-      const event = await this.record('report_submitted', { ...message, from: target }, risk);
-      if (risk.confidence >= this.config.actionThreshold && target.id) await this.applyRiskAction({ ...message, from: target, text: targetText }, risk);
-      await this.send(chatId, `${formatRiskAssessment({ target, risk })} DKG event: ${event.id}`, { reply_to_message_id: message.message_id });
+    if (text.startsWith('/scan')) {
+      const { target, text: targetText } = this.resolveCommandTarget(message, 'scan');
+      const risk = await this.assess({ ...message, from: target, text: targetText }, target, targetText);
+      const event = await this.record('risk_query', { ...message, from: target }, risk);
+      await this.send(chatId, `${formatRiskAssessment({ target, risk })} DKG scan event: ${event.id}`, { reply_to_message_id: message.message_id });
+      return;
+    }
+    if (text.startsWith('/report')) {
+      const { target, text: targetText } = this.resolveCommandTarget(message, 'report');
+      const risk = await this.assess({ ...message, from: target, text: targetText }, target, targetText);
+      const event = await this.record('report_submitted', { ...message, from: target }, {
+        ...risk,
+        evidence: [...risk.evidence, 'manual Telegram report submitted']
+      });
+      if (risk.confidence >= this.config.actionThreshold && target.id && target.kind !== 'wallet') {
+        await this.applyRiskAction({ ...message, from: target, text: targetText }, risk);
+      } else if (risk.confidence >= this.config.actionThreshold) {
+        await this.publishHighConfidenceFinding({ ...message, from: target, text: targetText }, risk);
+      }
+      await this.send(chatId, `${formatRiskAssessment({ target, risk })} Report published to DKG event: ${event.id}`, { reply_to_message_id: message.message_id });
       return;
     }
     if (text.startsWith('/ban')) {
@@ -175,10 +221,27 @@ export class TelegramShieldBot {
         await this.send(chatId, 'Reply to a user message with /ban <reason> so tracabot can preserve evidence.');
         return;
       }
-      const reason = text.replace(/^\/ban(@\w+)?\s*/i, '') || 'admin requested ban';
+      const reason = this.commandText(message, 'ban') || 'admin requested ban';
+      const context = [reason, message.reply_to_message?.text || ''].filter(Boolean).join('\n');
+      const risk = await this.assess({ ...message, from: replyUser, text: context }, replyUser, context);
+      if (!await this.hasBanRights(chatId)) {
+        const event = await this.record('ban_requested_no_rights', { ...message, from: replyUser }, {
+          ...risk,
+          reason,
+          evidence: [...risk.evidence, 'manual /ban requested but bot lacks Telegram ban rights']
+        });
+        await this.alertAdmins({ ...message, from: replyUser, text: context }, risk, event);
+        return;
+      }
       await this.ban(chatId, replyUser.id);
-      const event = await this.record('ban_executed', { ...message, from: replyUser }, { reason, confidence: 100, scam_type: 'admin_action', evidence: [reason] });
-      await this.send(chatId, `Banned ${replyUser.username || replyUser.id}. Logged to DKG Shared Memory event ${event.id}.`);
+      const event = await this.record('ban_executed', { ...message, from: replyUser }, {
+        ...risk,
+        reason,
+        confidence: Math.max(100, risk.confidence),
+        scam_type: risk.scam_type || 'admin_action',
+        evidence: [...risk.evidence, reason, 'manual /ban command']
+      });
+      await this.send(chatId, `Banned ${replyUser.username || replyUser.id}. Published ban evidence to DKG event ${event.id}.`);
     }
   }
 
@@ -251,6 +314,11 @@ export class TelegramShieldBot {
   async run() {
     if (!this.config.telegramToken) throw new Error('TELEGRAM_BOT_TOKEN is required');
     await this.dkg.ensureContextGraph();
+    try {
+      await this.call('setMyCommands', { commands: TELEGRAM_COMMANDS });
+    } catch (error) {
+      console.error(`setMyCommands failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     for (;;) {
       try {
         await this.pollOnce();

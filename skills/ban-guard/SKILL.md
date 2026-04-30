@@ -22,15 +22,13 @@ author: ClawShield Team (template)
 
 ## Supported Commands (in group chats or DM to bot)
 
-- `/ban @username [reason]` or `/ban user_id [reason]` → Immediate ban + DKG log.
+- `/scan [@username|wallet|text]` or reply to a message → Check scam risk and return DKG evidence.
 
-- `/warn @username [message]` → Warn user + log.
+- `/report [@username|wallet|details]` or reply to message → Publish suspicious evidence to DKG Shared Memory.
 
-- `/report @username [details]` or reply to message → Manual report → analyze + log to DKG (no auto-ban).
+- `/ban [reason]` as a reply → Ban the replied user if admin rights are available and publish ban evidence.
 
-- `/scan @username` or reply → Full scam_analyzer run + recommendation.
-
-- `/stats` → Query DKG for community threat summary (top scam types, recent activity, false positive rate).
+- `/stats` → Show recent local fraud checks, high-confidence findings, event types, and risk types.
 
 - `/shield status` → Agent health, DKG connection, protected groups count.
 

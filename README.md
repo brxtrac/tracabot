@@ -16,6 +16,13 @@ The default Context Graph is `claw-shield-intel`. Events are written to DKG v10 
 - Keeps a persistent JSONL audit log for retry, review, and demo workflows.
 - Runs as a normal Node.js service and keeps secrets outside Git.
 
+## Telegram Commands
+
+- `/scan` checks a user, wallet, or replied message for scam risk and replies with DKG evidence.
+- `/report` reports a suspicious user, wallet, or message to DKG Shared Memory; high-confidence reports also publish a reusable fraud finding.
+- `/ban` bans a replied user when the bot has Telegram admin rights and publishes ban evidence to DKG.
+- `/stats` shows recent fraud checks, high-confidence findings, event types, and risk types.
+
 ## DKG v10 Verification
 
 This repository was verified on the local OpenClaw mini PC with:

@@ -6,6 +6,13 @@ Submitted for OriginTrail DKG v10 Bounty Program Round 1 (`cfi-dkgv10-r1`): Work
 
 tracabot is an OpenClaw-compatible Telegram Shieldy-style anti-scam agent. It detects phishing, fake airdrops, support/admin impersonation, and suspicious moderation events, then writes structured scam knowledge to DKG v10 Shared Memory in the `claw-shield-intel` Context Graph.
 
+Telegram commands are registered on startup:
+
+- `/scan`: check a user, wallet, or replied message for scam risk.
+- `/report`: report a suspicious user, wallet, or message to DKG.
+- `/ban`: ban a replied user and publish ban evidence.
+- `/stats`: show recent fraud checks and detections.
+
 ## DKG v10 Fit
 
 - Memory layers: Working Memory and Shared Memory.

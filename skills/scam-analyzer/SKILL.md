@@ -25,7 +25,7 @@ author: ClawShield Team (template)
 - Automatically on every new message in protected groups (configure via agent routing).
 - Automatically on every new Telegram join event and periodic proactive scan of recently observed users.
 
-- On explicit commands: /scan @username or /analyze [message text].
+- On explicit commands: `/scan [@username|wallet|message]`, `/report [@username|wallet|message]`, or reply-based scans.
 - On natural queries such as "@tracabot is @username a fraudster?" or replies asking "is this scam?".
 
 - Before any ban or report action.

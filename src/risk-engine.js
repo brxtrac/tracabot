@@ -31,7 +31,7 @@ export function combineRisk({ analysis, dkgIntel, threshold = 85 }) {
 }
 
 export function formatRiskAssessment({ target, risk }) {
-  const name = target?.username ? `@${target.username}` : target?.id || 'this account';
+  const name = target?.label || (target?.username ? `@${target.username}` : target?.id || 'this account');
   const verdict = risk.confidence >= 85 ? 'HIGH RISK' : risk.confidence >= 60 ? 'REVIEW' : 'LOW RISK';
   const evidence = risk.evidence?.length ? risk.evidence.slice(0, 6).join('; ') : 'No matching DKG evidence or high-confidence pattern found.';
   return `tracabot risk for ${name}: ${verdict} (${risk.confidence}%). Type: ${risk.scam_type}. Evidence: ${evidence}. Recommendation: ${risk.recommended_action}.`;
