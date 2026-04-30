@@ -113,7 +113,3 @@ Restart=always
 RestartSec=5
 User=root
 ```
-
-## Bounty Readiness
-
-TRACaBot is prepared for the DKG v10 bounty phase 1 as a Working Memory + Shared Memory integration for Telegram/OpenClaw anti-fraud intelligence. It uses public DKG interfaces, includes tests for command behavior and abuse controls, verifies DKG read/write flows through `npm run test:commands`, avoids automatic Verified Memory publishing, and keeps bounty registry submission as a later step.
