@@ -9,7 +9,8 @@
   "scripts": {
     "start": "node ./bin/tracabot.js",
     "demo": "node ./scripts/demo-roundtrip.js",
-    "test": "node --test",
+    "test:commands": "node ./scripts/test-command-loop.js",
+    "test": "node --test test/*.test.js",
     "audit:production": "npm audit --omit=dev"
   },
   "keywords": [

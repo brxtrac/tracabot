@@ -21,6 +21,15 @@ function makeBot({ canBan }) {
     async writeEvent(event) {
       return { output: 'written', eventId: event.id };
     },
+    async getStats() {
+      return {
+        source: 'dkg',
+        total: 3,
+        highConfidence: 2,
+        byEventType: { fraud_finding: 1, ban_executed: 1, risk_query: 1 },
+        byRiskType: { impersonation: 2, unknown: 1 }
+      };
+    },
     async ensureContextGraph() {}
   };
   const analyzer = () => ({
@@ -71,7 +80,7 @@ test('new high-risk join alerts admins when bot lacks ban rights', async () => {
     new_chat_members: [{ id: 43, username: 'fake_support2', is_bot: false }]
   });
   assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('admin alert')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Admin heads-up')));
   assert.ok(bot.store.all().some((event) => event.event_type === 'fraud_finding'));
 });
 
@@ -93,8 +102,9 @@ test('/scan checks a wallet without banning', async () => {
     text: '/scan 0x1111111111111111111111111111111111111111'
   });
   assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('DKG scan event')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('HIGH RISK')));
   assert.ok(bot.store.all().some((event) => event.event_type === 'risk_query'));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'fraud_finding'));
 });
 
 test('/report publishes wallet findings without attempting a Telegram ban', async () => {
@@ -126,4 +136,16 @@ test('/ban bans replied user and publishes ban evidence', async () => {
   const ban = bot.store.all().find((event) => event.event_type === 'ban_executed');
   assert.ok(ban);
   assert.match(JSON.stringify(ban.payload.evidence), /manual \/ban command/);
+});
+
+test('/stats pulls DKG aggregate data', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  await bot.handleCommand({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 1, username: 'admin' },
+    message_id: 13,
+    text: '/stats'
+  });
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Last 7 days from DKG')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('2 high-confidence busts')));
 });

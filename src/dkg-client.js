@@ -8,10 +8,21 @@ function literal(value) {
   return JSON.stringify(String(value));
 }
 
+function cleanValue(value = '') {
+  return String(value).replace(/^"/, '').replace(/"$/, '');
+}
+
+function numeric(value = '') {
+  const match = cleanValue(value).match(/\d+/);
+  return match ? Number(match[0]) : 0;
+}
+
 function eventTriples(event) {
   const subject = `${NS}event/${event.id}`;
   const triples = [
     { subject, predicate: 'rdf:type', object: `${NS}${event.event_type}` },
+    { subject, predicate: `${NS}eventId`, object: literal(event.id) },
+    { subject, predicate: `${NS}eventType`, object: literal(event.event_type) },
     { subject, predicate: 'dcterms:created', object: literal(event.timestamp) },
     { subject, predicate: 'dcterms:creator', object: literal(event.agentDid) },
     { subject, predicate: `${NS}telegramChatId`, object: literal(event.chat?.id || '') },
@@ -22,7 +33,7 @@ function eventTriples(event) {
     { subject, predicate: `${NS}evidence`, object: literal(JSON.stringify(event.payload?.evidence || [])) },
     { subject, predicate: `${NS}status`, object: literal('shared_memory') }
   ];
-  if (['fraud_finding', 'ban_executed'].includes(event.event_type)) {
+  if (['fraud_finding', 'ban_executed', 'report_submitted'].includes(event.event_type) || Number(event.payload?.confidence || 0) >= 80) {
     triples.push({ subject, predicate: 'rdf:type', object: 'http://dkg.io/ontology#KnowledgeAsset' });
   }
   for (const wallet of event.payload?.wallets || []) {
@@ -129,6 +140,35 @@ export class DkgClient {
       wallets,
       patterns,
       evidence: [...actorIntel.evidence, ...walletEvidence, ...patternEvidence]
+    };
+  }
+
+  async getStats(days = 7) {
+    const sparql = `SELECT ?s ?eventType ?created ?confidence ?scamType WHERE { GRAPH ?g { ?s <${NS}eventType> ?eventType . OPTIONAL { ?s <dcterms:created> ?created . } OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}scamType> ?scamType . } } } LIMIT 1000`;
+    const bindings = await this.queryBindings(sparql);
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    const recent = bindings.filter((binding) => {
+      if (!binding.created) return true;
+      const createdAt = Date.parse(cleanValue(binding.created));
+      return Number.isNaN(createdAt) || createdAt >= cutoff;
+    });
+    const byEventType = {};
+    const byRiskType = {};
+    let highConfidence = 0;
+    for (const binding of recent) {
+      const eventType = cleanValue(binding.eventType || 'unknown');
+      const scamType = cleanValue(binding.scamType || 'unknown');
+      const confidence = numeric(binding.confidence || '0');
+      byEventType[eventType] = (byEventType[eventType] || 0) + 1;
+      byRiskType[scamType] = (byRiskType[scamType] || 0) + 1;
+      if (confidence >= 80) highConfidence += 1;
+    }
+    return {
+      source: 'dkg',
+      total: recent.length,
+      highConfidence,
+      byEventType,
+      byRiskType
     };
   }
 }

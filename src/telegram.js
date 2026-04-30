@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { combineRisk, formatRiskAssessment } from './risk-engine.js';
+import { combineRisk, formatBanReply, formatReportReply, formatRiskAssessment, formatScanReply, formatStatsReply } from './risk-engine.js';
 import { extractWallets } from './dkg-client.js';
 
 export const TELEGRAM_COMMANDS = [
@@ -102,7 +102,7 @@ export class TelegramShieldBot {
 
   async alertAdmins(message, risk, event) {
     const text = [
-      'tracabot admin alert: high-confidence fraud risk and no ban rights available.',
+      '🚨 Admin heads-up: high-confidence fraud risk, but I do not have ban rights here.',
       formatRiskAssessment({ target: actorFromMessage(message), risk }),
       `DKG event: ${event.id}`,
       message.text ? `Context: ${message.text.slice(0, 500)}` : ''
@@ -127,12 +127,12 @@ export class TelegramShieldBot {
       user: actorFromMessage(message),
       payload
     };
-    this.store.append(event);
     try {
       event.dkg = await this.dkg.writeEvent(event);
     } catch (error) {
       event.dkg_error = error instanceof Error ? error.message : String(error);
     }
+    this.store.append(event);
     return event;
   }
 
@@ -181,23 +181,16 @@ export class TelegramShieldBot {
     const text = message.text || '';
     const chatId = message.chat.id;
     if (text.startsWith('/stats')) {
-      const stats = this.store.stats();
-      await this.send(
-        chatId,
-        [
-          `tracabot stats: ${stats.total} events in 7 days`,
-          `High-confidence findings: ${stats.highConfidence}`,
-          `Event types: ${JSON.stringify(stats.byEventType)}`,
-          `Risk types: ${JSON.stringify(stats.byType)}`
-        ].join('\n')
-      );
+      const stats = await this.dkg.getStats(7);
+      await this.send(chatId, formatStatsReply(stats));
       return;
     }
     if (text.startsWith('/scan')) {
       const { target, text: targetText } = this.resolveCommandTarget(message, 'scan');
       const risk = await this.assess({ ...message, from: target, text: targetText }, target, targetText);
       const event = await this.record('risk_query', { ...message, from: target }, risk);
-      await this.send(chatId, `${formatRiskAssessment({ target, risk })} DKG scan event: ${event.id}`, { reply_to_message_id: message.message_id });
+      const finding = risk.confidence >= 80 ? await this.publishHighConfidenceFinding({ ...message, from: target, text: targetText }, risk) : null;
+      await this.send(chatId, formatScanReply({ target, risk, eventId: event.id, findingId: finding?.id }), { reply_to_message_id: message.message_id });
       return;
     }
     if (text.startsWith('/report')) {
@@ -212,7 +205,7 @@ export class TelegramShieldBot {
       } else if (risk.confidence >= this.config.actionThreshold) {
         await this.publishHighConfidenceFinding({ ...message, from: target, text: targetText }, risk);
       }
-      await this.send(chatId, `${formatRiskAssessment({ target, risk })} Report published to DKG event: ${event.id}`, { reply_to_message_id: message.message_id });
+      await this.send(chatId, formatReportReply(event.id), { reply_to_message_id: message.message_id });
       return;
     }
     if (text.startsWith('/ban')) {
@@ -241,7 +234,7 @@ export class TelegramShieldBot {
         scam_type: risk.scam_type || 'admin_action',
         evidence: [...risk.evidence, reason, 'manual /ban command']
       });
-      await this.send(chatId, `Banned ${replyUser.username || replyUser.id}. Published ban evidence to DKG event ${event.id}.`);
+      await this.send(chatId, formatBanReply(replyUser, event.id));
     }
   }
 
@@ -260,7 +253,8 @@ export class TelegramShieldBot {
       const target = this.targetFromMention(message) || actorFromMessage(targetMessage);
       const risk = await this.assess({ ...message, from: target }, target, `${message.text}\n${targetMessage.text || ''}`);
       const event = await this.record('risk_query', { ...message, from: target }, risk);
-      await this.send(message.chat.id, `${formatRiskAssessment({ target, risk })} DKG event: ${event.id}`, { reply_to_message_id: message.message_id });
+      const finding = risk.confidence >= 80 ? await this.publishHighConfidenceFinding({ ...message, from: target }, risk) : null;
+      await this.send(message.chat.id, formatScanReply({ target, risk, eventId: event.id, findingId: finding?.id }), { reply_to_message_id: message.message_id });
       return;
     }
     const user = actorFromMessage(message);
