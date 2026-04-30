@@ -21,7 +21,9 @@ export function combineRisk({ analysis, dkgIntel, threshold = 85 }) {
     evidence.push(`Scam patterns checked: ${dkgIntel.patterns.join(', ')}`);
   }
   for (const item of dkgEvidence.slice(0, 3)) {
-    evidence.push(`DKG evidence: ${item.source || item.s || item.wallet || item.pattern}`);
+    const ref = item.ual ? `UAL ${item.ual}` : 'Shared Memory';
+    const event = item.eventId ? ` event ${item.eventId}` : '';
+    evidence.push(`DKG evidence: ${ref}${event}`);
   }
 
   const confidence = Math.max(analysis.confidence || 0, dkgScore);
@@ -29,6 +31,8 @@ export function combineRisk({ analysis, dkgIntel, threshold = 85 }) {
   return {
     is_scam: highConfidence || analysis.is_scam,
     confidence,
+    local_confidence: analysis.confidence || 0,
+    dkg_confidence: dkgScore,
     scam_type: analysis.scam_type || 'unknown',
     evidence,
     recommended_action: highConfidence ? 'ban' : analysis.recommended_action,
@@ -46,6 +50,15 @@ export function formatRiskAssessment({ target, risk }) {
   return `tracabot risk for ${name}: ${verdict} (${risk.confidence}%). Type: ${risk.scam_type}. Evidence: ${evidence}. Recommendation: ${risk.recommended_action}.`;
 }
 
+export function formatDkgReference(event) {
+  if (!event) return '';
+  if (event.dkg?.ual) {
+    const share = event.dkg.shareOperation ? ` share ${event.dkg.shareOperation}` : '';
+    return `${event.dkg.ual} event ${event.id}${share}`;
+  }
+  return event.id || '';
+}
+
 export function formatScanReply({ target, risk, eventId = '', findingId = '' }) {
   const name = displayName(target);
   if (risk.confidence < 60) {
@@ -58,8 +71,12 @@ export function formatScanReply({ target, risk, eventId = '', findingId = '' }) 
   return `⚠️ ${name} needs a closer look (${risk.confidence}% risk). Evidence is thin but not nothing. Event: ${eventId}`;
 }
 
-export function formatReportReply(eventId) {
-  return `✅ Reported. I've published the details + evidence to DKG v10 for the whole network to see. Thanks for helping keep the community safe! Event ID: ${eventId}`;
+export function formatReportReply(event, decision = null) {
+  if (decision && decision.decision !== 'accepted') {
+    return `⚠️ Report not published to DKG: ${decision.reason}. Add concrete evidence by replying to the suspicious message or include the wallet/link/text that should be checked.`;
+  }
+  const ref = formatDkgReference(event);
+  return `✅ Reported. Evidence published to DKG Shared Memory. UAL: ${ref}`;
 }
 
 export function formatBanReply(target, eventId) {
@@ -67,15 +84,37 @@ export function formatBanReply(target, eventId) {
   return `🔨 Banned ${name} + evidence logged to DKG v10 (event ID: ${eventId}). This one won't bother us again.`;
 }
 
+function labelStatKey(key = '') {
+  return String(key)
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatStatList(values = {}, empty = 'None') {
+  const entries = Object.entries(values)
+    .filter(([, count]) => Number(count) > 0)
+    .sort((a, b) => Number(b[1]) - Number(a[1]) || a[0].localeCompare(b[0]));
+  if (!entries.length) return empty;
+  return entries.map(([key, count]) => `${labelStatKey(key)}: ${count}`).join(', ');
+}
+
 export function formatStatsReply(stats) {
   const high = stats.highConfidence || 0;
-  if (!stats.total) {
-    return '📊 Last 7 days: 0 high-confidence busts, DKG vault staying strong. All quiet on the scam front.';
+  const total = stats.total || 0;
+  if (!total) {
+    return '🛡️ Last 7 days from DKG: LOW RISK. No fraud intel events found. No high-confidence findings, reports, or bans in Shared Memory.';
   }
+  const review = Math.max(0, total - high);
+  const highRate = Math.round((high / total) * 100);
+  const verdict = high >= 10 || highRate >= 50 ? 'HIGH ACTIVITY' : high >= 3 ? 'REVIEW' : 'LOW ACTIVITY';
+  const action = high
+    ? 'Review recent high-confidence findings and ban evidence before promoting anything to Verified Memory.'
+    : 'No high-confidence action needed right now.';
   return [
-    `📊 Last 7 days from DKG: ${high} high-confidence busts, ${stats.total} fraud intel events.`,
-    `Event mix: ${JSON.stringify(stats.byEventType || {})}`,
-    `Risk mix: ${JSON.stringify(stats.byRiskType || {})}`,
-    high ? 'DKG vault has receipts.' : 'All quiet on the scam front.'
+    `📊 DKG stats for the last 7 days: ${verdict}.`,
+    `Signals: ${high} high-confidence / ${total} total fraud intel events (${highRate}%). ${review} review-level or audit events.`,
+    `Events: ${formatStatList(stats.byEventType)}`,
+    `Risk types: ${formatStatList(stats.byRiskType, 'No risk types recorded')}`,
+    `Recommendation: ${action}`
   ].join('\n');
 }

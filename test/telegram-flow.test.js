@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { TELEGRAM_COMMANDS, TelegramShieldBot } from '../src/telegram.js';
 import { EventStore } from '../src/store.js';
 
-function makeBot({ canBan }) {
+function makeBot({ canBan, trustedUserIds = [1] }) {
   const calls = [];
   const dkg = {
     async queryRiskIndicators() {
@@ -19,7 +19,12 @@ function makeBot({ canBan }) {
       };
     },
     async writeEvent(event) {
-      return { output: 'written', eventId: event.id };
+      return {
+        output: 'written',
+        eventId: event.id,
+        ual: 'did:dkg:context-graph:claw-shield-intel/_shared_memory',
+        shareOperation: `swm-${event.id}`
+      };
     },
     async getStats() {
       return {
@@ -55,7 +60,10 @@ function makeBot({ canBan }) {
   bot.call = async (method, payload) => {
     calls.push({ method, payload });
     if (method === 'getMe') return { id: 999, username: 'tracethembot' };
-    if (method === 'getChatMember') return { status: canBan ? 'administrator' : 'member', can_restrict_members: canBan };
+    if (method === 'getChatMember') {
+      if (payload.user_id === 999) return { status: canBan ? 'administrator' : 'member', can_restrict_members: canBan };
+      return { status: trustedUserIds.includes(payload.user_id) ? 'administrator' : 'member', can_restrict_members: false };
+    }
     return { ok: true };
   };
   return { bot, calls };
@@ -132,6 +140,38 @@ test('/report publishes wallet findings without attempting a Telegram ban', asyn
   assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
   assert.ok(bot.store.all().some((event) => event.event_type === 'report_submitted'));
   assert.ok(bot.store.all().some((event) => event.event_type === 'fraud_finding'));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('UAL: did:dkg:context-graph:claw-shield-intel/_shared_memory')));
+});
+
+test('/report without target evidence is local-only and does not pollute DKG', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  await bot.handleCommand({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 86, username: 'BRX86' },
+    message_id: 16,
+    text: '/report'
+  });
+  const rejected = bot.store.all().find((event) => event.event_type === 'report_rejected');
+  assert.ok(rejected);
+  assert.equal(rejected.local_only, true);
+  assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Report not published to DKG')));
+});
+
+test('/report duplicate from non-admin is rejected before DKG write', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const message = {
+    chat: { id: -100, title: 'demo' },
+    from: { id: 77, username: 'reporter' },
+    message_id: 17,
+    text: '/report @fake_support urgent official support admin says verify wallet now'
+  };
+  await bot.handleCommand(message);
+  await bot.handleCommand({ ...message, message_id: 18 });
+  const reports = bot.store.all();
+  assert.ok(reports.some((event) => event.event_type === 'report_submitted'));
+  assert.ok(reports.some((event) => event.event_type === 'report_rejected' && event.local_only));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('duplicate report')));
 });
 
 test('/ban bans replied user and publishes ban evidence', async () => {
@@ -156,13 +196,59 @@ test('/ban with a plain name does not ban the sender without a replied user', as
   const { bot, calls } = makeBot({ canBan: true });
   await bot.handleCommand({
     chat: { id: -100, title: 'demo' },
-    from: { id: 86, username: 'BRX86' },
+    from: { id: 1, username: 'admin' },
     message_id: 15,
     text: '/ban Dmitry'
   });
   assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
   assert.ok(bot.store.all().some((event) => event.event_type === 'ban_requested_no_reply' && event.user.username === 'Dmitry'));
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('needs a replied message')));
+});
+
+test('/ban rejects non-admin requesters even when the bot can ban', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  await bot.handleCommand({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 86, username: 'BRX86' },
+    message_id: 19,
+    text: '/ban fake support impersonation',
+    reply_to_message: {
+      text: 'DM support admin to verify wallet',
+      from: { id: 55, username: 'fake_support', is_bot: false }
+    }
+  });
+  assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
+  assert.ok(bot.store.all().some((event) => event.event_type === 'ban_rejected_unauthorized' && event.local_only));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('/ban is restricted')));
+});
+
+test('configured admin usernames match with or without @ and case differences', async () => {
+  const { bot } = makeBot({ canBan: true, trustedUserIds: [] });
+  bot.config.adminIds = new Set(['brx86']);
+  assert.equal(bot.isConfiguredAdmin({ id: 86, username: 'BRX86' }), true);
+  assert.equal(bot.isConfiguredAdmin({ id: 87, username: 'not_admin' }), false);
+});
+
+test('telegram command evidence is bounded before analysis', async () => {
+  const { bot } = makeBot({ canBan: true });
+  let analyzedText = '';
+  bot.analyzer = ({ text }) => {
+    analyzedText = text;
+    return {
+      is_scam: false,
+      confidence: 0,
+      scam_type: 'other',
+      evidence: [],
+      recommended_action: 'ignore'
+    };
+  };
+  await bot.handleCommand({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 1, username: 'admin' },
+    message_id: 20,
+    text: `/scan ${'x'.repeat(6000)}`
+  });
+  assert.equal(analyzedText.length <= 4096, true);
 });
 
 test('/stats pulls DKG aggregate data', async () => {
@@ -173,6 +259,7 @@ test('/stats pulls DKG aggregate data', async () => {
     message_id: 13,
     text: '/stats'
   });
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Last 7 days from DKG')));
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('2 high-confidence busts')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('DKG stats for the last 7 days')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('2 high-confidence / 3 total fraud intel events')));
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('{"fraud_finding"')), false);
 });

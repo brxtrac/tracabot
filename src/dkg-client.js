@@ -3,6 +3,9 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 const NS = 'https://tracabot.org/ontology#';
+const MAX_EVIDENCE_ITEMS = 12;
+const MAX_EVIDENCE_LENGTH = 500;
+const MAX_INDICATORS = 20;
 
 function literal(value) {
   return JSON.stringify(String(value));
@@ -17,8 +20,39 @@ function numeric(value = '') {
   return match ? Number(match[0]) : 0;
 }
 
+function eventIdFromSource(source = '') {
+  return cleanValue(source).split('/').pop() || '';
+}
+
+function boundedList(values = [], limit = MAX_INDICATORS, itemLength = 160) {
+  return values
+    .filter((value) => value !== null && value !== undefined)
+    .slice(0, limit)
+    .map((value) => String(value).slice(0, itemLength));
+}
+
+function parseWriteOutput(output = '') {
+  const shareOperation = output.match(/Share operation:\s*(\S+)/)?.[1] || '';
+  const graph = output.match(/Graph:\s*(\S+)/)?.[1] || '';
+  return {
+    shareOperation,
+    graph,
+    ual: graph || ''
+  };
+}
+
+function isCredibleRiskBinding(binding = {}) {
+  const eventType = cleanValue(binding.eventType || '');
+  const confidence = numeric(binding.confidence || '0');
+  const localConfidence = numeric(binding.localConfidence || '0');
+  if (eventType === 'ban_executed') return confidence >= 80;
+  if (['fraud_finding', 'report_submitted'].includes(eventType)) return confidence >= 80 && localConfidence >= 60;
+  return false;
+}
+
 function eventTriples(event) {
   const subject = `${NS}event/${event.id}`;
+  const evidence = boundedList(event.payload?.evidence || [], MAX_EVIDENCE_ITEMS, MAX_EVIDENCE_LENGTH);
   const triples = [
     { subject, predicate: 'rdf:type', object: `${NS}${event.event_type}` },
     { subject, predicate: `${NS}eventId`, object: literal(event.id) },
@@ -28,18 +62,23 @@ function eventTriples(event) {
     { subject, predicate: `${NS}telegramChatId`, object: literal(event.chat?.id || '') },
     { subject, predicate: `${NS}telegramUserId`, object: literal(event.user?.id || '') },
     { subject, predicate: `${NS}username`, object: literal(event.user?.username || '') },
+    { subject, predicate: `${NS}reporterTelegramUserId`, object: literal(event.payload?.reporter?.id || '') },
+    { subject, predicate: `${NS}reporterUsername`, object: literal(event.payload?.reporter?.username || '') },
+    { subject, predicate: `${NS}reportDecision`, object: literal(event.payload?.report_decision || '') },
     { subject, predicate: `${NS}confidence`, object: literal(event.payload?.confidence ?? '') },
+    { subject, predicate: `${NS}localConfidence`, object: literal(event.payload?.local_confidence ?? '') },
+    { subject, predicate: `${NS}dkgConfidence`, object: literal(event.payload?.dkg_confidence ?? '') },
     { subject, predicate: `${NS}scamType`, object: literal(event.payload?.scam_type || '') },
-    { subject, predicate: `${NS}evidence`, object: literal(JSON.stringify(event.payload?.evidence || [])) },
+    { subject, predicate: `${NS}evidence`, object: literal(JSON.stringify(evidence)) },
     { subject, predicate: `${NS}status`, object: literal('shared_memory') }
   ];
-  if (['fraud_finding', 'ban_executed', 'report_submitted'].includes(event.event_type) || Number(event.payload?.confidence || 0) >= 80) {
+  if (['fraud_finding', 'ban_executed', 'report_submitted'].includes(event.event_type)) {
     triples.push({ subject, predicate: 'rdf:type', object: 'http://dkg.io/ontology#KnowledgeAsset' });
   }
-  for (const wallet of event.payload?.wallets || []) {
+  for (const wallet of boundedList(event.payload?.wallets || [])) {
     triples.push({ subject, predicate: `${NS}wallet`, object: literal(wallet) });
   }
-  for (const pattern of event.payload?.patterns || []) {
+  for (const pattern of boundedList(event.payload?.patterns || [])) {
     triples.push({ subject, predicate: `${NS}scamPattern`, object: literal(pattern) });
   }
   if (event.payload?.community_verified_flag) {
@@ -83,7 +122,8 @@ export class DkgClient {
       '--triples',
       triples
     ], { timeout: 30000, maxBuffer: 1024 * 1024 });
-    return { mode: 'shared-memory', output: stdout.trim(), triples: eventTriples(event) };
+    const output = stdout.trim();
+    return { mode: 'shared-memory', output, ...parseWriteOutput(output), subject: `${NS}event/${event.id}`, eventId: event.id, triples: eventTriples(event) };
   }
 
   async queryBindings(sparql) {
@@ -97,19 +137,24 @@ export class DkgClient {
       ], { timeout: 20000, maxBuffer: 1024 * 1024 });
       const parsed = JSON.parse(stdout);
       return parsed.bindings || [];
-    } catch {
+    } catch (error) {
+      console.error(`DKG query failed: ${error instanceof Error ? error.message : String(error)}`);
       return [];
     }
   }
 
   async queryActor(username) {
     if (!username) return { reportsAcrossCommunities: 0, evidence: [] };
-    const sparql = `SELECT ?s ?type ?confidence ?evidence WHERE { GRAPH ?g { ?s <${NS}username> ${literal(username)} . OPTIONAL { ?s <${NS}scamType> ?type . } OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}evidence> ?evidence . } } } LIMIT 10`;
+    const sparql = `SELECT ?g ?s ?eventType ?type ?confidence ?localConfidence ?evidence WHERE { GRAPH ?g { ?s <${NS}username> ${literal(username)} . OPTIONAL { ?s <${NS}eventType> ?eventType . } OPTIONAL { ?s <${NS}scamType> ?type . } OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}localConfidence> ?localConfidence . } OPTIONAL { ?s <${NS}evidence> ?evidence . } } } LIMIT 25`;
     const bindings = await this.queryBindings(sparql);
+    const credible = bindings.filter(isCredibleRiskBinding);
     return {
-      reportsAcrossCommunities: bindings.length,
-      evidence: bindings.map((binding) => ({
+      reportsAcrossCommunities: credible.length,
+      evidence: credible.map((binding) => ({
         source: binding.s,
+        eventId: eventIdFromSource(binding.s),
+        ual: cleanValue(binding.g || ''),
+        eventType: cleanValue(binding.eventType || ''),
         type: binding.type,
         confidence: binding.confidence,
         evidence: binding.evidence
@@ -123,23 +168,25 @@ export class DkgClient {
     const actorIntel = await this.queryActor(username);
     const walletEvidence = [];
     for (const wallet of wallets) {
-      const sparql = `SELECT ?s ?confidence ?evidence WHERE { GRAPH ?g { ?s <${NS}wallet> ${literal(wallet)} . OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}evidence> ?evidence . } } } LIMIT 10`;
+      const sparql = `SELECT ?g ?s ?eventType ?confidence ?localConfidence ?evidence WHERE { GRAPH ?g { ?s <${NS}wallet> ${literal(wallet)} . OPTIONAL { ?s <${NS}eventType> ?eventType . } OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}localConfidence> ?localConfidence . } OPTIONAL { ?s <${NS}evidence> ?evidence . } } } LIMIT 10`;
       const bindings = await this.queryBindings(sparql);
-      for (const binding of bindings) walletEvidence.push({ wallet, ...binding });
+      for (const binding of bindings) walletEvidence.push({ wallet, ...binding, eventId: eventIdFromSource(binding.s), ual: cleanValue(binding.g || '') });
     }
     const patternEvidence = [];
     for (const pattern of patterns) {
-      const sparql = `SELECT ?s ?confidence ?evidence WHERE { GRAPH ?g { ?s <${NS}scamPattern> ${literal(pattern)} . OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}evidence> ?evidence . } } } LIMIT 10`;
+      const sparql = `SELECT ?g ?s ?eventType ?confidence ?localConfidence ?evidence WHERE { GRAPH ?g { ?s <${NS}scamPattern> ${literal(pattern)} . OPTIONAL { ?s <${NS}eventType> ?eventType . } OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}localConfidence> ?localConfidence . } OPTIONAL { ?s <${NS}evidence> ?evidence . } } } LIMIT 10`;
       const bindings = await this.queryBindings(sparql);
-      for (const binding of bindings) patternEvidence.push({ pattern, ...binding });
+      for (const binding of bindings) patternEvidence.push({ pattern, ...binding, eventId: eventIdFromSource(binding.s), ual: cleanValue(binding.g || '') });
     }
-    const riskScore = Math.min(100, actorIntel.reportsAcrossCommunities * 20 + walletEvidence.length * 25 + patternEvidence.length * 10);
+    const credibleWalletEvidence = walletEvidence.filter(isCredibleRiskBinding);
+    const crediblePatternEvidence = patternEvidence.filter(isCredibleRiskBinding);
+    const riskScore = Math.min(100, actorIntel.reportsAcrossCommunities * 25 + credibleWalletEvidence.length * 25 + crediblePatternEvidence.length * 10);
     return {
       riskScore,
       reportsAcrossCommunities: actorIntel.reportsAcrossCommunities,
       wallets,
       patterns,
-      evidence: [...actorIntel.evidence, ...walletEvidence, ...patternEvidence]
+      evidence: [...actorIntel.evidence, ...credibleWalletEvidence, ...crediblePatternEvidence]
     };
   }
 

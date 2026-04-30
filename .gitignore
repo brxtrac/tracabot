@@ -5,5 +5,8 @@ node_modules/
 data/
 *.log
 *.tgz
+*.bundle
+*.patch
 coverage/
 .DS_Store
+.npmrc

@@ -15,6 +15,18 @@ tracabot contacts:
 
 The integration writes scam detections, reports, and moderation actions to DKG v10 Shared Memory using `dkg shared-memory write` and creates or subscribes to the configured Context Graph with `dkg context-graph create`. It does not call Verified Memory `PUBLISH` by default. Promotion to Verified Memory is reserved for curator-controlled workflows.
 
+## Telegram Moderation Controls
+
+- Manual `/ban` requires the sender to be listed in `TRACABOT_ADMINS` or to be a Telegram chat admin.
+- Non-admin `/report` calls can publish accepted evidence, but they cannot directly execute a Telegram ban.
+- Rejected and weak reports are stored locally only and are not written to DKG Shared Memory.
+- Duplicate reports and reporter bursts are rate-limited to reduce abuse.
+- Telegram message and evidence fields are bounded before analysis, local logging, and DKG writes.
+
+## Data Handling
+
+The bot stores Telegram chat/user identifiers and structured fraud evidence in its local JSONL audit log. Do not commit files from `data/`. DKG Shared Memory writes are intended for scam evidence, moderation actions, and provenance metadata only. Local `.env` files should be permissioned to the service user only.
+
 ## Dynamic Code
 
 No remote code loading, `eval`, preinstall scripts, or postinstall scripts are used.

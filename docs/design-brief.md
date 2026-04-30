@@ -1,8 +1,8 @@
 # Design Brief: tracabot
 
 Submitted for: OriginTrail DKG v10 Bounty Program Round 1  
-Author: valcyclovir  
-Repository: https://github.com/valcyclovir/tracabot  
+Author: brxtrac  
+Repository: https://github.com/brxtrac/tracabot  
 Tag: cfi-dkgv10-r1
 
 ## Problem
@@ -98,10 +98,10 @@ No preinstall or postinstall scripts are used. No dynamic code loading is used. 
 
 ## Demo
 
-The repository includes `npm run demo`, which writes a realistic scam detection into DKG v10 Shared Memory without needing a Telegram group. On the target OpenClaw mini PC it wrote 10/10 quads to `did:dkg:context-graph:claw-shield-intel/_shared_memory`, share operation `swm-1777560651535-gq4j3e9f`, and the event was queried back successfully.
+The repository includes `npm run demo`, which writes a realistic scam detection into DKG v10 Shared Memory without needing a Telegram group. It also includes `npm run test:commands`, which exercises `/stats`, `/scan`, `/report`, `/ban`, writes the resulting events to `did:dkg:context-graph:claw-shield-intel/_shared_memory`, and queries the new evidence back from DKG Shared Memory.
 
 ## Maintenance
 
-Maintainer: valcyclovir  
+Maintainer: brxtrac  
 Support window: at least six months after registry acceptance  
 License: MIT

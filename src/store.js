@@ -16,7 +16,14 @@ export class EventStore {
     return readFileSync(this.path, 'utf8')
       .split('\n')
       .filter(Boolean)
-      .map((line) => JSON.parse(line));
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
   }
 
   stats(days = 7) {

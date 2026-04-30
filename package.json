@@ -23,7 +23,7 @@
     "shared-memory",
     "context-graph"
   ],
-  "author": "valcyclovir <swaggrenox@gmail.com>",
+  "author": "brxtrac",
   "license": "MIT",
   "engines": {
     "node": ">=22.20.0"

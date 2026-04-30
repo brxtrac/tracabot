@@ -1,79 +1,75 @@
-# tracabot
+# TRACaBot
 
-tracabot is an OpenClaw-compatible Telegram anti-scam agent for OriginTrail DKG v10. It watches Telegram communities, detects scam and impersonation patterns, stores a local audit log, and writes scam knowledge to a DKG v10 Context Graph through the public `dkg` CLI.
+TRACaBot is an OpenClaw + Telegram + OriginTrail DKG v10 Shieldy-style anti-scam bot. It monitors Telegram communities, detects scam patterns, records local working memory, and writes evidence-backed fraud intelligence to DKG v10 Shared Memory so other communities and agents can query reusable scam context.
 
-The default Context Graph is `claw-shield-intel`. Events are written to DKG v10 Shared Memory with provenance fields that can later be promoted through Curator-controlled Verified Memory workflows.
+The default Context Graph is `claw-shield-intel`. TRACaBot writes Shared Memory events with provenance, local/DKG confidence, reporter metadata, scam type, wallet/pattern indicators, and moderation outcomes. Verified Memory `PUBLISH` is intentionally not automatic; high-confidence events are shaped for later curator review.
 
-## What It Does
+## Why It Exists
 
-- Detects Telegram scam patterns: fake airdrops, urgency language, phishing links, and admin/support impersonation.
-- Supports `/scan`, `/report`, `/ban`, `/stats`, reply-thread risk checks, and `@tracabot is @username a fraudster?`.
-- Checks every observed message and Telegram join event against DKG v10 Shared Memory before deciding.
-- Applies the Shieldy action path at 85% confidence: ban immediately when the bot has Telegram admin rights, otherwise alert admins with DKG evidence and message context.
-- Proactively rescans observed users on a configurable interval.
-- Writes scam detections, reports, and moderation actions to DKG v10 Shared Memory with `dkg shared-memory write`.
-- Queries DKG Shared Memory before scoring a user, wallet, or scam pattern, so reports from other communities can raise confidence.
-- Keeps a persistent JSONL audit log for retry, review, and demo workflows.
-- Runs as a normal Node.js service and keeps secrets outside Git.
+Telegram scam moderation usually stays trapped inside one chat. TRACaBot turns each meaningful scan, report, and moderation action into structured fraud knowledge that can be queried across communities. A new group can ask whether a username, wallet, or scam pattern has appeared elsewhere before deciding whether to warn, report, or ban.
 
-## Telegram Commands
+## Commands
 
-- `/scan` checks a user, wallet, or replied message for scam risk and replies with DKG evidence.
-- `/report` reports a suspicious user, wallet, or message to DKG Shared Memory; high-confidence reports also publish a reusable fraud finding.
-- `/ban` bans a replied user when the bot has Telegram admin rights and publishes ban evidence to DKG.
-- `/stats` shows recent fraud checks, high-confidence findings, event types, and risk types.
+- `/scan` checks a user, wallet, or replied message against local heuristics and DKG Shared Memory, then returns a friendly risk verdict.
+- `/report` accepts evidence-backed reports, applies duplicate/rate-limit/reporter checks, and writes accepted reports to DKG Shared Memory.
+- `/ban` is restricted to configured admins or Telegram chat admins; it bans replied users only when the bot has Telegram ban rights and logs full evidence.
+- `/stats` returns readable DKG aggregate activity for recent fraud events, high-confidence findings, risk types, and action guidance.
 
-## DKG v10 Verification
+## DKG v10 Integration
 
-This repository was verified on the local OpenClaw mini PC with:
+TRACaBot uses the public `dkg` CLI only:
 
-```bash
-dkg --version
-# 10.0.0-rc.1-dev.1777554347.b80a299
+- `dkg context-graph create` to ensure the configured Context Graph exists.
+- `dkg shared-memory write` to write reports, findings, and moderation evidence.
+- `dkg query --include-shared-memory` to read cross-community evidence before scoring a target.
 
-dkg status
-# Node: BRX, Role: edge, PeerId: 12D3KooWQm9sJCkUTU7kRXsNQttHaYTQV4ZjR8QaBNVUMqVMLC6R
+The bot separates local analysis confidence from DKG confidence. Report-only evidence does not automatically snowball into high-confidence bans; DKG evidence must be credible, and non-admin reports cannot directly trigger a Telegram ban.
 
-npm run demo
-# Writing to shared memory: 10/10 quads
-# Share operation: swm-1777560651535-gq4j3e9f
-# Graph: did:dkg:context-graph:claw-shield-intel/_shared_memory
-```
+## Security Model
 
-The demo event was queried back from Shared Memory:
+- Secrets stay in `.env` or service environment files and are ignored by Git.
+- Manual `/ban` requires a configured admin or Telegram chat admin.
+- `/report` includes duplicate checks, reporter rate limits, self-report rejection, and evidence requirements.
+- Telegram API calls have request timeouts.
+- DKG writes use `execFile`, not shell interpolation.
+- Accepted DKG evidence is structured and bounded; rejected/weak reports are local-only.
+- Verified Memory publishing is curator-controlled and not automatic.
 
-```json
-{
-  "s": "https://tracabot.org/ontology#event/2158c19a-1168-45f4-a79e-0ac9a35379fc",
-  "type": "\"impersonation\""
-}
-```
+## Requirements
+
+- Node.js `>=22.20.0`
+- OriginTrail DKG v10 CLI
+- Running DKG v10 node or OpenClaw DKG setup
+- Telegram bot token from BotFather
+
+Useful references:
+
+- OriginTrail docs: https://docs.origintrail.io/
+- DKG key concepts and UALs: https://docs.origintrail.io/dkg-key-concepts
+- DKG agent setup and services: https://docs.origintrail.io/
+- OpenClaw project: https://github.com/openclaw/openclaw
+- Bounties & rewards: https://docs.origintrail.io/contribute-to-the-dkg/bounties-and-rewards
+- Future integration registry PR target: https://github.com/OriginTrail/dkg-integrations
 
 ## Install
 
-Prerequisites:
-
-- Node.js 22.20.0 or newer.
-- DKG v10 CLI installed: `npm install -g @origintrail-official/dkg`.
-- A running DKG v10 node: `dkg start`.
-- Telegram bot token from BotFather.
-- OpenClaw if you want the OpenClaw memory adapter enabled.
-
 ```bash
-git clone https://github.com/valcyclovir/tracabot.git
+git clone https://github.com/brxtrac/tracabot.git
 cd tracabot
-npm install --package-lock-only
+npm install
 cp .env.example .env
 ```
 
-Edit `.env` locally:
+Edit `.env`:
 
 ```bash
-TELEGRAM_BOT_TOKEN=...
+TELEGRAM_BOT_TOKEN=your-bot-token
+TRACABOT_ADMINS=123456789,@your_admin_username
 TRACABOT_CONTEXT_GRAPH=claw-shield-intel
 TRACABOT_AUTO_BAN=true
 TRACABOT_ACTION_THRESHOLD=85
 TRACABOT_PROACTIVE_SCAN_MINUTES=30
+TRACABOT_TELEGRAM_TIMEOUT_MS=30000
 TRACABOT_STORE_PATH=./data/tracabot-events.jsonl
 ```
 
@@ -83,58 +79,43 @@ Start manually:
 npm start
 ```
 
-Run the DKG write demo without Telegram:
+Run the DKG write/read demo without Telegram:
 
 ```bash
 npm run demo
 ```
 
+Run tests:
+
+```bash
+npm test
+npm audit --omit=dev
+npm run test:commands
+```
+
 ## OpenClaw Setup
 
-The official DKG v10 OpenClaw setup command was used on the target server:
+On the OpenClaw mini PC, the DKG v10 OpenClaw setup command can be used before running TRACaBot:
 
 ```bash
 dkg openclaw setup --workspace /root/.openclaw/workspace --name tracabot --port 9200 --no-fund
 ```
 
-It installed the DKG node skill into the OpenClaw workspace, enabled `adapter-openclaw`, and set `plugins.slots.memory` to `adapter-openclaw`.
-
-## Service Deployment
-
-The deployed OpenClaw mini PC runs:
-
-```bash
-systemctl status tracabot.service
-```
-
-with:
+Example systemd unit:
 
 ```ini
-WorkingDirectory=/root/claw-shield-dkg-starter
-EnvironmentFile=/root/claw-shield-dkg-starter/.env
-ExecStart=/usr/bin/node /root/claw-shield-dkg-starter/bin/tracabot.js
+[Service]
+Type=simple
+WorkingDirectory=/root/tracabot
+EnvironmentFile=/root/tracabot/.env
+ExecStart=/usr/bin/node /root/tracabot/bin/tracabot.js
 Restart=always
+RestartSec=5
+User=root
 ```
 
-## Security
+## Bounty Readiness
 
-- No token or wallet secret is committed.
-- No runtime dependencies, no install scripts, no dynamic code loading.
-- Network egress is limited to `api.telegram.org` and the configured DKG node.
-- DKG writes use `context-graph create` and `shared-memory write`; DKG reads use `query --include-shared-memory`.
-- `PUBLISH` to Verified Memory is intentionally not automatic; it belongs to Curator-controlled promotion.
+TRACaBot is prepared for the DKG v10 bounty phase 1 as a Working Memory + Shared Memory integration for Telegram/OpenClaw anti-fraud intelligence. It uses public DKG interfaces, includes tests for command behavior and abuse controls, verifies DKG read/write flows through `npm run test:commands`, avoids automatic Verified Memory publishing, and keeps bounty registry submission as a later step.
 
-## Tests
-
-```bash
-npm test
-npm audit --omit=dev
-```
-
-Current result: tests pass and production audit reports zero vulnerabilities.
-
-## Bounty Reference
-
-Submitted for OriginTrail DKG v10 Bounty Program Round 1: Working and Shared Memory integrations for LLM-Wiki/autoresearch agents, with OpenClaw as a priority target.
-
-Maintenance commitment: valcyclovir will support this integration for at least six months after registry acceptance.
+No PR has been opened to `OriginTrail/dkg-integrations` yet.

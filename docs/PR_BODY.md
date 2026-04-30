@@ -29,21 +29,22 @@ dkg --version
 10.0.0-rc.1-dev.1777554347.b80a299
 
 dkg status
-Node: BRX
+Node: tracabot
 Role: edge
+Network: f81f9df2e9604fca
 PeerId: 12D3KooWQm9sJCkUTU7kRXsNQttHaYTQV4ZjR8QaBNVUMqVMLC6R
 
-npm run demo
-Writing to shared memory: 10/10 quads
-Share operation: swm-1777560651535-gq4j3e9f
+npm run test:commands
+All four command paths exercised: /stats, /scan, /report, /ban
 Graph: did:dkg:context-graph:claw-shield-intel/_shared_memory
+RetrievedIntel: riskScore 100, reportsAcrossCommunities 4
 ```
 
 Tests and audit:
 
 ```text
 npm test
-2 test files passed
+5 test files passed
 
 npm audit --omit=dev
 found 0 vulnerabilities
@@ -52,8 +53,7 @@ found 0 vulnerabilities
 Telegram runtime:
 
 ```text
-Bot: @tracethembot
-Service: tracabot.service active (running)
+Bot command loop verified with stubbed Telegram API and live DKG v10 read/write calls.
 ```
 
 ## Security Attestation
@@ -62,5 +62,5 @@ I attest that this code is my own work or properly licensed, contains no intenti
 
 ## Maintenance
 
-Maintainer: valcyclovir  
+Maintainer: brxtrac  
 Support window: at least six months after registry acceptance.

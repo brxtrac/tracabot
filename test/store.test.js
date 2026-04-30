@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { appendFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventStore } from '../src/store.js';
@@ -14,4 +14,12 @@ test('persists events and returns seven-day stats', () => {
   assert.equal(stats.total, 2);
   assert.equal(stats.byType.giveaway, 1);
   assert.equal(stats.byType.impersonation, 1);
+});
+
+test('ignores malformed jsonl lines', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tracabot-'));
+  const store = new EventStore(join(dir, 'events.jsonl'));
+  store.append({ id: 'ok', timestamp: new Date().toISOString(), payload: {} });
+  appendFileSync(store.path, 'not-json\n');
+  assert.deepEqual(store.all().map((event) => event.id), ['ok']);
 });
