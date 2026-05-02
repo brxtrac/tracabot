@@ -5,7 +5,7 @@
 - Name: `tracabot`
 - Version: `0.1.0`
 - Repository: `https://github.com/brxtrac/tracabot`
-- Commit: `TBD after final commit`
+- Commit: `310cefd9930864d488087e2dc7f7225772012963`
 - License: MIT
 - Category: OpenClaw agent integration, Telegram safety, DKG v10 Shared Memory
 - Tags: `openclaw`, `dkg-v10`, `shared-memory`, `telegram`, `anti-scam`, `context-graph`, `llm-wiki`, `autoresearch`
