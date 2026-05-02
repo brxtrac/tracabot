@@ -34,6 +34,8 @@ TRACaBot uses OpenClaw's DKG adapter as its DKG boundary. The adapter talks to t
 
 This cross-community loop is the core product behavior: observe locally, write structured evidence to DKG Shared Memory, auto-publish high-confidence events, then let every other TRACaBot instance query the same graph before the fraudster can repeat the attack in a different channel.
 
+TRACaBot also ships an OpenClaw skill interface in `skills/tracabot/skill.json` and a JSON CLI bridge, `tracabot-skill`, so OpenClaw agents can call the same fraud intelligence without going through Telegram. Skill tools include `scan_target`, `explain_event`, `get_watchlist`, `get_digest`, `query_campaigns`, `submit_appeal`, and `review_event`.
+
 The bot separates local analysis confidence from DKG confidence. Report-only evidence does not automatically snowball into high-confidence bans; DKG evidence must be credible, and non-admin reports cannot directly trigger a Telegram ban. Plain watchlist monitoring stays local-only; DKG writes are reserved for evidence-backed actions, reports, campaigns, appeals, reviews, restrictions, and bans.
 
 TRACaBot applies graduated autonomous enforcement by default: low-confidence events are logged, medium-confidence events can be deleted and restricted, and high-confidence events can be deleted and banned. It also writes and queries scam domains in DKG Shared Memory, so a phishing or Telegram lure domain seen in one community can be flagged in another. Repeated domains, wallets, scam patterns, or text fingerprints are clustered into local campaign signals and can be written as `fraud_campaign` DKG events when the same wave repeats.
@@ -60,6 +62,17 @@ There is no curator-controlled promotion step in TRACaBot. Once an event meets t
 
 ## Install
 
+1. Install and set up DKG/OpenClaw on the host:
+
+```bash
+npm install -g @origintrail-official/dkg
+dkg openclaw setup --workspace /root/.openclaw/workspace --name tracabot --port 9200 --no-fund
+```
+
+2. Create a Telegram bot in BotFather, copy its token, invite it to your group, and grant it admin rights for deleting messages, restricting users, and banning users.
+
+3. Install TRACaBot:
+
 ```bash
 git clone https://github.com/brxtrac/tracabot.git
 cd tracabot
@@ -67,7 +80,7 @@ npm install
 cp .env.example .env
 ```
 
-Edit `.env`:
+4. Edit `.env`:
 
 ```bash
 TELEGRAM_BOT_TOKEN=your-bot-token
@@ -87,16 +100,26 @@ DKG_NODE_URL=http://127.0.0.1:9200
 TRACABOT_STORE_PATH=./data/tracabot-events.jsonl
 ```
 
-Start manually:
+5. Start manually:
 
 ```bash
 npm start
 ```
 
+6. Optional systemd service: create a unit with `WorkingDirectory=/root/tracabot`, `EnvironmentFile=/root/tracabot/.env`, and `ExecStart=/usr/bin/node /root/tracabot/bin/tracabot.js`, then run `sudo systemctl daemon-reload` and `sudo systemctl enable --now tracabot.service`.
+
 Run the DKG write/read demo without Telegram:
 
 ```bash
 npm run demo
+```
+
+Run OpenClaw skill tools directly:
+
+```bash
+npm run skill -- scan_target '{"telegramUserId":"8388593201","text":"possible support impersonation"}'
+npm run skill -- get_digest '{}'
+npm run skill -- get_watchlist '{"filter":"all"}'
 ```
 
 Run tests:
@@ -114,6 +137,8 @@ The DKG v10 OpenClaw setup command can be used before running TRACaBot:
 ```bash
 dkg openclaw setup --workspace /root/.openclaw/workspace --name tracabot --port 9200 --no-fund
 ```
+
+The OpenClaw-facing skill manifest lives at `skills/tracabot/skill.json`. The CLI entrypoint is `node ./bin/tracabot-skill.js <tool> <json-input>` and returns JSON suitable for OpenClaw agent tooling.
 
 Example systemd unit:
 

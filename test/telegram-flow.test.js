@@ -562,14 +562,43 @@ test('/ban bans replied user and publishes ban evidence', async () => {
     message_id: 12,
     text: '/ban fake support impersonation',
     reply_to_message: {
+      message_id: 99,
       text: 'DM support admin to verify wallet',
       from: { id: 55, username: 'fake_support', is_bot: false }
     }
   });
+  assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 99));
   assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 55));
   const ban = bot.store.all().find((event) => event.event_type === 'ban_executed');
   assert.ok(ban);
+  assert.equal(ban.payload.replied_message_deleted, true);
   assert.match(JSON.stringify(ban.payload.evidence), /manual \/ban command/);
+  assert.match(JSON.stringify(ban.payload.evidence), /replied scam message deleted/);
+});
+
+test('/ban continues if replied message deletion fails', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  bot.call = async (method, payload) => {
+    calls.push({ method, payload });
+    if (method === 'getMe') return { id: 999, username: 'tracethembot' };
+    if (method === 'getChatMember') {
+      if (payload.user_id === 999) return { status: 'administrator', can_restrict_members: true, can_delete_messages: true };
+      return { status: payload.user_id === 1 ? 'administrator' : 'member', can_restrict_members: false };
+    }
+    if (method === 'deleteMessage') throw new Error('message too old');
+    return { ok: true };
+  };
+  await bot.handleCommand({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 1, username: 'admin' },
+    message_id: 47,
+    text: '/ban fake support impersonation',
+    reply_to_message: { message_id: 100, text: 'DM support admin to verify wallet', from: { id: 55, username: 'fake_support', is_bot: false } }
+  });
+  assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 55));
+  const ban = bot.store.all().find((event) => event.event_type === 'ban_executed');
+  assert.equal(ban.payload.replied_message_deleted, false);
+  assert.match(ban.payload.replied_message_delete_error, /message too old/);
 });
 
 test('/ban with a plain name does not ban the sender without a replied user', async () => {

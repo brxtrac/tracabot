@@ -981,16 +981,30 @@ export class TelegramShieldBot {
         await this.alertAdmins({ ...message, from: replyUser, text: context }, risk, event);
         return;
       }
+      const replyMessageId = message.reply_to_message?.message_id;
+      let repliedMessageDeleted = false;
+      let repliedMessageDeleteError = '';
+      if (replyMessageId && await this.hasDeleteRights(chatId)) {
+        try {
+          await this.deleteMessage(chatId, replyMessageId);
+          repliedMessageDeleted = true;
+        } catch (error) {
+          repliedMessageDeleteError = error instanceof Error ? error.message : String(error);
+        }
+      }
       await this.ban(chatId, replyUser.id);
       const event = await this.record('ban_executed', { ...message, from: replyUser }, {
         ...risk,
         reason,
+        replied_message_id: replyMessageId || '',
+        replied_message_deleted: repliedMessageDeleted,
+        replied_message_delete_error: repliedMessageDeleteError,
         confidence: Math.max(100, risk.confidence),
         scam_type: risk.scam_type || 'admin_action',
-        evidence: [...risk.evidence, reason, replyUser.sangmata?.evidence || '', 'manual /ban command'].filter(Boolean)
+        evidence: [...risk.evidence, reason, replyUser.sangmata?.evidence || '', repliedMessageDeleted ? 'replied scam message deleted' : replyMessageId ? 'replied scam message deletion unavailable' : '', 'manual /ban command'].filter(Boolean)
       });
       await this.maybeRecordCampaign({ ...message, from: replyUser, text: context }, risk);
-      await this.send(chatId, formatBanReply(replyUser, event.id));
+      await this.send(chatId, `${formatBanReply(replyUser, event.id)} ${repliedMessageDeleted ? 'Removed the replied scam message.' : replyMessageId ? 'Could not remove the replied message.' : 'No replied message to remove.'}`);
     }
   }
 

@@ -6,6 +6,8 @@ Submitted for OriginTrail DKG v10 Bounty Program Round 1 (`cfi-dkgv10-r1`): Work
 
 tracabot is an OpenClaw-compatible Telegram Shieldy-style anti-scam agent. It detects phishing, fake airdrops, investment testimonial scams, support/admin impersonation, join-then-rename impersonators, and suspicious moderation events, then writes structured scam knowledge to DKG v10 Shared Memory in the `tracabot` Context Graph.
 
+It now also exposes a concrete OpenClaw skill surface through `skills/tracabot/skill.json` and `bin/tracabot-skill.js`, allowing OpenClaw agents to call scan, explain, watchlist, digest, campaign, appeal, and review tools directly as JSON.
+
 The differentiator is the shared persistent memory loop: one community's accepted report, fraud finding, or ban becomes queryable DKG intelligence for every other community running tracabot against the same Context Graph. A bad actor who tests a scam in one channel can be flagged elsewhere by Telegram user ID, username/display-name alias, wallet, or scam pattern before repeating the attack.
 
 Telegram commands are registered on startup:
@@ -20,6 +22,8 @@ Telegram commands are registered on startup:
 - `/appeal`: submit a correction or appeal to DKG Shared Memory.
 - `/review`: admin-only upheld/overturned review decision written to DKG.
 - `/digest`: summarize recent actions, reports, watches, appeals, reviews, and campaign signals.
+
+OpenClaw skill tools are also available: `scan_target`, `explain_event`, `get_watchlist`, `get_digest`, `query_campaigns`, `submit_appeal`, and `review_event`.
 
 ## DKG v10 Fit
 

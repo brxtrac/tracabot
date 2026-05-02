@@ -1,0 +1,49 @@
+{
+  "name": "tracabot",
+  "version": "0.1.0",
+  "description": "OpenClaw skill tools for DKG-powered Telegram fraud intelligence, review, and operator triage.",
+  "contextGraph": "tracabot",
+  "entrypoint": "node ./bin/tracabot-skill.js",
+  "tools": [
+    {
+      "name": "scan_target",
+      "description": "Score a Telegram actor, wallet text, or message context using local fraud heuristics plus DKG Shared Memory. Does not execute Telegram actions.",
+      "inputSchema": { "type": "object", "properties": { "telegramUserId": { "type": "string" }, "username": { "type": "string" }, "text": { "type": "string" }, "label": { "type": "string" } } }
+    },
+    {
+      "name": "explain_event",
+      "description": "Return structured local/DKG evidence for a tracabot event ID.",
+      "inputSchema": { "type": "object", "required": ["eventId"], "properties": { "eventId": { "type": "string" } } }
+    },
+    {
+      "name": "get_watchlist",
+      "description": "Return local active watches, mutes, and review items. Local-only and never written to DKG.",
+      "inputSchema": { "type": "object", "properties": { "filter": { "type": "string", "enum": ["all", "active", "muted", "review"] } } }
+    },
+    {
+      "name": "get_digest",
+      "description": "Return a structured 24h moderation digest for OpenClaw operator triage.",
+      "inputSchema": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "query_campaigns",
+      "description": "Return locally known fraud campaign clusters and their related events.",
+      "inputSchema": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "submit_appeal",
+      "description": "Write an evidence-backed appeal/correction event to DKG Shared Memory.",
+      "inputSchema": { "type": "object", "required": ["eventId", "reason"], "properties": { "eventId": { "type": "string" }, "reason": { "type": "string" }, "actorId": { "type": "string" }, "actorUsername": { "type": "string" } } }
+    },
+    {
+      "name": "review_event",
+      "description": "Write an admin review decision to DKG Shared Memory.",
+      "inputSchema": { "type": "object", "required": ["eventId", "decision", "reason"], "properties": { "eventId": { "type": "string" }, "decision": { "type": "string", "enum": ["uphold", "overturn"] }, "reason": { "type": "string" }, "actorId": { "type": "string" }, "actorUsername": { "type": "string" } } }
+    }
+  ],
+  "permissions": {
+    "network": ["local DKG node", "api.telegram.org when run as Telegram bot"],
+    "filesystem": ["local event store"],
+    "dkgWrites": "Evidence-backed events only. Watchlist and digest tools stay local-only."
+  }
+}
