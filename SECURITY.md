@@ -10,6 +10,7 @@ tracabot contacts:
 
 - `api.telegram.org` for Telegram Bot API polling, messages, and moderation actions.
 - The configured local or private DKG v10 node, default `http://127.0.0.1:9200`.
+- Optional local OpenClaw gateway for conversational safety replies, default `http://127.0.0.1:18789`. If `TRACABOT_LLM_BASE_URL` is set to an external endpoint, declare that endpoint in deployment documentation and registry metadata.
 
 ## DKG Write Authority
 
@@ -24,10 +25,13 @@ Local JSONL files are operational working memory for weak reports, watchlist sta
 - Rejected and weak reports are stored locally only and are not written to DKG Shared Memory.
 - Duplicate reports and reporter bursts are rate-limited to reduce abuse.
 - Telegram message and evidence fields are bounded before analysis, local logging, and DKG writes.
+- Conversational LLM replies are bounded, topic-gated to scam/fraud/wallet safety, and cannot execute Telegram moderation actions or DKG writes.
 
 ## Data Handling
 
 The bot stores Telegram chat/user identifiers and structured fraud evidence in its local JSONL audit log. Do not commit files from `data/`. DKG Shared Memory writes are intended for scam evidence, moderation actions, and provenance metadata only. Local `.env` files should be permissioned to the service user only.
+
+When `TRACABOT_LLM_PROVIDER=auto`, TRACaBot reads local OpenClaw configuration to discover gateway/model settings and OAuth-backed access already configured for OpenClaw. It does not copy OpenClaw credentials into `.env`, does not print them in `/status`, and falls back to deterministic templates when OpenClaw chat access is unavailable.
 
 ## Dynamic Code
 

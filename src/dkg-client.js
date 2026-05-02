@@ -204,8 +204,8 @@ export class DkgClient {
       const client = await this.client();
       await client.createContextGraph(
         this.config.contextGraph,
-        'tracabot Shieldy Intelligence',
-        'Working and Shared Memory Context Graph for Telegram scam reports.'
+        'TRACaBot Fraud Intelligence',
+        'DKG v10 Shared Memory Context Graph for evidence-backed Telegram scam reports, findings, reviews, and moderation actions.'
       );
     } catch (error) {
       const output = error instanceof Error ? error.message : String(error);

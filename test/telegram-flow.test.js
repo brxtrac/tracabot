@@ -7,7 +7,7 @@ import { TELEGRAM_COMMANDS, TelegramShieldBot } from '../src/telegram.js';
 import { analyzeMessage } from '../src/scam-analyzer.js';
 import { EventStore } from '../src/store.js';
 
-function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = null, dkgIntel = null, adminIds = ['1234'] }) {
+function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = null, dkgIntel = null, adminIds = ['1234'], llm = null, conversational = false }) {
   const calls = [];
   const dkgWrites = [];
   const dkg = {
@@ -60,12 +60,20 @@ function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = nu
         restrictThreshold: 75,
         banThreshold: 85,
         actionThreshold: 85,
+        conversational,
+        llmProvider: 'auto',
+        conversationMinConfidence: 60,
+        proactiveReplyThreshold: 75,
+        conversationRateLimitSeconds: 60,
+        conversationMaxChars: 700,
+        contextGraph: 'tracabot',
       proactiveScanMinutes: 30,
       agentDid: 'did:dkg:agent:test'
     },
     analyzer: analyzerOverride || analyzer,
     dkg,
-    store: new EventStore(join(mkdtempSync(join(tmpdir(), 'tracabot-flow-')), 'events.jsonl'))
+    store: new EventStore(join(mkdtempSync(join(tmpdir(), 'tracabot-flow-')), 'events.jsonl')),
+    llm
   });
   bot.call = async (method, payload) => {
     calls.push({ method, payload });
@@ -181,6 +189,7 @@ test('telegram command descriptions match the public bot command list', () => {
     { command: 'appeal', description: 'Submit an appeal or correction for an event' },
     { command: 'review', description: 'Admin: uphold or overturn an event' },
     { command: 'digest', description: 'Show recent moderation digest' },
+    { command: 'status', description: 'Admin: show bot, DKG, and conversation status' },
     { command: 'help', description: 'Show tracabot commands and autonomous policy' }
   ]);
 });
@@ -199,6 +208,42 @@ test('/help explains commands, thresholds, and DKG memory', async () => {
   assert.match(help, /\/why <event-id>/);
   assert.match(help, /\/watchlist/);
   assert.match(help, /Context Graph tracabot/);
+});
+
+test('/status reports permissions without exposing secrets', async () => {
+  const { bot, calls } = makeBot({ canBan: true, trustedUserIds: [1], adminIds: ['1'] });
+  await bot.handleCommand({ chat: { id: -100, title: 'demo' }, from: { id: 1, username: 'admin' }, message_id: 31, text: '/status' });
+  const reply = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
+  assert.match(reply, /TRACaBot status/);
+  assert.match(reply, /DKG: reachable/);
+  assert.match(reply, /delete=yes/);
+  assert.match(reply, /Secrets: not displayed/);
+  assert.doesNotMatch(reply, /token/i);
+});
+
+test('explicit scam questions use bounded conversational LLM reply', async () => {
+  const llmCalls = [];
+  const llm = { async complete(input) { llmCalls.push(input); return { ok: true, text: 'This looks like a scam risk based on the supplied evidence. Do not click links or share wallet secrets. Ask an admin to review.' }; } };
+  const { bot, calls } = makeBot({ canBan: true, conversational: true, llm, analyzer: analyzeMessage, dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] } });
+  const chat = { id: -100, title: 'demo' };
+  await bot.handleMessage({ chat, from: { id: 2, username: 'member' }, message_id: 32, text: '@tracabot is this a scam?', reply_to_message: { chat, from: { id: 90, username: 'fake_support' }, text: 'URGENT verify your wallet with support admin now at t.me/fakeclaim' } });
+  assert.equal(llmCalls.length, 1);
+  const reply = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
+  assert.match(reply, /scam risk/);
+  assert.doesNotMatch(reply, /definitely/);
+});
+
+test('conversation falls back when LLM is unavailable and ignores unrelated chat', async () => {
+  const llm = { async complete() { return { ok: false, text: '' }; } };
+  const { bot, calls } = makeBot({ canBan: true, conversational: true, llm, analyzer: analyzeMessage, dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] } });
+  bot.config.restrictThreshold = 90;
+  bot.config.banThreshold = 95;
+  const chat = { id: -100, title: 'demo' };
+  await bot.handleMessage({ chat, from: { id: 3, username: 'member' }, message_id: 33, text: 'nice weather today' });
+  assert.equal(calls.some((call) => call.method === 'sendMessage'), false);
+  await bot.handleMessage({ chat, from: { id: 4, username: 'fake_support' }, message_id: 34, text: 'URGENT free USDT airdrop claim now and verify wallet with support admin' });
+  const reply = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
+  assert.match(reply, /TRACaBot warning|TRACaBot caution/);
 });
 
 test('/why explains local event decisions', async () => {
@@ -668,7 +713,7 @@ test('/stats pulls DKG aggregate data', async () => {
     message_id: 13,
     text: '/stats'
   });
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Shield report (7d)')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('TRACaBot report (7d)')));
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('2 high-confidence signals from 3 DKG events')));
   assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('{"fraud_finding"')), false);
 });

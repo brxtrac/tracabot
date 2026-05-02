@@ -60,7 +60,7 @@ test('formats stats like a readable risk summary', () => {
     byEventType: { fraud_finding: 18, risk_query: 15, ban_executed: 5 },
     byRiskType: { impersonation: 34, other: 20 }
   });
-  assert.match(text, /Shield report \(7d\): hot week/);
+  assert.match(text, /TRACaBot report \(7d\): hot week/);
   assert.match(text, /43 high-confidence signals from 54 DKG events \(80%\)/);
   assert.match(text, /Top pattern: Impersonation \(34\)/);
   assert.match(text, /Actions: 5 bans, 0 reports, 15 scans/);

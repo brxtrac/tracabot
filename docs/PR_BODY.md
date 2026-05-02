@@ -8,6 +8,8 @@ tracabot is an OpenClaw-compatible Telegram Shieldy-style anti-scam agent. It de
 
 It now also exposes a concrete OpenClaw skill surface through `skills/tracabot/skill.json` and `bin/tracabot-skill.js`, allowing OpenClaw agents to call scan, explain, watchlist, digest, campaign, appeal, and review tools directly as JSON.
 
+TRACaBot also supports bounded conversational safety replies in Telegram. It keeps its own standalone Telegram token while optionally inheriting local OpenClaw OAuth/model/gateway configuration for LLM-drafted answers to scam-safety questions. If OpenClaw chat access is unavailable, it falls back to deterministic evidence templates.
+
 The differentiator is the shared persistent memory loop: one community's accepted report, fraud finding, or ban becomes queryable DKG intelligence for every other community running tracabot against the same Context Graph. A bad actor who tests a scam in one channel can be flagged elsewhere by Telegram user ID, username/display-name alias, wallet, or scam pattern before repeating the attack.
 
 Telegram commands are registered on startup:

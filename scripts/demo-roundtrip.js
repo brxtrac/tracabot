@@ -17,7 +17,7 @@ const payload = analyzeMessage({
 
 const event = {
   id: randomUUID(),
-  event_type: 'scam_detection',
+  event_type: 'fraud_finding',
   timestamp: new Date().toISOString(),
   agentDid: config.agentDid,
   chat: { id: 'demo-chat', title: 'tracabot demo' },
@@ -26,4 +26,5 @@ const event = {
 };
 
 const result = await dkg.writeEvent(event);
-console.log(JSON.stringify({ eventId: event.id, contextGraph: config.contextGraph, result }, null, 2));
+const retrievedIntel = await dkg.queryRiskIndicators({ username: event.user.username, userId: event.user.id, text: payload.evidence.join(' ') });
+console.log(JSON.stringify({ eventId: event.id, contextGraph: config.contextGraph, result, retrievedIntel }, null, 2));

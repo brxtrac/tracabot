@@ -179,6 +179,7 @@ test('auto-publishes high-confidence fraud findings to the context graph', async
     }
   });
   assert.ok(result.publish);
+  assert.ok(adapterClient.calls.some(([method, id, name]) => method === 'createContextGraph' && id === 'tracabot' && /TRACaBot/.test(name)));
   assert.ok(adapterClient.calls.some(([method, contextGraphId, opts]) => method === 'publishSharedMemory' && contextGraphId === 'tracabot' && opts.rootEntities.includes('https://tracabot.org/ontology#event/evt-auto')));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#actorAlias') && triple.object === '"badactor"'));
 });

@@ -19,6 +19,7 @@ TRACaBot is an OpenClaw-compatible Telegram anti-scam agent. It detects phishing
 - Telegram Bot API runtime: `bin/tracabot.js`.
 - OpenClaw skill manifest: `skills/tracabot/skill.json`.
 - OpenClaw JSON bridge: `tracabot-skill` / `bin/tracabot-skill.js`.
+- Optional conversational safety bridge: read-only local OpenClaw OAuth/model/gateway discovery for bounded scam-safety replies.
 - DKG boundary: official DKG/OpenClaw adapter setup using `DkgDaemonClient` against the configured local DKG v10 daemon URL.
 
 ## DKG Operations
@@ -40,6 +41,7 @@ The repository did not confirm a separate public OpenClaw adapter method dedicat
 
 - `api.telegram.org` for polling, message replies, deletes, restrictions, and bans.
 - Configured DKG node URL, default `http://127.0.0.1:9200`.
+- Optional local OpenClaw gateway, default `http://127.0.0.1:18789`, for LLM-drafted scam-safety replies. External LLM egress is only used if an operator explicitly sets `TRACABOT_LLM_BASE_URL`.
 
 ## Write Authority
 
@@ -50,6 +52,7 @@ The runtime operator controls the Telegram bot token, DKG adapter endpoint, and 
 - No preinstall or postinstall scripts.
 - No dynamic remote code loading.
 - Secrets remain in `.env`, service environment files, or OpenClaw local configuration.
+- OpenClaw OAuth/API information is discovered read-only from local OpenClaw config when `TRACABOT_LLM_PROVIDER=auto`; it is not copied into TRACaBot `.env` or displayed by `/status`.
 - Network egress and DKG operations are documented in `SECURITY.md`.
 - Production audit command: `npm audit --omit=dev`.
 

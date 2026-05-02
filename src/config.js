@@ -53,6 +53,22 @@ export function loadConfig(env = process.env) {
   if (!Number.isFinite(telegramTimeoutMs) || telegramTimeoutMs < 5000) {
     throw new Error('TRACABOT_TELEGRAM_TIMEOUT_MS must be at least 5000');
   }
+  const conversationMinConfidence = Number(env.TRACABOT_CONVERSATION_MIN_CONFIDENCE || 60);
+  const proactiveReplyThreshold = Number(env.TRACABOT_PROACTIVE_REPLY_THRESHOLD || 75);
+  const conversationRateLimitSeconds = Number(env.TRACABOT_CONVERSATION_RATE_LIMIT_SECONDS || 60);
+  const conversationMaxChars = Number(env.TRACABOT_CONVERSATION_MAX_CHARS || 700);
+  if (!Number.isFinite(conversationMinConfidence) || conversationMinConfidence < 0 || conversationMinConfidence > 100) {
+    throw new Error('TRACABOT_CONVERSATION_MIN_CONFIDENCE must be a number from 0 to 100');
+  }
+  if (!Number.isFinite(proactiveReplyThreshold) || proactiveReplyThreshold < conversationMinConfidence || proactiveReplyThreshold > 100) {
+    throw new Error('TRACABOT_PROACTIVE_REPLY_THRESHOLD must be a number from conversation minimum to 100');
+  }
+  if (!Number.isFinite(conversationRateLimitSeconds) || conversationRateLimitSeconds < 0) {
+    throw new Error('TRACABOT_CONVERSATION_RATE_LIMIT_SECONDS must be a non-negative number');
+  }
+  if (!Number.isFinite(conversationMaxChars) || conversationMaxChars < 160 || conversationMaxChars > 2000) {
+    throw new Error('TRACABOT_CONVERSATION_MAX_CHARS must be a number from 160 to 2000');
+  }
   return {
     telegramToken: env.TELEGRAM_BOT_TOKEN || '',
     adminIds,
@@ -73,6 +89,16 @@ export function loadConfig(env = process.env) {
     storePath: env.TRACABOT_STORE_PATH || './data/tracabot-events.jsonl',
     agentDid: env.TRACABOT_AGENT_DID || 'did:dkg:agent:tracabot',
     testMode: parseBoolean(env.TRACABOT_TEST_MODE, false),
-    openClawWorkspace: env.OPENCLAW_WORKSPACE || resolve(homedir(), '.openclaw', 'workspace')
+    openClawWorkspace: env.OPENCLAW_WORKSPACE || resolve(homedir(), '.openclaw', 'workspace'),
+    conversational: parseBoolean(env.TRACABOT_CONVERSATIONAL, true),
+    llmProvider: env.TRACABOT_LLM_PROVIDER || 'auto',
+    llmBaseUrl: env.TRACABOT_LLM_BASE_URL || '',
+    llmApiKey: env.TRACABOT_LLM_API_KEY || '',
+    llmModel: env.TRACABOT_LLM_MODEL || '',
+    openClawConfigPath: env.OPENCLAW_CONFIG_PATH || resolve(homedir(), '.openclaw', 'openclaw.json'),
+    conversationMinConfidence,
+    proactiveReplyThreshold,
+    conversationRateLimitSeconds,
+    conversationMaxChars
   };
 }

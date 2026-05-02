@@ -124,7 +124,7 @@ export function formatStatsReply(stats) {
   const total = stats.total || 0;
   const graph = stats.graph || 'tracabot';
   if (!total) {
-    return `📊 Shield report (7d): all quiet. DKG graph ${graph} shows 0 production events and 0 high-confidence signals.\nVault is looking solid. Use /stats sources for receipts.`;
+    return `📊 TRACaBot report (7d): all quiet. DKG graph ${graph} shows 0 production events and 0 high-confidence signals.\nVault is looking solid. Use /stats sources for receipts.`;
   }
   const highRate = Math.round((high / total) * 100);
   const verdict = high >= 10 || highRate >= 50 ? 'hot week' : high >= 3 ? 'active watch' : 'mostly calm';
@@ -136,7 +136,7 @@ export function formatStatsReply(stats) {
     ? 'DKG vault has receipts. Use /scan on anyone suspicious.'
     : 'No urgent action on my radar. Use /scan if someone feels off.';
   return [
-    `📊 Shield report (7d): ${verdict}. ${plural(high, 'high-confidence signal')} from ${plural(total, 'DKG event')} (${highRate}%).`,
+    `📊 TRACaBot report (7d): ${verdict}. ${plural(high, 'high-confidence signal')} from ${plural(total, 'DKG event')} (${highRate}%).`,
     `Top pattern: ${topRisk}. Actions: ${plural(bans, 'ban')}, ${plural(reports, 'report')}, ${plural(scans, 'scan')}.`,
     `${closing} Source: DKG graph ${graph}; /stats sources shows IDs.`
   ].join('\n');

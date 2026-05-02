@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { combineRisk, formatBanReply, formatDkgReference, formatReportReply, formatRiskAssessment, formatScanReply, formatStatsReply, formatStatsSourcesReply } from './risk-engine.js';
 import { extractWallets } from './dkg-client.js';
+import { buildSafetyPrompt, fallbackSafetyReply, isSafetyQuestion, sanitizeSafetyReply, shouldConversationallyReply } from './conversation.js';
+import { redactedOpenClawStatus } from './openclaw-config.js';
 
 export const TELEGRAM_COMMANDS = [
   { command: 'scan', description: 'Check a user, wallet, or replied message for scam risk' },
@@ -14,6 +16,7 @@ export const TELEGRAM_COMMANDS = [
   { command: 'appeal', description: 'Submit an appeal or correction for an event' },
   { command: 'review', description: 'Admin: uphold or overturn an event' },
   { command: 'digest', description: 'Show recent moderation digest' },
+  { command: 'status', description: 'Admin: show bot, DKG, and conversation status' },
   { command: 'help', description: 'Show tracabot commands and autonomous policy' }
 ];
 
@@ -90,6 +93,12 @@ function textFingerprint(text = '') {
   return words.slice(0, 16).join(' ');
 }
 
+function conversationKey(message = {}, target = {}) {
+  const chat = message.chat?.id || 'chat';
+  const actor = targetKey(target) || actorKey(actorFromMessage(message)) || 'target';
+  return `${chat}:${actor}:${textFingerprint(message.text || message.reply_to_message?.text || '').slice(0, 80)}`;
+}
+
 function plural(count, singular, pluralWord = `${singular}s`) {
   return `${count} ${count === 1 ? singular : pluralWord}`;
 }
@@ -138,6 +147,7 @@ function sangmataTargetFromText(text = '') {
 }
 
 function hasEvidenceForDkg(eventType = '', payload = {}) {
+  if (['risk_check', 'risk_query', 'scam_detection'].includes(eventType)) return false;
   if (['watch_started', 'watch_ended', 'reporter_reputation_update'].includes(eventType)) return false;
   if (['ban_executed', 'restrict_executed', 'fraud_finding', 'report_submitted', 'fraud_campaign', 'appeal_submitted', 'review_upheld', 'review_overturned'].includes(eventType)) return true;
   if (['risk_review_needed', 'risk_action_suppressed', 'report_review_needed'].includes(eventType)) {
@@ -147,15 +157,17 @@ function hasEvidenceForDkg(eventType = '', payload = {}) {
 }
 
 export class TelegramShieldBot {
-  constructor({ config, analyzer, dkg, store }) {
+  constructor({ config, analyzer, dkg, store, llm = null }) {
     this.config = config;
     this.analyzer = analyzer;
     this.dkg = dkg;
     this.store = store;
+    this.llm = llm;
     this.offset = 0;
     this.botId = null;
     this.observedUsers = new Map();
     this.nextProactiveScanAt = Date.now() + this.config.proactiveScanMinutes * 60 * 1000;
+    this.conversationLastReply = new Map();
   }
 
   async call(method, payload) {
@@ -223,6 +235,15 @@ export class TelegramShieldBot {
     try {
       const member = await this.call('getChatMember', { chat_id: chatId, user_id: await this.getBotId() });
       return member.status === 'administrator' && member.can_delete_messages !== false;
+    } catch {
+      return false;
+    }
+  }
+
+  async dkgReachable() {
+    try {
+      await this.dkg.ensureContextGraph();
+      return true;
     } catch {
       return false;
     }
@@ -402,11 +423,32 @@ export class TelegramShieldBot {
       '/review <event-id> uphold reason - admin-only; keep the decision. Use overturn to reverse it.',
       '/stats campaigns - show repeated domains, wallets, patterns, or text fingerprints.',
       '/digest - summarize recent actions, reports, watches, appeals, and campaigns.',
+      '/status - admin-only; show DKG, Telegram permission, and conversational mode status.',
       '/help - show this command guide.',
       '',
       `Autonomous policy: warn/log at ${warn}%, delete/restrict at ${restrict}%, delete/ban at ${ban}%.`,
       `DKG memory: reads and writes shared fraud evidence in Context Graph ${graph}, including actors, wallets, domains, scam patterns, reports, findings, and bans.`,
+      'Conversational mode: answers scam/safety questions only and falls back to evidence-based templates if OpenClaw LLM is unavailable.',
       'Safeguards: no auto-action against Telegram admins or bot accounts; weak reports stay local.'
+    ].join('\n');
+  }
+
+  async formatStatus(message) {
+    const chatId = message.chat.id;
+    const [dkgOk, canBan, canDelete] = await Promise.all([
+      this.dkgReachable(),
+      this.hasBanRights(chatId),
+      this.hasDeleteRights(chatId)
+    ]);
+    const openclaw = redactedOpenClawStatus(this.config);
+    return [
+      'TRACaBot status',
+      `DKG: ${dkgOk ? 'reachable' : 'unreachable'} (${this.config.contextGraph})`,
+      `Telegram rights: delete=${canDelete ? 'yes' : 'no'}, restrict/ban=${canBan ? 'yes' : 'no'}`,
+      `Autonomous thresholds: warn ${this.config.warnThreshold}%, restrict ${this.config.restrictThreshold}%, ban ${this.config.banThreshold}%`,
+      `Conversation: ${this.config.conversational === false ? 'off' : 'on'}; provider=${this.config.llmProvider || 'auto'}; proactive >= ${this.config.proactiveReplyThreshold}%`,
+      `OpenClaw LLM: ${openclaw.available ? `configured (${openclaw.model || 'default'} via ${openclaw.baseUrl})` : 'not discovered'}`,
+      'Secrets: not displayed. TRACaBot uses its own Telegram credential; OpenClaw OAuth/API config is read-only for optional LLM replies.'
     ].join('\n');
   }
 
@@ -570,6 +612,7 @@ export class TelegramShieldBot {
   }
 
   async maybeRecordCampaign(message, risk) {
+    if (risk.report_decision && risk.report_decision !== 'accepted') return null;
     const campaigns = this.campaignSummary(24 * 60 * 60 * 1000).filter((campaign) => !this.store.all().some((event) => event.event_type === 'fraud_campaign' && event.payload?.campaign_key === campaign.key));
     const campaign = campaigns[0];
     if (!campaign) return null;
@@ -622,6 +665,28 @@ export class TelegramShieldBot {
     const mentionsBot = /@tracabot\b|@tracethembot\b/i.test(text);
     const asksFraud = /\b(fraudster|scammer|scam|bot|blacklisted|safe|risk)\b/i.test(text);
     return (mentionsBot && asksFraud) || Boolean(message.reply_to_message && asksFraud);
+  }
+
+  canPublishFindingFromRisk(risk = {}) {
+    return Number(risk.confidence || 0) >= 80 && Number(risk.local_confidence || 0) >= 60 && (risk.evidence?.length || 0) > 0;
+  }
+
+  shouldSendConversation(message, target, risk, explicit = false) {
+    if (!shouldConversationallyReply({ message, risk, explicit, config: this.config })) return false;
+    const key = conversationKey(message, target);
+    const last = this.conversationLastReply.get(key) || 0;
+    if (Date.now() - last < (this.config.conversationRateLimitSeconds || 0) * 1000) return false;
+    this.conversationLastReply.set(key, Date.now());
+    return true;
+  }
+
+  async conversationReply(message, target, risk, event, explicit = false) {
+    if (!this.shouldSendConversation(message, target, risk, explicit)) return '';
+    const fallback = fallbackSafetyReply({ target, risk, event });
+    if (!this.llm) return fallback;
+    const prompt = buildSafetyPrompt({ message, target, risk, event, maxChars: this.config.conversationMaxChars });
+    const response = await this.llm.complete(prompt).catch(() => ({ ok: false, text: '' }));
+    return sanitizeSafetyReply(response.text, { risk, maxChars: this.config.conversationMaxChars, fallback });
   }
 
   async assess(message, targetUser = actorFromMessage(message), text = message.text || '') {
@@ -783,6 +848,14 @@ export class TelegramShieldBot {
   async handleCommand(message) {
     const text = message.text || '';
     const chatId = message.chat.id;
+    if (text.startsWith('/status')) {
+      if (!await this.isTrustedModerator(message)) {
+        await this.send(chatId, '⚠️ /status is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
+        return;
+      }
+      await this.send(chatId, await this.formatStatus(message), { reply_to_message_id: message.message_id });
+      return;
+    }
     if (text.startsWith('/stats')) {
       if (/\bcampaigns?\b/i.test(text)) {
         await this.send(chatId, this.formatCampaigns(), { reply_to_message_id: message.message_id });
@@ -1023,9 +1096,10 @@ export class TelegramShieldBot {
       const target = this.targetFromMention(message) || sangmataTargetFromText(targetMessage.text || '') || actorFromMessage(targetMessage);
       const risk = await this.assess({ ...message, from: target }, target, `${message.text}\n${targetMessage.text || ''}`);
       const event = await this.record('risk_query', { ...message, from: target }, risk);
-      const finding = risk.confidence >= 80 ? await this.publishHighConfidenceFinding({ ...message, from: target }, risk) : null;
+      const finding = this.canPublishFindingFromRisk(risk) ? await this.publishHighConfidenceFinding({ ...message, from: target }, risk) : null;
       await this.maybeRecordCampaign({ ...message, from: target }, risk);
-      await this.send(message.chat.id, formatScanReply({ target, risk, eventId: event.id, findingId: finding?.id }), { reply_to_message_id: message.message_id });
+      const conversational = await this.conversationReply(message, target, risk, event, true);
+      await this.send(message.chat.id, conversational || formatScanReply({ target, risk, eventId: event.id, findingId: finding?.id }), { reply_to_message_id: message.message_id });
       return;
     }
     const user = actorFromMessage(message);
@@ -1039,7 +1113,11 @@ export class TelegramShieldBot {
     }
     if (risk.confidence >= (this.config.restrictThreshold ?? this.config.actionThreshold)) {
       await this.applyRiskAction(message, risk);
+      return;
     }
+    const event = this.store.all().filter((item) => eventMatchesTarget(item, user)).at(-1) || { id: '' };
+    const reply = await this.conversationReply(message, user, risk, event, false);
+    if (reply) await this.send(message.chat.id, reply, { reply_to_message_id: message.message_id });
   }
 
   async handleNewMembers(message) {
