@@ -28,13 +28,15 @@ Telegram scam moderation usually stays trapped inside one chat. TRACaBot turns e
 TRACaBot uses OpenClaw's DKG adapter as its DKG boundary. The adapter talks to the local DKG daemon at `DKG_NODE_URL` and keeps TRACaBot aligned with the same DKG service OpenClaw uses:
 
 - `DkgDaemonClient.createContextGraph` ensures the configured Context Graph exists.
-- `DkgDaemonClient.share` writes reports, findings, and moderation evidence to Shared Working Memory.
+- `DkgDaemonClient.share` writes reports, findings, and moderation evidence to DKG Shared Memory.
 - `DkgDaemonClient.publishSharedMemory` automatically publishes eligible high-confidence fraud memory into the Context Graph.
 - `DkgDaemonClient.query` reads shared DKG evidence before scoring a target.
 
 This cross-community loop is the core product behavior: observe locally, write structured evidence to DKG Shared Memory, auto-publish high-confidence events, then let every other TRACaBot instance query the same graph before the fraudster can repeat the attack in a different channel.
 
 TRACaBot also ships an OpenClaw skill interface in `skills/tracabot/skill.json` and a JSON CLI bridge, `tracabot-skill`, so OpenClaw agents can call the same fraud intelligence without going through Telegram. Skill tools include `scan_target`, `explain_event`, `get_watchlist`, `get_digest`, `query_campaigns`, `submit_appeal`, and `review_event`.
+
+Local JSONL state is the bot's operational working memory for weak reports, watchlist state, digest state, and monitoring-only actions. Evidence-backed collaborative memory is written to DKG v10 Shared Memory through the OpenClaw adapter.
 
 The bot separates local analysis confidence from DKG confidence. Report-only evidence does not automatically snowball into high-confidence bans; DKG evidence must be credible, and non-admin reports cannot directly trigger a Telegram ban. Plain watchlist monitoring stays local-only; DKG writes are reserved for evidence-backed actions, reports, campaigns, appeals, reviews, restrictions, and bans.
 
@@ -69,7 +71,34 @@ npm install -g @origintrail-official/dkg
 dkg openclaw setup --workspace /root/.openclaw/workspace --name tracabot --port 9200 --no-fund
 ```
 
-2. Create a Telegram bot in BotFather, copy its token, invite it to your group, and grant it admin rights for deleting messages, restricting users, and banning users.
+2. Create and configure a Telegram bot:
+
+```text
+Open @BotFather
+/newbot
+Choose a display name and username
+Copy the token into TELEGRAM_BOT_TOKEN
+/setcommands
+```
+
+Paste this command list into BotFather:
+
+```text
+scan - Check scam risk for a user, wallet, message, or SangMata alert
+report - Report suspicious evidence to shared DKG memory
+ban - Ban a replied target when admin safeguards pass
+stats - Show recent fraud intelligence and source activity
+why - Explain evidence behind a tracabot event
+watch - Locally watch a user, ID, username, or SangMata target
+unwatch - Remove a local watch target
+watchlist - Show active watches, mutes, and review items
+appeal - Submit a correction request for an event
+review - Admin review decision for an event
+digest - Summarize recent actions and campaign signals
+help - Show tracabot commands and safeguards
+```
+
+Invite the bot to your group and grant admin rights for deleting messages, restricting users, and banning users.
 
 3. Install TRACaBot:
 
@@ -108,6 +137,31 @@ npm start
 
 6. Optional systemd service: create a unit with `WorkingDirectory=/root/tracabot`, `EnvironmentFile=/root/tracabot/.env`, and `ExecStart=/usr/bin/node /root/tracabot/bin/tracabot.js`, then run `sudo systemctl daemon-reload` and `sudo systemctl enable --now tracabot.service`.
 
+```ini
+[Unit]
+Description=TRACaBot Telegram anti-scam agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/tracabot
+EnvironmentFile=/root/tracabot/.env
+ExecStart=/usr/bin/node /root/tracabot/bin/tracabot.js
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now tracabot.service
+sudo systemctl status tracabot.service
+```
+
 Run the DKG write/read demo without Telegram:
 
 ```bash
@@ -129,6 +183,15 @@ npm test
 npm audit --omit=dev
 npm run test:commands
 ```
+
+## Troubleshooting
+
+- Bot does not respond: confirm `TELEGRAM_BOT_TOKEN`, service logs, group privacy settings, and that the bot was invited to the correct group.
+- Bot cannot delete, restrict, or ban: confirm Telegram admin permissions for deleting messages, restricting users, and banning users.
+- `/ban` says admin required: add your numeric Telegram ID or username to `TRACABOT_ADMINS`, or run the command from a Telegram chat-admin account.
+- DKG evidence is missing: confirm `dkg status`, `DKG_NODE_URL`, `TRACABOT_DKG_MODE=openclaw-adapter`, and any `DKG_AUTH_TOKEN` required by your adapter.
+- Skill command returns JSON error: run from the project root, pass valid JSON, and check `OPENCLAW_DKG_ADAPTER_PATH` only if the adapter is installed outside standard OpenClaw paths.
+- Demo refuses to write: set `TRACABOT_TEST_MODE=true` for `npm run demo`; this prevents accidental production test writes.
 
 ## OpenClaw Setup
 

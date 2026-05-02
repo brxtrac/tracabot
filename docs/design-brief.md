@@ -29,7 +29,7 @@ No internal DKG packages or node-daemon patches are used.
 
 ## DKG v10 Memory Layers
 
-tracabot focuses on Round 1 Working and Shared Memory.
+tracabot focuses on Round 1 collaborative memory using local operational working memory plus DKG v10 Shared Memory.
 
 Working Memory:
 
@@ -38,7 +38,7 @@ Working Memory:
 
 Shared Memory:
 
-- Events are written to `tracabot` with the OpenClaw DKG adapter Shared Working Memory API.
+- Events are written to `tracabot` with the OpenClaw DKG adapter Shared Memory API.
 - The agent queries Shared Memory before scoring a user, wallet, or scam pattern so cross-community reports can influence local decisions.
 - At 85% confidence, the agent publishes a high-confidence `fraud_finding` Knowledge Asset-shaped event and either bans immediately with Telegram admin rights or reports the full DKG evidence to group admins.
 
@@ -56,7 +56,7 @@ Context Graph Publishing:
 - Entity: Telegram user, Telegram chat, scam report, moderation action.
 - Knowledge Asset: high-value reports shaped as reusable fraud intelligence.
 - Knowledge Collection: batches of related reports, such as a campaign or impersonation wave.
-- SHARE: OpenClaw adapter Shared Working Memory write.
+- SHARE: OpenClaw adapter Shared Memory write.
 - PUBLISH: targeted OpenClaw adapter Shared Memory publish for qualifying event roots.
 
 ## LLM-Wiki And Autoresearch Fit
@@ -72,7 +72,7 @@ That is the LLM-Wiki loop: agents read, write, revise, and verify a shared knowl
 
 ## Promotion Path
 
-1. A Telegram message is analyzed and stored as local Working Memory.
+1. A Telegram message is analyzed and stored as local operational working memory.
 2. High-confidence or manually submitted reports are written to Shared Memory.
 3. Reports or findings that meet the high-confidence threshold are automatically published to the Context Graph.
 4. Agents can summarize evidence, cluster related reports into a Knowledge Collection, and reuse the published memory.
@@ -92,7 +92,7 @@ Declared network egress:
 Declared DKG operations:
 
 - OpenClaw adapter Context Graph create.
-- OpenClaw adapter Shared Working Memory write.
+- OpenClaw adapter Shared Memory write.
 - OpenClaw adapter targeted Shared Memory publish.
 - OpenClaw adapter DKG query with Shared Memory included.
 

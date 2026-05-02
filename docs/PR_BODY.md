@@ -27,11 +27,12 @@ OpenClaw skill tools are also available: `scan_target`, `explain_event`, `get_wa
 
 ## DKG v10 Fit
 
-- Memory layers: Working Memory and Shared Memory.
+- Memory layers: local operational working memory plus DKG v10 Shared Memory.
 - Public interface: OpenClaw DKG adapter (`DkgDaemonClient`) against the local DKG daemon.
 - Primitives: Context Graph, Assertion, Entity, Integration, Knowledge Asset, Knowledge Collection, UAL.
 - Publication model: high-confidence fraud findings, accepted high-confidence reports, and executed bans are automatically published to the Context Graph with targeted adapter publish calls for the event root. There is no curator-controlled promotion step.
-- Cross-community propagation: `share` writes evidence-backed findings to Shared Memory with actor IDs, aliases, wallets, domains, patterns, campaign signals, confidence, evidence, target metadata, restriction expiry, review decisions, and moderation outcome; `query` reads the same graph with `includeSharedMemory: true` before scoring new joins, first posts, `/scan`, and `/report` targets. Plain watchlist monitoring stays local-only.
+- Cross-community propagation: `share` writes evidence-backed findings to Shared Memory with actor IDs, aliases, wallets, domains, patterns, campaign signals, confidence, evidence, target metadata, restriction expiry, review decisions, and moderation outcome; `query` reads the same graph with `includeSharedMemory: true` before scoring new joins, first posts, `/scan`, and `/report` targets. Plain watchlist monitoring and weak reports stay local-only.
+- Adapter status: this repository did not confirm a separate public Working Memory-specific method exposed by the locally importable OpenClaw adapter. Draft/monitoring state therefore stays in local JSONL working memory, while collaborative evidence uses supported DKG Shared Memory adapter calls.
 - Governance loop: `/why`, `/appeal`, and `/review` make decisions explainable and correctable while preserving an auditable DKG trail instead of silently rewriting moderation history.
 
 ## Verification
@@ -58,7 +59,7 @@ Tests and audit:
 
 ```text
 npm test
-60 tests passed
+73 tests passed
 
 npm audit --omit=dev
 found 0 vulnerabilities

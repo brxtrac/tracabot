@@ -1,7 +1,7 @@
 {
   "name": "tracabot",
   "version": "0.1.0",
-  "description": "OpenClaw-compatible Telegram anti-scam agent that writes and queries DKG v10 Working and Shared Memory.",
+  "description": "OpenClaw-compatible Telegram anti-scam agent that writes and queries DKG v10 Shared Memory.",
   "type": "module",
   "bin": {
     "tracabot": "./bin/tracabot.js",

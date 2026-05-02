@@ -1,4 +1,4 @@
-# ClawShield Demo Video Script (5-8 Minutes — Winning Submission Video)
+# TRACaBot Demo Video Script (5-8 Minutes)
 
 
 
@@ -28,7 +28,7 @@
 
 - Screen: ClawShield logo (or text overlay) + TG group screenshot with scam message.
 
-- Voice: "Hi OriginTrail team — I'm [Name]. This is ClawShield: an open-source OpenClaw Telegram agent that detects scammers and impersonators in real time, executes quick commands like /ban, and logs *everything* to OriginTrail DKG v10 Working and Shared Memory Context Graphs. 
+- Voice: "Hi OriginTrail team. This is TRACaBot: an open-source OpenClaw Telegram agent that detects scammers and impersonators in real time, executes guarded moderation commands like /ban, and writes evidence-backed events to OriginTrail DKG v10 Shared Memory and the tracabot Context Graph.
 
 Protecting communities while building verifiable, agent-native threat intelligence. Perfect fit for Round 1 OpenClaw priority."
 
@@ -40,7 +40,7 @@ Protecting communities while building verifiable, agent-native threat intelligen
 
 - "Rose and Shieldy are great for basic rules, but they can't reason about new impersonation tactics or share knowledge across groups. Scammers just rotate. 
 
-ClawShield fixes this with LLM intelligence + DKG's shared memory."
+TRACaBot fixes this with agent-readable evidence and DKG shared memory."
 
 
 
@@ -48,7 +48,7 @@ ClawShield fixes this with LLM intelligence + DKG's shared memory."
 
 - Terminal: `openclaw gateway` running.
 
-- Show `~/.openclaw/workspace/skills/` with our 3 skills (scam-analyzer, dkg-logger, ban-guard).
+- Show `skills/tracabot/skill.json` and the `tracabot-skill` CLI bridge.
 
 - Quick: Open DKG node status (`dkg status`).
 
@@ -66,7 +66,7 @@ ClawShield fixes this with LLM intelligence + DKG's shared memory."
 
      (Make it look real — urgency + crypto + impersonation of support).
 
-  2. Bot auto-replies (or on slight delay): "🛡️ ClawShield Analysis: HIGH CONFIDENCE SCAM (94%). Type: Giveaway + Impersonation. Evidence: [lists urgency words, new account flags, username similarity to real @support]. Recommended: Ban. Logging to DKG..."
+  2. Bot auto-replies (or on slight delay): "TRACaBot Analysis: HIGH CONFIDENCE SCAM (94%). Type: Giveaway + Impersonation. Evidence: [lists urgency words, suspicious domain, support lure]. Recommended: Ban. Logging to DKG..."
 
   3. Admin (or auto if high-conf): Type `/ban @badactor "Fake airdrop impersonating support"`
 
@@ -76,7 +76,7 @@ ClawShield fixes this with LLM intelligence + DKG's shared memory."
 
   - Show curl or DKG UI: Query the assertion → See the RDF triples with confidence, evidence, creator, timestamp.
 
-  - "This is Working Memory — fast, agent-written. Same data is now in Shared Memory for any other agent to query: 'What giveaway scams hit crypto groups today?'"
+- "This is evidence-backed Shared Memory. Local weak observations stay in TRACaBot working memory, while accepted evidence becomes queryable by any other TRACaBot/OpenClaw agent using the same Context Graph."
 
 
 
@@ -84,7 +84,7 @@ ClawShield fixes this with LLM intelligence + DKG's shared memory."
 
 - In TG: `/stats`
 
-- Bot: "📊 ClawShield Community Health (last 7 days, from DKG Shared Memory):
+- Bot: "TRACaBot Community Health (last 7 days, from DKG Shared Memory):
 
   - 14 detections (9 giveaway, 4 impersonation, 1 phishing)
 
@@ -104,7 +104,7 @@ ClawShield fixes this with LLM intelligence + DKG's shared memory."
 
 - Quick screen: dkg-logger SKILL.md showing exact HTTP API calls (public endpoints only).
 
-- "Built on dkg-hello-world pattern. Uses Context Graphs + Assertions for Working Memory. Terminology 100% v10 native. High-confidence reports automatically publish to the Context Graph once they meet policy."
+- "Uses the OpenClaw DKG adapter for Context Graph creation, Shared Memory writes, Shared Memory queries, and targeted publication. High-confidence reports automatically publish to the Context Graph once they meet policy."
 
 - "Agent-first: All via natural chat. No dashboards. Sandboxed skills. Full tests + security notes in repo."
 
