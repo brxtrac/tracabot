@@ -7,6 +7,12 @@ export const TELEGRAM_COMMANDS = [
   { command: 'report', description: 'Report a suspicious user, wallet, or message to DKG' },
   { command: 'ban', description: 'Ban a replied user and publish ban evidence' },
   { command: 'stats', description: 'Show recent fraud checks and detections' },
+  { command: 'why', description: 'Explain a tracabot event decision' },
+  { command: 'watch', description: 'Admin: watch a suspicious actor' },
+  { command: 'unwatch', description: 'Admin: remove a watched actor' },
+  { command: 'appeal', description: 'Submit an appeal or correction for an event' },
+  { command: 'review', description: 'Admin: uphold or overturn an event' },
+  { command: 'digest', description: 'Show recent moderation digest' },
   { command: 'help', description: 'Show tracabot commands and autonomous policy' }
 ];
 
@@ -65,6 +71,26 @@ function actorAliases(user = {}) {
     user.first_name,
     [user.first_name, user.last_name].filter(Boolean).join(' ')
   ].filter(Boolean);
+}
+
+function eventAgeMs(event = {}) {
+  const timestamp = Date.parse(event.timestamp || '');
+  return Number.isNaN(timestamp) ? Infinity : Date.now() - timestamp;
+}
+
+function eventMatchesTarget(event = {}, target = {}) {
+  const key = targetKey(target);
+  const eventUser = event.user || {};
+  return actorKey(eventUser) === key || event.payload?.target_key === key || event.payload?.watch_target_key === key;
+}
+
+function textFingerprint(text = '') {
+  const words = String(text).toLowerCase().replace(/https?:\/\/\S+/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((word) => word.length > 2);
+  return words.slice(0, 16).join(' ');
+}
+
+function plural(count, singular, pluralWord = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : pluralWord}`;
 }
 
 export class TelegramShieldBot {
@@ -298,6 +324,13 @@ export class TelegramShieldBot {
       '/report <user|wallet|text> - submit suspicious evidence to DKG when it has independent signal.',
       '/ban - admin-only; reply to a user to ban and publish evidence.',
       '/stats - show recent DKG threat activity. Use /stats sources for receipts.',
+      '/why <event-id> - explain local + DKG evidence behind a decision.',
+      '/watch @user reason - admin-only; increase scrutiny without banning by itself.',
+      '/unwatch @user reason - admin-only; close a watch entry.',
+      '/appeal <event-id> reason - submit a correction or appeal to DKG.',
+      '/review <event-id> uphold|overturn reason - admin-only DKG review decision.',
+      '/stats campaigns - show repeated domains, wallets, patterns, or text fingerprints.',
+      '/digest - summarize recent actions, reports, watches, appeals, and campaigns.',
       '/help - show this command guide.',
       '',
       `Autonomous policy: warn/log at ${warn}%, delete/restrict at ${restrict}%, delete/ban at ${ban}%.`,
@@ -332,6 +365,109 @@ export class TelegramShieldBot {
     return event;
   }
 
+  findEvent(eventId = '') {
+    if (!eventId) return null;
+    return this.store.all().find((event) => event.id === eventId || event.payload?.report_event_id === eventId || event.payload?.target_event_id === eventId) || null;
+  }
+
+  activeWatchFor(target = {}) {
+    const key = targetKey(target);
+    if (!key) return null;
+    const events = this.store.all().filter((event) => event.payload?.watch_target_key === key);
+    let active = null;
+    for (const event of events) {
+      if (event.event_type === 'watch_started') active = event;
+      if (event.event_type === 'watch_ended') active = null;
+    }
+    return active;
+  }
+
+  formatWhy(eventId = '') {
+    const event = this.findEvent(eventId);
+    if (!event) return `No local tracabot event found for ${eventId}. Try /stats sources for recent DKG receipts.`;
+    const risk = event.payload || {};
+    const evidence = risk.evidence?.length ? risk.evidence.slice(0, 8).map((item) => `- ${item}`).join('\n') : '- No evidence recorded.';
+    const dkgRefs = risk.dkg_evidence?.length ? risk.dkg_evidence.slice(0, 4).map((item) => `- ${item.ual || 'DKG'}${item.eventId ? ` event ${item.eventId}` : ''}`).join('\n') : '- No DKG source refs on this event.';
+    const action = event.event_type;
+    const ref = formatDkgReference(event) || event.id;
+    return [
+      `Why ${event.id}: ${action}`,
+      `Confidence: ${risk.confidence ?? 0}% (local ${risk.local_confidence ?? 0}%, DKG ${risk.dkg_confidence ?? 0}%). Type: ${risk.scam_type || 'unknown'}.`,
+      `Recommendation/action: ${risk.recommended_action || action}. Ref: ${ref}`,
+      'Evidence:',
+      evidence,
+      'DKG sources:',
+      dkgRefs
+    ].join('\n');
+  }
+
+  recentEvents(ms = 24 * 60 * 60 * 1000) {
+    return this.store.all().filter((event) => eventAgeMs(event) <= ms);
+  }
+
+  campaignSummary(windowMs = 24 * 60 * 60 * 1000) {
+    const buckets = new Map();
+    for (const event of this.recentEvents(windowMs)) {
+      const payload = event.payload || {};
+      for (const domain of payload.domains || []) {
+        const key = `domain:${domain}`;
+        buckets.set(key, [...(buckets.get(key) || []), event]);
+      }
+      for (const wallet of payload.wallets || []) {
+        const key = `wallet:${wallet}`;
+        buckets.set(key, [...(buckets.get(key) || []), event]);
+      }
+      for (const pattern of payload.patterns || []) {
+        const key = `pattern:${pattern}`;
+        buckets.set(key, [...(buckets.get(key) || []), event]);
+      }
+      const fp = textFingerprint((payload.evidence || []).join(' '));
+      if (fp) {
+        const key = `text:${fp}`;
+        buckets.set(key, [...(buckets.get(key) || []), event]);
+      }
+    }
+    return [...buckets.entries()]
+      .map(([key, events]) => ({ key, events: [...new Map(events.map((event) => [event.id, event])).values()] }))
+      .filter((item) => item.events.length >= 2)
+      .sort((a, b) => b.events.length - a.events.length || a.key.localeCompare(b.key));
+  }
+
+  async maybeRecordCampaign(message, risk) {
+    const campaigns = this.campaignSummary(24 * 60 * 60 * 1000).filter((campaign) => !this.store.all().some((event) => event.event_type === 'fraud_campaign' && event.payload?.campaign_key === campaign.key));
+    const campaign = campaigns[0];
+    if (!campaign) return null;
+    return this.record('fraud_campaign', message, {
+      scam_type: risk.scam_type || 'campaign',
+      confidence: Math.max(80, risk.confidence || 0),
+      local_confidence: risk.local_confidence || risk.confidence || 0,
+      campaign_key: campaign.key,
+      related_event_ids: campaign.events.slice(0, 10).map((event) => event.id),
+      evidence: [`Campaign signal ${campaign.key} repeated across ${campaign.events.length} recent events`]
+    }, { writeDkg: !this.config.testMode });
+  }
+
+  formatCampaigns() {
+    const campaigns = this.campaignSummary(7 * 24 * 60 * 60 * 1000).slice(0, 6);
+    if (!campaigns.length) return 'No repeated fraud campaigns found in recent local memory.';
+    return ['Recent campaign signals:', ...campaigns.map((campaign) => `- ${campaign.key} across ${plural(campaign.events.length, 'event')}: ${campaign.events.slice(0, 4).map((event) => event.id).join(', ')}`)].join('\n');
+  }
+
+  formatDigest() {
+    const events = this.recentEvents(24 * 60 * 60 * 1000);
+    const count = (types) => events.filter((event) => types.includes(event.event_type)).length;
+    const campaigns = this.campaignSummary(24 * 60 * 60 * 1000);
+    const high = events.filter((event) => Number(event.payload?.confidence || 0) >= 80).length;
+    return [
+      `tracabot digest (24h): ${plural(events.length, 'event')}, ${plural(high, 'high-confidence signal')}.`,
+      `Actions: ${plural(count(['ban_executed']), 'ban')}, ${plural(count(['restrict_executed']), 'restriction')}, ${plural(count(['report_submitted']), 'accepted report')}.`,
+      `Review: ${plural(count(['risk_review_needed', 'risk_action_suppressed']), 'admin review item')}, ${plural(count(['appeal_submitted']), 'appeal')}, ${plural(count(['review_upheld', 'review_overturned']), 'review decision')}.`,
+      `Watchlist: ${plural(count(['watch_started']), 'watch started')}, ${plural(count(['watch_ended']), 'watch ended')}.`,
+      campaigns.length ? `Top campaign: ${campaigns[0].key} across ${campaigns[0].events.length} events.` : 'No repeated campaign cluster in the last 24h.',
+      'Use /stats sources for DKG receipts or /why <event-id> for a decision explanation.'
+    ].join('\n');
+  }
+
   isRiskQuery(message) {
     const text = message.text || '';
     const mentionsBot = /@tracabot\b|@tracethembot\b/i.test(text);
@@ -352,6 +488,11 @@ export class TelegramShieldBot {
       analysis.recommended_action = 'ban';
       analysis.scam_type = 'impersonation';
       analysis.evidence = [...(analysis.evidence || []), `Joined as ${renameCopycat.firstIdentity}, then changed identity to resemble admin ${renameCopycat.matchedAdmin}`];
+    }
+    const watch = this.activeWatchFor(targetUser);
+    if (watch) {
+      analysis.confidence = Math.min(99, Math.max(analysis.confidence || 0, (analysis.confidence || 0) + 15));
+      analysis.evidence = [...(analysis.evidence || []), `Active watchlist entry ${watch.id}: ${watch.payload?.reason || 'admin watch'}`];
     }
     return combineRisk({ analysis, dkgIntel, threshold: this.config.actionThreshold });
   }
@@ -491,6 +632,10 @@ export class TelegramShieldBot {
     const text = message.text || '';
     const chatId = message.chat.id;
     if (text.startsWith('/stats')) {
+      if (/\bcampaigns?\b/i.test(text)) {
+        await this.send(chatId, this.formatCampaigns(), { reply_to_message_id: message.message_id });
+        return;
+      }
       const stats = await this.dkg.getStats(7);
       const wantsSources = /\b(source|sources|evidence|receipts)\b/i.test(text);
       await this.send(chatId, wantsSources ? formatStatsSourcesReply(stats) : formatStatsReply(stats));
@@ -500,11 +645,90 @@ export class TelegramShieldBot {
       await this.send(chatId, this.formatHelp(), { reply_to_message_id: message.message_id });
       return;
     }
+    if (text.startsWith('/why')) {
+      const eventId = this.commandText(message, 'why').split(/\s+/)[0] || '';
+      await this.send(chatId, this.formatWhy(eventId), { reply_to_message_id: message.message_id });
+      return;
+    }
+    if (text.startsWith('/digest')) {
+      await this.send(chatId, this.formatDigest(), { reply_to_message_id: message.message_id });
+      return;
+    }
+    if (text.startsWith('/watch')) {
+      if (!await this.isTrustedModerator(message)) {
+        await this.send(chatId, '⚠️ /watch is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
+        return;
+      }
+      const { target } = this.resolveCommandTarget(message, 'watch');
+      const reason = this.commandText(message, 'watch').replace(/^@?\S+\s*/, '').trim() || 'admin watch';
+      const event = await this.record('watch_started', { ...message, from: target }, {
+        watch_target_key: targetKey(target),
+        target,
+        reason,
+        moderator: actorFromMessage(message),
+        evidence: [`admin watch started: ${reason}`]
+      });
+      await this.send(chatId, `👀 Watching ${target.label || target.username || target.id}. Evidence logged as ${event.id}.`, { reply_to_message_id: message.message_id });
+      return;
+    }
+    if (text.startsWith('/unwatch')) {
+      if (!await this.isTrustedModerator(message)) {
+        await this.send(chatId, '⚠️ /unwatch is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
+        return;
+      }
+      const { target } = this.resolveCommandTarget(message, 'unwatch');
+      const reason = this.commandText(message, 'unwatch').replace(/^@?\S+\s*/, '').trim() || 'admin unwatch';
+      const event = await this.record('watch_ended', { ...message, from: target }, {
+        watch_target_key: targetKey(target),
+        target,
+        reason,
+        moderator: actorFromMessage(message),
+        evidence: [`admin watch ended: ${reason}`]
+      });
+      await this.send(chatId, `✅ Removed watch for ${target.label || target.username || target.id}. Logged as ${event.id}.`, { reply_to_message_id: message.message_id });
+      return;
+    }
+    if (text.startsWith('/appeal')) {
+      const [eventId, ...reasonParts] = this.commandText(message, 'appeal').split(/\s+/);
+      const reason = reasonParts.join(' ').trim() || 'appeal submitted';
+      const event = await this.record('appeal_submitted', message, {
+        target_event_id: eventId || '',
+        reason,
+        appellant: actorFromMessage(message),
+        evidence: [`appeal submitted for ${eventId || 'unknown event'}: ${reason}`]
+      });
+      await this.send(chatId, `📝 Appeal logged to DKG as ${event.id}. Admins can /review ${eventId || '<event-id>'} uphold|overturn reason.`, { reply_to_message_id: message.message_id });
+      return;
+    }
+    if (text.startsWith('/review')) {
+      if (!await this.isTrustedModerator(message)) {
+        await this.send(chatId, '⚠️ /review is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
+        return;
+      }
+      const [eventId, decisionRaw, ...reasonParts] = this.commandText(message, 'review').split(/\s+/);
+      const decision = /^(uphold|upheld)$/i.test(decisionRaw || '') ? 'upheld' : /^(overturn|overturned|reject)$/i.test(decisionRaw || '') ? 'overturned' : '';
+      if (!eventId || !decision) {
+        await this.send(chatId, 'Usage: /review <event-id> uphold|overturn reason', { reply_to_message_id: message.message_id });
+        return;
+      }
+      const reason = reasonParts.join(' ').trim() || `review ${decision}`;
+      const eventType = decision === 'upheld' ? 'review_upheld' : 'review_overturned';
+      const event = await this.record(eventType, message, {
+        target_event_id: eventId,
+        review_decision: decision,
+        reason,
+        reviewer: actorFromMessage(message),
+        evidence: [`admin review ${decision} ${eventId}: ${reason}`]
+      });
+      await this.send(chatId, `✅ Review ${decision} for ${eventId}. DKG event ${event.id}.`, { reply_to_message_id: message.message_id });
+      return;
+    }
     if (text.startsWith('/scan')) {
       const { target, text: targetText } = this.resolveCommandTarget(message, 'scan');
       const risk = await this.assess({ ...message, from: target, text: targetText }, target, targetText);
       const event = await this.record('risk_query', { ...message, from: target }, risk);
       const finding = risk.confidence >= 80 ? await this.publishHighConfidenceFinding({ ...message, from: target, text: targetText }, risk) : null;
+      await this.maybeRecordCampaign({ ...message, from: target, text: targetText }, risk);
       await this.send(chatId, formatScanReply({ target, risk, eventId: event.id, findingId: finding?.id }), { reply_to_message_id: message.message_id });
       return;
     }
@@ -544,11 +768,13 @@ export class TelegramShieldBot {
       };
       if (!reportDecision.accepted || reportDecision.decision !== 'accepted') {
         const event = await this.record(reportDecision.decision === 'weak' ? 'report_review_needed' : 'report_rejected', { ...message, from: target }, reportPayload, { writeDkg: false });
+        await this.maybeRecordCampaign({ ...message, from: target, text: targetText }, reportPayload);
         await this.send(chatId, formatReportReply(event, reportDecision), { reply_to_message_id: message.message_id });
         return;
       }
       const event = await this.record('report_submitted', { ...message, from: target }, reportPayload);
       await this.recordReporterReputation(message, target, event, reportDecision);
+      await this.maybeRecordCampaign({ ...message, from: target, text: targetText }, reportPayload);
       const trustedReporter = await this.isTrustedModerator(message);
       const canEscalate = trustedReporter && reportLocalConfidence >= 60 && reportConfidence >= this.config.actionThreshold;
       if (canEscalate && target.id && target.kind !== 'wallet') {
@@ -600,6 +826,7 @@ export class TelegramShieldBot {
         scam_type: risk.scam_type || 'admin_action',
         evidence: [...risk.evidence, reason, 'manual /ban command']
       });
+      await this.maybeRecordCampaign({ ...message, from: replyUser, text: context }, risk);
       await this.send(chatId, formatBanReply(replyUser, event.id));
     }
   }
@@ -620,6 +847,7 @@ export class TelegramShieldBot {
       const risk = await this.assess({ ...message, from: target }, target, `${message.text}\n${targetMessage.text || ''}`);
       const event = await this.record('risk_query', { ...message, from: target }, risk);
       const finding = risk.confidence >= 80 ? await this.publishHighConfidenceFinding({ ...message, from: target }, risk) : null;
+      await this.maybeRecordCampaign({ ...message, from: target }, risk);
       await this.send(message.chat.id, formatScanReply({ target, risk, eventId: event.id, findingId: finding?.id }), { reply_to_message_id: message.message_id });
       return;
     }
@@ -630,6 +858,7 @@ export class TelegramShieldBot {
     }
     if (risk.confidence >= (this.config.warnThreshold ?? 60)) {
       await this.record('scam_detection', message, risk);
+      await this.maybeRecordCampaign(message, risk);
     }
     if (risk.confidence >= (this.config.restrictThreshold ?? this.config.actionThreshold)) {
       await this.applyRiskAction(message, risk);

@@ -174,6 +174,12 @@ test('telegram command descriptions match the public bot command list', () => {
     { command: 'report', description: 'Report a suspicious user, wallet, or message to DKG' },
     { command: 'ban', description: 'Ban a replied user and publish ban evidence' },
     { command: 'stats', description: 'Show recent fraud checks and detections' },
+    { command: 'why', description: 'Explain a tracabot event decision' },
+    { command: 'watch', description: 'Admin: watch a suspicious actor' },
+    { command: 'unwatch', description: 'Admin: remove a watched actor' },
+    { command: 'appeal', description: 'Submit an appeal or correction for an event' },
+    { command: 'review', description: 'Admin: uphold or overturn an event' },
+    { command: 'digest', description: 'Show recent moderation digest' },
     { command: 'help', description: 'Show tracabot commands and autonomous policy' }
   ]);
 });
@@ -189,7 +195,63 @@ test('/help explains commands, thresholds, and DKG memory', async () => {
   const help = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
   assert.match(help, /tracabot commands/);
   assert.match(help, /delete\/restrict at 75%/);
+  assert.match(help, /\/why <event-id>/);
   assert.match(help, /Context Graph tracabot/);
+});
+
+test('/why explains local event decisions', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  bot.store.append({
+    id: 'evt-why',
+    event_type: 'ban_executed',
+    timestamp: new Date().toISOString(),
+    user: { id: 55, username: 'badactor' },
+    payload: { confidence: 91, local_confidence: 80, dkg_confidence: 20, scam_type: 'phishing', recommended_action: 'ban', evidence: ['scam domain'], dkg_evidence: [{ ual: 'did:dkg:context-graph:tracabot/_shared_memory', eventId: 'prior' }] }
+  });
+  await bot.handleCommand({ chat: { id: -100, title: 'demo' }, from: { id: 1, username: 'admin' }, message_id: 32, text: '/why evt-why' });
+  const reply = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
+  assert.match(reply, /Why evt-why/);
+  assert.match(reply, /Confidence: 91%/);
+  assert.match(reply, /scam domain/);
+});
+
+test('/appeal records correction request and /review records admin decision', async () => {
+  const { bot, dkgWrites, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  await bot.handleCommand({ chat, from: { id: 86, username: 'BRX86' }, message_id: 33, text: '/appeal evt-ban false positive' });
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 34, text: '/review evt-ban overturn agreed false positive' });
+  assert.ok(dkgWrites.some((event) => event.event_type === 'appeal_submitted' && event.payload.target_event_id === 'evt-ban'));
+  assert.ok(dkgWrites.some((event) => event.event_type === 'review_overturned' && event.payload.review_decision === 'overturned'));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Review overturned')));
+});
+
+test('/watch boosts scrutiny until /unwatch closes it', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    analyzer: () => ({ is_scam: false, confidence: 50, scam_type: 'other', evidence: ['thin signal'], recommended_action: 'ignore' }),
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] }
+  });
+  const chat = { id: -100, title: 'demo' };
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 35, text: '/watch @maybe_scam suspicious outreach' });
+  const risk = await bot.assess({ chat, from: { id: '', username: 'maybe_scam' }, text: 'hello' }, { id: '', username: 'maybe_scam' }, 'hello');
+  assert.equal(risk.confidence, 65);
+  assert.match(risk.evidence.join('\n'), /Active watchlist/);
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 36, text: '/unwatch @maybe_scam resolved' });
+  const riskAfter = await bot.assess({ chat, from: { id: '', username: 'maybe_scam' }, text: 'hello' }, { id: '', username: 'maybe_scam' }, 'hello');
+  assert.equal(riskAfter.confidence, 50);
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Watching')));
+});
+
+test('/stats campaigns and /digest summarize local memory', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const timestamp = new Date().toISOString();
+  bot.store.append({ id: 'evt-c1', event_type: 'scam_detection', timestamp, payload: { domains: ['fake.example'], confidence: 80, evidence: ['fake.example'] } });
+  bot.store.append({ id: 'evt-c2', event_type: 'report_submitted', timestamp, payload: { domains: ['fake.example'], confidence: 90, evidence: ['fake.example'] } });
+  const chat = { id: -100, title: 'demo' };
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 37, text: '/stats campaigns' });
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 38, text: '/digest' });
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('domain:fake.example')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('tracabot digest')));
 });
 
 test('medium-risk message is deleted and restricted instead of banned', async () => {

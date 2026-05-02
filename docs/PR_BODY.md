@@ -13,7 +13,12 @@ Telegram commands are registered on startup:
 - `/scan`: check a user, wallet, or replied message for scam risk.
 - `/report`: report a suspicious user, wallet, or message to DKG.
 - `/ban`: ban a replied user and publish ban evidence.
-- `/stats`: show recent fraud checks and detections.
+- `/stats`: show recent fraud checks and detections, including `/stats campaigns` for repeated scam waves.
+- `/why`: explain a tracabot event decision using local and DKG evidence.
+- `/watch` and `/unwatch`: admin-only scrutiny controls that boost scoring without banning by themselves.
+- `/appeal`: submit a correction or appeal to DKG Shared Memory.
+- `/review`: admin-only upheld/overturned review decision written to DKG.
+- `/digest`: summarize recent actions, reports, watches, appeals, reviews, and campaign signals.
 
 ## DKG v10 Fit
 
@@ -21,7 +26,8 @@ Telegram commands are registered on startup:
 - Public interface: OpenClaw DKG adapter (`DkgDaemonClient`) against the local DKG daemon.
 - Primitives: Context Graph, Assertion, Entity, Integration, Knowledge Asset, Knowledge Collection, UAL.
 - Publication model: high-confidence fraud findings, accepted high-confidence reports, and executed bans are automatically published to the Context Graph with targeted adapter publish calls for the event root. There is no curator-controlled promotion step.
-- Cross-community propagation: `share` writes every accepted finding to Shared Memory with actor IDs, aliases, wallets, patterns, confidence, evidence, and moderation outcome; `query` reads the same graph with `includeSharedMemory: true` before scoring new joins, first posts, `/scan`, and `/report` targets.
+- Cross-community propagation: `share` writes every accepted finding to Shared Memory with actor IDs, aliases, wallets, domains, patterns, campaign signals, confidence, evidence, and moderation outcome; `query` reads the same graph with `includeSharedMemory: true` before scoring new joins, first posts, `/scan`, and `/report` targets.
+- Governance loop: `/why`, `/appeal`, and `/review` make decisions explainable and correctable while preserving an auditable DKG trail instead of silently rewriting moderation history.
 
 ## Verification
 
@@ -38,7 +44,7 @@ Network: f81f9df2e9604fca
 PeerId: 12D3KooWQm9sJCkUTU7kRXsNQttHaYTQV4ZjR8QaBNVUMqVMLC6R
 
 npm run test:commands
-All four command paths exercised: /stats, /scan, /report, /ban
+Core command paths exercised: /stats, /scan, /report, /ban
 Graph: did:dkg:context-graph:tracabot/_shared_memory
 RetrievedIntel: riskScore 100, reportsAcrossCommunities 4
 ```
@@ -47,7 +53,7 @@ Tests and audit:
 
 ```text
 npm test
-5 test files passed
+60 tests passed
 
 npm audit --omit=dev
 found 0 vulnerabilities
