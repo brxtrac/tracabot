@@ -13,7 +13,7 @@ tracabot contacts:
 
 ## DKG Write Authority
 
-The integration writes scam detections, reports, and moderation actions to DKG v10 Shared Memory using `dkg shared-memory write` and creates or subscribes to the configured Context Graph with `dkg context-graph create`. It does not call Verified Memory `PUBLISH` by default. Promotion to Verified Memory is reserved for curator-controlled workflows.
+The integration writes scam detections, reports, and moderation actions to DKG v10 Shared Memory through OpenClaw's `DkgDaemonClient` adapter. It uses the adapter to create the configured Context Graph, write Shared Working Memory, query evidence, and publish eligible high-confidence event roots. If the publish step fails, the Shared Memory write is kept and the publish error is recorded in the local audit event.
 
 ## Telegram Moderation Controls
 

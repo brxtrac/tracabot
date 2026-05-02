@@ -15,15 +15,15 @@ tracabot turns Telegram moderation into agent-native knowledge work. Each detect
 
 The primary user is a Telegram group admin running OpenClaw on a server or mini PC. The admin wants a practical Shieldy-style anti-scam bot, but with DKG v10 memory so detections are not trapped in one chat.
 
-Secondary users are other OpenClaw, Hermes, or custom agents that consume the `claw-shield-intel` Context Graph as shared scam intelligence.
+Secondary users are other OpenClaw, Hermes, or custom agents that consume the `tracabot` Context Graph as shared scam intelligence.
 
 ## Integration Shape
 
 tracabot is a standalone Node.js service and OpenClaw-compatible agent package. It uses only public interfaces:
 
 - Telegram Bot API for polling, replies, and `banChatMember`.
-- DKG v10 CLI subprocesses for Context Graph and Shared Memory operations.
 - OpenClaw official DKG adapter setup through `dkg openclaw setup`.
+- OpenClaw `DkgDaemonClient` adapter calls for Context Graph, Shared Memory, publish, and query operations.
 
 No internal DKG packages or node-daemon patches are used.
 
@@ -38,25 +38,26 @@ Working Memory:
 
 Shared Memory:
 
-- Events are written to `claw-shield-intel` with `dkg shared-memory write`.
+- Events are written to `tracabot` with the OpenClaw DKG adapter Shared Working Memory API.
 - The agent queries Shared Memory before scoring a user, wallet, or scam pattern so cross-community reports can influence local decisions.
 - At 85% confidence, the agent publishes a high-confidence `fraud_finding` Knowledge Asset-shaped event and either bans immediately with Telegram admin rights or reports the full DKG evidence to group admins.
 
-Verified Memory:
+Context Graph Publishing:
 
-- tracabot does not automatically call `PUBLISH`.
-- High-value reports are shaped for later Curator-controlled promotion to Verified Memory.
+- High-confidence fraud findings, accepted high-confidence reports, and executed bans automatically call the adapter's targeted Shared Memory publish flow for the event URI.
+- Publishing is targeted to the event that just qualified, so unrelated Shared Memory is not flushed.
+- There is no curator-controlled promotion step; qualifying memory is published automatically as soon as it meets policy.
 
 ## v10 Primitives Used
 
-- Context Graph: `claw-shield-intel`.
+- Context Graph: `tracabot`.
 - Integration: standalone contributor-owned service with registry metadata.
-- Curator: future promotion authority for `PUBLISH` and SHARE governance.
+- Auto-publish policy: high-confidence fraud memory is published to the Context Graph as soon as it qualifies.
 - Entity: Telegram user, Telegram chat, scam report, moderation action.
-- Knowledge Asset: promoted high-value reports in later Verified Memory workflows.
+- Knowledge Asset: high-value reports shaped as reusable fraud intelligence.
 - Knowledge Collection: batches of related reports, such as a campaign or impersonation wave.
-- SHARE: `dkg shared-memory write`.
-- PUBLISH: documented promotion path only, not automatic in Round 1.
+- SHARE: OpenClaw adapter Shared Working Memory write.
+- PUBLISH: targeted OpenClaw adapter Shared Memory publish for qualifying event roots.
 
 ## LLM-Wiki And Autoresearch Fit
 
@@ -65,7 +66,7 @@ tracabot creates a living scam knowledge graph. Agents can ask:
 - Has this username or Telegram ID appeared in other communities?
 - Which scam types are increasing this week?
 - What evidence supported a previous ban?
-- Which reports are mature enough for Curator review?
+- Which reports have enough confidence and evidence to publish automatically?
 
 That is the LLM-Wiki loop: agents read, write, revise, and verify a shared knowledge substrate instead of relying on private chat logs.
 
@@ -73,9 +74,9 @@ That is the LLM-Wiki loop: agents read, write, revise, and verify a shared knowl
 
 1. A Telegram message is analyzed and stored as local Working Memory.
 2. High-confidence or manually submitted reports are written to Shared Memory.
-3. Repeated reports across communities become candidates for Curator review.
-4. A Curator can ask the agent to summarize evidence, cluster related reports into a Knowledge Collection, and propose `PUBLISH`.
-5. Verified Memory outputs become oracle-ready scam reputation inputs.
+3. Reports or findings that meet the high-confidence threshold are automatically published to the Context Graph.
+4. Agents can summarize evidence, cluster related reports into a Knowledge Collection, and reuse the published memory.
+5. Published Context Graph outputs become oracle-ready scam reputation inputs.
 
 The current data model already includes stable event URIs, timestamps, creators, confidence, scam type, actor identifiers, and evidence lists, so promotion does not require a schema rewrite.
 
@@ -90,15 +91,16 @@ Declared network egress:
 
 Declared DKG operations:
 
-- `dkg context-graph create`.
-- `dkg shared-memory write`.
-- `dkg query --include-shared-memory`.
+- OpenClaw adapter Context Graph create.
+- OpenClaw adapter Shared Working Memory write.
+- OpenClaw adapter targeted Shared Memory publish.
+- OpenClaw adapter DKG query with Shared Memory included.
 
 No preinstall or postinstall scripts are used. No dynamic code loading is used. The package has zero runtime dependencies.
 
 ## Demo
 
-The repository includes `npm run demo`, which writes a realistic scam detection into DKG v10 Shared Memory without needing a Telegram group. It also includes `npm run test:commands`, which exercises `/stats`, `/scan`, `/report`, `/ban`, writes the resulting events to `did:dkg:context-graph:claw-shield-intel/_shared_memory`, and queries the new evidence back from DKG Shared Memory.
+The repository includes `npm run demo`, which writes a realistic scam detection into DKG v10 Shared Memory without needing a Telegram group. It also includes `npm run test:commands`, which exercises `/stats`, `/scan`, `/report`, `/ban`, writes the resulting events to `did:dkg:context-graph:tracabot/_shared_memory`, auto-publishes qualifying evidence, and queries the new evidence back from DKG.
 
 ## Maintenance
 

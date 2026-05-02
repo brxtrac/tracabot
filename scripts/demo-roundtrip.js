@@ -5,6 +5,9 @@ import { DkgClient } from '../src/dkg-client.js';
 import { analyzeMessage } from '../src/scam-analyzer.js';
 
 const config = loadConfig();
+if (config.testMode !== true) {
+  throw new Error('Refusing to write demo evidence unless TRACABOT_TEST_MODE=true');
+}
 const dkg = new DkgClient(config);
 const payload = analyzeMessage({
   text: 'URGENT free 2000 USDT airdrop. Claim now at t.me/fakeclaim and verify wallet with support admin.',

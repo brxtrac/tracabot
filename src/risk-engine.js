@@ -17,6 +17,9 @@ export function combineRisk({ analysis, dkgIntel, threshold = 85 }) {
   if (dkgIntel?.wallets?.length) {
     evidence.push(`Wallets checked: ${dkgIntel.wallets.join(', ')}`);
   }
+  if (dkgIntel?.domains?.length) {
+    evidence.push(`Domains checked: ${dkgIntel.domains.join(', ')}`);
+  }
   if (dkgIntel?.patterns?.length) {
     evidence.push(`Scam patterns checked: ${dkgIntel.patterns.join(', ')}`);
   }
@@ -38,8 +41,9 @@ export function combineRisk({ analysis, dkgIntel, threshold = 85 }) {
     recommended_action: highConfidence ? 'ban' : analysis.recommended_action,
     dkg_evidence: dkgEvidence,
     wallets: dkgIntel?.wallets || [],
+    domains: dkgIntel?.domains || [],
     patterns: dkgIntel?.patterns || [],
-    community_verified_flag: highConfidence ? 'candidate-high-confidence' : ''
+    community_verified_flag: highConfidence ? 'auto-publish-high-confidence' : ''
   };
 }
 
@@ -73,9 +77,15 @@ export function formatScanReply({ target, risk, eventId = '', findingId = '' }) 
 
 export function formatReportReply(event, decision = null) {
   if (decision && decision.decision !== 'accepted') {
-    return `⚠️ Report not published to DKG: ${decision.reason}. Add concrete evidence by replying to the suspicious message or include the wallet/link/text that should be checked.`;
+    return `⚠️ Report not published to DKG: ${decision.reason}. Reply to the suspicious message, mention a recently active suspect, or include the wallet/link/text that should be checked.`;
   }
   const ref = formatDkgReference(event);
+  if (event?.dkg?.publish) {
+    return `✅ Reported. Evidence written to DKG and auto-published to the Context Graph. UAL: ${ref}`;
+  }
+  if (event?.dkg?.publish_error) {
+    return `✅ Reported. Evidence written to DKG Shared Memory and automatic Context Graph publish was attempted. UAL: ${ref}`;
+  }
   return `✅ Reported. Evidence published to DKG Shared Memory. UAL: ${ref}`;
 }
 
@@ -112,8 +122,9 @@ function plural(count, singular, pluralWord = `${singular}s`) {
 export function formatStatsReply(stats) {
   const high = stats.highConfidence || 0;
   const total = stats.total || 0;
+  const graph = stats.graph || 'tracabot';
   if (!total) {
-    return '📊 Shield report (7d): all quiet. DKG shows 0 shady events and 0 high-confidence busts.\nVault is looking solid. Want me to /scan someone specific?';
+    return `📊 Shield report (7d): all quiet. DKG graph ${graph} shows 0 production events and 0 high-confidence signals.\nVault is looking solid. Use /stats sources for receipts.`;
   }
   const highRate = Math.round((high / total) * 100);
   const verdict = high >= 10 || highRate >= 50 ? 'hot week' : high >= 3 ? 'active watch' : 'mostly calm';
@@ -125,8 +136,22 @@ export function formatStatsReply(stats) {
     ? 'DKG vault has receipts. Use /scan on anyone suspicious.'
     : 'No urgent action on my radar. Use /scan if someone feels off.';
   return [
-    `📊 Shield report (7d): ${verdict}. ${plural(high, 'high-confidence bust')} from ${plural(total, 'DKG event')} (${highRate}%).`,
+    `📊 Shield report (7d): ${verdict}. ${plural(high, 'high-confidence signal')} from ${plural(total, 'DKG event')} (${highRate}%).`,
     `Top pattern: ${topRisk}. Actions: ${plural(bans, 'ban')}, ${plural(reports, 'report')}, ${plural(scans, 'scan')}.`,
-    closing
+    `${closing} Source: DKG graph ${graph}; /stats sources shows IDs.`
   ].join('\n');
+}
+
+export function formatStatsSourcesReply(stats) {
+  const graph = stats.graph || 'tracabot';
+  const sources = stats.sources || [];
+  if (!sources.length) {
+    return `🔎 Stats sources: DKG graph ${graph} has no production events in the last 7 days.`;
+  }
+  const lines = sources.map((source) => {
+    const confidence = source.confidence ? ` ${source.confidence}%` : '';
+    const created = source.created ? ` - ${source.created.replace(/\.\d{3}Z$/, 'Z')}` : '';
+    return `- ${labelStatKey(source.eventType)}${confidence} - ${source.eventId}${created}`;
+  });
+  return [`🔎 Stats sources from DKG graph ${graph}:`, ...lines].join('\n');
 }

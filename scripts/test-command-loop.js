@@ -13,6 +13,7 @@ const config = {
   telegramToken: 'stub-token',
   adminIds: new Set(),
   autoBan: true,
+  testMode: true,
   actionThreshold: 80,
   proactiveScanMinutes: 30,
   storePath: join(mkdtempSync(join(tmpdir(), 'tracabot-live-loop-')), 'events.jsonl')
@@ -24,7 +25,7 @@ const calls = [];
 bot.call = async (method, payload) => {
   calls.push({ method, payload });
   if (method === 'getMe') return { id: 999, username: 'tracethembot' };
-  if (method === 'getChatMember') return { status: 'administrator', can_restrict_members: true };
+  if (method === 'getChatMember') return { status: 'administrator', can_restrict_members: true, can_delete_messages: true };
   return true;
 };
 
@@ -50,9 +51,13 @@ await bot.handleCommand({ chat, from: admin, message_id: 6, text: `/scan @${susp
 
 const messages = calls.filter((call) => call.method === 'sendMessage').map((call) => call.payload.text);
 const bans = calls.filter((call) => call.method === 'banChatMember');
-const events = store.all().map((event) => ({ id: event.id, type: event.event_type, dkg: event.dkg?.output?.split('\n')[1] || event.dkg_error || 'no dkg result' }));
+const events = store.all().map((event) => ({
+  id: event.id,
+  type: event.event_type,
+  dkg: event.dkg?.shareOperation || event.dkg?.eventId || event.dkg_error || 'no dkg result'
+}));
 const stats = await dkg.getStats(7);
-const intel = await dkg.queryRiskIndicators({ username: suspect.username, text: scamText });
+const intel = await dkg.queryRiskIndicators({ username: suspect.username, userId: suspect.id, aliases: [suspect.username], text: scamText });
 
 console.log(JSON.stringify({
   suspect: suspect.username,
@@ -63,6 +68,7 @@ console.log(JSON.stringify({
   retrievedIntel: {
     riskScore: intel.riskScore,
     reportsAcrossCommunities: intel.reportsAcrossCommunities,
-    evidenceCount: intel.evidence.length
+    evidenceCount: intel.evidence.length,
+    note: 'test-mode command-loop evidence is intentionally excluded from production risk queries'
   }
 }, null, 2));

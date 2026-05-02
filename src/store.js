@@ -1,10 +1,11 @@
 import { mkdirSync, appendFileSync, readFileSync, existsSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 
 export class EventStore {
   constructor(path) {
-    this.path = path;
-    mkdirSync(dirname(path), { recursive: true });
+    if (!path || path === '.' || path.endsWith('/')) throw new Error('EventStore path must be a file path');
+    this.path = resolve(path);
+    mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
   }
 
   append(event) {

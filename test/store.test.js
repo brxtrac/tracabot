@@ -23,3 +23,7 @@ test('ignores malformed jsonl lines', () => {
   appendFileSync(store.path, 'not-json\n');
   assert.deepEqual(store.all().map((event) => event.id), ['ok']);
 });
+
+test('requires event store path to be a file path', () => {
+  assert.throws(() => new EventStore('.'), /file path/);
+});

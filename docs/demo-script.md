@@ -70,7 +70,7 @@ ClawShield fixes this with LLM intelligence + DKG's shared memory."
 
   3. Admin (or auto if high-conf): Type `/ban @badactor "Fake airdrop impersonating support"`
 
-  4. Bot: "✅ Banned. Event logged to DKG Context Graph 'claw-shield-intel' as assertion 'action_logs'. UAL: [show returned UAL or explorer link]. Full provenance recorded."
+  4. Bot: "✅ Banned. Event logged to DKG Context Graph 'tracabot' as assertion 'action_logs'. UAL: [show returned UAL or explorer link]. Full provenance recorded."
 
 - Switch to DKG side:
 
@@ -104,7 +104,7 @@ ClawShield fixes this with LLM intelligence + DKG's shared memory."
 
 - Quick screen: dkg-logger SKILL.md showing exact HTTP API calls (public endpoints only).
 
-- "Built on dkg-hello-world pattern. Uses Context Graphs + Assertions for Working Memory. Terminology 100% v10 native. Data model designed so these reports promote seamlessly to Verified Memory in Round 2 via community conviction — no code changes."
+- "Built on dkg-hello-world pattern. Uses Context Graphs + Assertions for Working Memory. Terminology 100% v10 native. High-confidence reports automatically publish to the Context Graph once they meet policy."
 
 - "Agent-first: All via natural chat. No dashboards. Sandboxed skills. Full tests + security notes in repo."
 
