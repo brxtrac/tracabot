@@ -232,14 +232,26 @@ test('/watch boosts scrutiny until /unwatch closes it', async () => {
     dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] }
   });
   const chat = { id: -100, title: 'demo' };
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 35, text: '/watch @maybe_scam suspicious outreach' });
-  const risk = await bot.assess({ chat, from: { id: '', username: 'maybe_scam' }, text: 'hello' }, { id: '', username: 'maybe_scam' }, 'hello');
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 35, text: '/watch suspicious outreach', reply_to_message: { chat, from: { id: 77, username: 'maybe_scam' }, text: 'dm me for support' } });
+  const risk = await bot.assess({ chat, from: { id: 77, username: 'maybe_scam' }, text: 'hello' }, { id: 77, username: 'maybe_scam' }, 'hello');
   assert.equal(risk.confidence, 65);
   assert.match(risk.evidence.join('\n'), /Active watchlist/);
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 36, text: '/unwatch @maybe_scam resolved' });
-  const riskAfter = await bot.assess({ chat, from: { id: '', username: 'maybe_scam' }, text: 'hello' }, { id: '', username: 'maybe_scam' }, 'hello');
+  const watchReply = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Watching'));
+  assert.match(watchReply.payload.text, /tg:\/\/user\?id=77/);
+  assert.equal(watchReply.payload.parse_mode, 'HTML');
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 36, text: '/unwatch resolved', reply_to_message: { chat, from: { id: 77, username: 'maybe_scam' }, text: 'dm me for support' } });
+  const riskAfter = await bot.assess({ chat, from: { id: 77, username: 'maybe_scam' }, text: 'hello' }, { id: 77, username: 'maybe_scam' }, 'hello');
   assert.equal(riskAfter.confidence, 50);
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Watching')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Removed watch')));
+});
+
+test('/watch falls back to clickable username text when only @username is known', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 39, text: '/watch @maybe_scam suspicious outreach' });
+  const reply = calls.find((call) => call.method === 'sendMessage')?.payload || {};
+  assert.match(reply.text || '', /Watching @maybe_scam/);
+  assert.equal(reply.parse_mode, 'HTML');
 });
 
 test('/stats campaigns and /digest summarize local memory', async () => {

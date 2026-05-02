@@ -15,7 +15,7 @@ Telegram commands are registered on startup:
 - `/ban`: ban a replied user and publish ban evidence.
 - `/stats`: show recent fraud checks and detections, including `/stats campaigns` for repeated scam waves.
 - `/why`: explain a tracabot event decision using local and DKG evidence.
-- `/watch` and `/unwatch`: admin-only scrutiny controls that boost scoring without banning by themselves.
+- `/watch` and `/unwatch`: admin-only scrutiny controls that prefer reply-based clickable Telegram mentions and boost scoring without banning by themselves.
 - `/appeal`: submit a correction or appeal to DKG Shared Memory.
 - `/review`: admin-only upheld/overturned review decision written to DKG.
 - `/digest`: summarize recent actions, reports, watches, appeals, reviews, and campaign signals.

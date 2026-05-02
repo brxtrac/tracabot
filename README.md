@@ -16,7 +16,7 @@ Telegram scam moderation usually stays trapped inside one chat. TRACaBot turns e
 - `/stats` returns readable DKG aggregate activity for recent fraud events, high-confidence findings, risk types, and action guidance.
 - `/stats campaigns` shows repeated domains, wallets, scam patterns, or text fingerprints from recent local memory.
 - `/why <event-id>` explains the local and DKG evidence behind a tracabot decision.
-- `/watch @user reason` and `/unwatch @user reason` are admin-only scrutiny controls; a watch entry boosts future risk scoring but does not ban by itself.
+- `/watch reason` and `/unwatch reason` are admin-only scrutiny controls when replying to a user; `/watch @user reason` and `/unwatch @user reason` also work. Reply-based use creates a clickable Telegram mention and boosts future risk scoring without banning by itself.
 - `/appeal <event-id> reason` records a correction request to DKG Shared Memory.
 - `/review <event-id> uphold|overturn reason` is admin-only and writes a DKG review decision for future audits and false-positive correction.
 - `/digest` summarizes recent bans, restrictions, reports, watches, appeals, reviews, and campaign signals.

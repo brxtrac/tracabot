@@ -93,6 +93,17 @@ function plural(count, singular, pluralWord = `${singular}s`) {
   return `${count} ${count === 1 ? singular : pluralWord}`;
 }
 
+function escapeHtml(value = '') {
+  return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function userMention(user = {}) {
+  if (user.kind === 'wallet') return escapeHtml(user.label || user.id || 'wallet');
+  const username = String(user.username || '').replace(/^@/, '');
+  const label = username ? `@${username}` : [user.first_name, user.last_name].filter(Boolean).join(' ').trim() || user.label || user.id || 'this account';
+  return user.id ? `<a href="tg://user?id=${encodeURIComponent(user.id)}">${escapeHtml(label)}</a>` : escapeHtml(label);
+}
+
 export class TelegramShieldBot {
   constructor({ config, analyzer, dkg, store }) {
     this.config = config;
@@ -277,7 +288,10 @@ export class TelegramShieldBot {
     const mentioned = this.targetFromMention(message);
     const walletTarget = this.targetFromWallet(argText || reply?.text || '');
     const plainTarget = this.targetFromPlainArgument(argText);
-    const target = mentioned || walletTarget || plainTarget || (reply ? actorFromMessage(reply) : actorFromMessage(message));
+    const replyTarget = reply ? actorFromMessage(reply) : null;
+    const target = ['watch', 'unwatch'].includes(command)
+      ? mentioned || replyTarget || walletTarget || plainTarget || actorFromMessage(message)
+      : mentioned || walletTarget || plainTarget || replyTarget || actorFromMessage(message);
     const text = boundedText([argText, reply?.text || ''].filter(Boolean).join('\n') || message.text || '');
     return { target, text, reply };
   }
@@ -325,10 +339,10 @@ export class TelegramShieldBot {
       '/ban - admin-only; reply to a user to ban and publish evidence.',
       '/stats - show recent DKG threat activity. Use /stats sources for receipts.',
       '/why <event-id> - explain local + DKG evidence behind a decision.',
-      '/watch @user reason - admin-only; increase scrutiny without banning by itself.',
-      '/unwatch @user reason - admin-only; close a watch entry.',
-      '/appeal <event-id> reason - submit a correction or appeal to DKG.',
-      '/review <event-id> uphold|overturn reason - admin-only DKG review decision.',
+      '/watch reason - admin-only; reply to a user to watch them. Also works as /watch @user reason.',
+      '/unwatch reason - admin-only; reply to a user to close a watch. Also works as /unwatch @user reason.',
+      '/appeal <event-id> reason - submit a correction or appeal to DKG. Use /why <event-id> first if unsure.',
+      '/review <event-id> uphold reason - admin-only; keep the decision. Use overturn to reverse it.',
       '/stats campaigns - show repeated domains, wallets, patterns, or text fingerprints.',
       '/digest - summarize recent actions, reports, watches, appeals, and campaigns.',
       '/help - show this command guide.',
@@ -667,8 +681,8 @@ export class TelegramShieldBot {
         reason,
         moderator: actorFromMessage(message),
         evidence: [`admin watch started: ${reason}`]
-      });
-      await this.send(chatId, `👀 Watching ${target.label || target.username || target.id}. Evidence logged as ${event.id}.`, { reply_to_message_id: message.message_id });
+      }, { writeDkg: !this.config.testMode });
+      await this.send(chatId, `👀 Watching ${userMention(target)}. Event: ${event.id}. Reason: ${escapeHtml(reason)}. This increases scrutiny only; it will not ban by itself.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
       return;
     }
     if (text.startsWith('/unwatch')) {
@@ -684,8 +698,8 @@ export class TelegramShieldBot {
         reason,
         moderator: actorFromMessage(message),
         evidence: [`admin watch ended: ${reason}`]
-      });
-      await this.send(chatId, `✅ Removed watch for ${target.label || target.username || target.id}. Logged as ${event.id}.`, { reply_to_message_id: message.message_id });
+      }, { writeDkg: !this.config.testMode });
+      await this.send(chatId, `✅ Removed watch for ${userMention(target)}. Event: ${event.id}. Reason: ${escapeHtml(reason)}.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
       return;
     }
     if (text.startsWith('/appeal')) {
@@ -697,7 +711,7 @@ export class TelegramShieldBot {
         appellant: actorFromMessage(message),
         evidence: [`appeal submitted for ${eventId || 'unknown event'}: ${reason}`]
       });
-      await this.send(chatId, `📝 Appeal logged to DKG as ${event.id}. Admins can /review ${eventId || '<event-id>'} uphold|overturn reason.`, { reply_to_message_id: message.message_id });
+      await this.send(chatId, `📝 Appeal logged to DKG as ${event.id}. Next: admins can run /review ${eventId || '<event-id>'} uphold reason or /review ${eventId || '<event-id>'} overturn reason.`, { reply_to_message_id: message.message_id });
       return;
     }
     if (text.startsWith('/review')) {
@@ -708,7 +722,7 @@ export class TelegramShieldBot {
       const [eventId, decisionRaw, ...reasonParts] = this.commandText(message, 'review').split(/\s+/);
       const decision = /^(uphold|upheld)$/i.test(decisionRaw || '') ? 'upheld' : /^(overturn|overturned|reject)$/i.test(decisionRaw || '') ? 'overturned' : '';
       if (!eventId || !decision) {
-        await this.send(chatId, 'Usage: /review <event-id> uphold|overturn reason', { reply_to_message_id: message.message_id });
+        await this.send(chatId, 'Usage: /review <event-id> uphold reason or /review <event-id> overturn reason', { reply_to_message_id: message.message_id });
         return;
       }
       const reason = reasonParts.join(' ').trim() || `review ${decision}`;
@@ -720,7 +734,7 @@ export class TelegramShieldBot {
         reviewer: actorFromMessage(message),
         evidence: [`admin review ${decision} ${eventId}: ${reason}`]
       });
-      await this.send(chatId, `✅ Review ${decision} for ${eventId}. DKG event ${event.id}.`, { reply_to_message_id: message.message_id });
+      await this.send(chatId, `✅ Review ${decision} for ${eventId}. DKG event ${event.id}. Reason: ${reason}.`, { reply_to_message_id: message.message_id });
       return;
     }
     if (text.startsWith('/scan')) {
