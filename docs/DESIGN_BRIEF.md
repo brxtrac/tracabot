@@ -46,7 +46,7 @@ The repository did not find a confirmed public Working Memory-specific method ex
 
 TRACaBot uses OpenClaw in two ways:
 
-- Runtime DKG adapter: `@origintrail-official/dkg-adapter-openclaw` / `DkgDaemonClient` for Context Graph creation, Shared Memory writes, Shared Memory queries, and targeted publication.
+- Runtime DKG boundary: official DKG/OpenClaw adapter setup using `@origintrail-official/dkg-adapter-openclaw` / `DkgDaemonClient` against the local DKG v10 daemon for Context Graph creation, Shared Memory writes, Shared Memory queries, and targeted publication.
 - Skill surface: `skills/tracabot/skill.json` and `bin/tracabot-skill.js` expose JSON tools for OpenClaw agents: `scan_target`, `explain_event`, `get_watchlist`, `get_digest`, `query_campaigns`, `submit_appeal`, and `review_event`.
 
 Telegram enforcement stays inside the bot runtime because it requires chat context, admin identity checks, and bot permissions. OpenClaw skill tools can reason, explain, summarize, appeal, and review without bypassing Telegram safeguards.

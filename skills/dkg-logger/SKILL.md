@@ -9,7 +9,7 @@ author: brxtrac
 
 # tracabot DKG Logger
 
-The logger is implemented by `src/dkg-client.js` and uses `@origintrail-official/dkg-adapter-openclaw` through `DkgDaemonClient`.
+The logger is implemented by `src/dkg-client.js` and uses the official DKG/OpenClaw adapter setup through `@origintrail-official/dkg-adapter-openclaw` / `DkgDaemonClient` against the local DKG v10 daemon.
 
 ## Writes
 

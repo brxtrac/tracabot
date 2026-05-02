@@ -22,8 +22,8 @@ Secondary users are other OpenClaw, Hermes, or custom agents that consume the `t
 tracabot is a standalone Node.js service and OpenClaw-compatible agent package. It uses only public interfaces:
 
 - Telegram Bot API for polling, replies, and `banChatMember`.
-- OpenClaw official DKG adapter setup through `dkg openclaw setup`.
-- OpenClaw `DkgDaemonClient` adapter calls for Context Graph, Shared Memory, publish, and query operations.
+- Official DKG/OpenClaw adapter setup through `dkg openclaw setup`.
+- OpenClaw `DkgDaemonClient` calls against the local DKG v10 daemon for Context Graph, Shared Memory, publish, and query operations.
 
 No internal DKG packages or node-daemon patches are used.
 

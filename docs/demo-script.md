@@ -26,7 +26,7 @@
 
 **[0:00 - 0:45] Title & Hook**
 
-- Screen: ClawShield logo (or text overlay) + TG group screenshot with scam message.
+- Screen: TRACaBot logo or text overlay + Telegram group screenshot with a scam message.
 
 - Voice: "Hi OriginTrail team. This is TRACaBot: an open-source OpenClaw Telegram agent that detects scammers and impersonators in real time, executes guarded moderation commands like /ban, and writes evidence-backed events to OriginTrail DKG v10 Shared Memory and the tracabot Context Graph.
 
@@ -132,7 +132,7 @@ TRACaBot fixes this with agent-readable evidence and DKG shared memory."
 
 - Description: Full links, "Fork & submit your own integration!", bounty tag.
 
-- Thumbnail: TG scam message + DKG logo + "ClawShield x OriginTrail".
+- Thumbnail: Telegram scam message + DKG logo + "TRACaBot x OriginTrail".
 
 
 

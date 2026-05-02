@@ -19,7 +19,7 @@ TRACaBot is an OpenClaw-compatible Telegram anti-scam agent. It detects phishing
 - Telegram Bot API runtime: `bin/tracabot.js`.
 - OpenClaw skill manifest: `skills/tracabot/skill.json`.
 - OpenClaw JSON bridge: `tracabot-skill` / `bin/tracabot-skill.js`.
-- DKG adapter: OpenClaw `DkgDaemonClient` against the configured DKG node URL.
+- DKG boundary: official DKG/OpenClaw adapter setup using `DkgDaemonClient` against the configured local DKG v10 daemon URL.
 
 ## DKG Operations
 

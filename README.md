@@ -25,7 +25,7 @@ Telegram scam moderation usually stays trapped inside one chat. TRACaBot turns e
 
 ## DKG v10 Integration
 
-TRACaBot uses OpenClaw's DKG adapter as its DKG boundary. The adapter talks to the local DKG daemon at `DKG_NODE_URL` and keeps TRACaBot aligned with the same DKG service OpenClaw uses:
+TRACaBot uses the official DKG/OpenClaw adapter setup as its DKG boundary. `DkgDaemonClient` points at the local DKG v10 daemon at `DKG_NODE_URL` and keeps TRACaBot aligned with the same DKG service OpenClaw uses:
 
 - `DkgDaemonClient.createContextGraph` ensures the configured Context Graph exists.
 - `DkgDaemonClient.share` writes reports, findings, and moderation evidence to DKG Shared Memory.

@@ -2,6 +2,8 @@
 
 Use this walkthrough for a short bounty demo or local smoke test. The goal is to show detection, Telegram action, DKG Shared Memory write/read, explainability, and OpenClaw skill access.
 
+Put final demo assets or the hosted demo link in `docs/demo/`. If the video is too large for GitHub, add `docs/demo/tracabot-demo-link.md` with the public URL.
+
 ## 1. Host Setup
 
 ```bash

@@ -13,7 +13,7 @@ tracabot contacts:
 
 ## DKG Write Authority
 
-The integration writes scam detections, reports, and moderation actions to DKG v10 Shared Memory through OpenClaw's `DkgDaemonClient` adapter. It uses the adapter to create the configured Context Graph, write Shared Memory, query evidence, and publish eligible high-confidence event roots. If the publish step fails, the Shared Memory write is kept and the publish error is recorded in the local audit event.
+The integration writes scam detections, reports, and moderation actions to DKG v10 Shared Memory through the official DKG/OpenClaw adapter setup using `DkgDaemonClient` against the local DKG v10 daemon. It uses the adapter to create the configured Context Graph, write Shared Memory, query evidence, and publish eligible high-confidence event roots. If the publish step fails, the Shared Memory write is kept and the publish error is recorded in the local audit event.
 
 Local JSONL files are operational working memory for weak reports, watchlist state, digest state, and monitoring-only actions. They should not be treated as public DKG evidence unless a later evidence-backed event explicitly qualifies for DKG sharing.
 

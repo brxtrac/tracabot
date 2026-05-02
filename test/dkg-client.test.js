@@ -73,7 +73,7 @@ test('risk lookups ignore old graph and test command DKG evidence', async () => 
   const dkg = new DkgClient({ contextGraph: 'tracabot' });
   dkg.queryBindings = async () => [
     {
-      g: 'did:dkg:context-graph:claw-shield-intel/_shared_memory',
+      g: 'did:dkg:context-graph:legacy-scam-intel/_shared_memory',
       s: 'https://tracabot.org/ontology#event/old',
       eventType: '"fraud_finding"',
       confidence: '"95"',
@@ -293,7 +293,7 @@ test('stats count only production events from the configured DKG graph', async (
       username: '"badactor"'
     },
     {
-      g: 'did:dkg:context-graph:claw-shield-intel/_shared_memory',
+      g: 'did:dkg:context-graph:legacy-scam-intel/_shared_memory',
       s: 'https://tracabot.org/ontology#event/old-ban',
       eventType: '"ban_executed"',
       created: '"2026-04-30T00:00:00.000Z"',
