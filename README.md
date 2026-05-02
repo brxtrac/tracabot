@@ -10,13 +10,13 @@ Telegram scam moderation usually stays trapped inside one chat. TRACaBot turns e
 
 ## Commands
 
-- `/scan` checks a user, wallet, or replied message against local heuristics and DKG Shared Memory, then returns a friendly risk verdict.
+- `/scan` checks a user, Telegram ID, wallet, replied user, or replied SangMata rename alert against local heuristics and DKG Shared Memory, then returns a friendly risk verdict.
 - `/report` accepts replied reports and bare `@username` reports, analyzes replied or recently observed Telegram context for scam patterns like support-DM lures and admin impersonation, applies duplicate/rate-limit/reporter checks, and writes accepted reports to DKG Shared Memory.
-- `/ban` is restricted to configured admins or Telegram chat admins; it bans replied users only when the bot has Telegram ban rights and logs full evidence.
+- `/ban` is restricted to configured admins or Telegram chat admins; it bans replied users or users extracted from replied SangMata rename alerts only when the bot has Telegram ban rights and logs full evidence.
 - `/stats` returns readable DKG aggregate activity for recent fraud events, high-confidence findings, risk types, and action guidance.
 - `/stats campaigns` shows repeated domains, wallets, scam patterns, or text fingerprints from recent local memory.
 - `/why <event-id>` explains the local and DKG evidence behind a tracabot decision.
-- `/watch reason` and `/unwatch reason` are admin-only scrutiny controls when replying to a user; `/watch @user reason` and `/unwatch @user reason` also work. Reply-based use creates a clickable Telegram mention and boosts future risk scoring without banning by itself.
+- `/watch` and `/unwatch` are admin-only scrutiny controls when replying to a user or SangMata rename alert; `/watch <telegram-id>`, `/watch @user`, `/unwatch <telegram-id>`, and `/unwatch @user` also work. ID/reply-based use creates a clickable Telegram mention and boosts future risk scoring without banning by itself.
 - `/appeal <event-id> reason` records a correction request to DKG Shared Memory.
 - `/review <event-id> uphold|overturn reason` is admin-only and writes a DKG review decision for future audits and false-positive correction.
 - `/digest` summarizes recent bans, restrictions, reports, watches, appeals, reviews, and campaign signals.

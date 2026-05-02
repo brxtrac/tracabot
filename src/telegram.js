@@ -104,6 +104,24 @@ function userMention(user = {}) {
   return user.id ? `<a href="tg://user?id=${encodeURIComponent(user.id)}">${escapeHtml(label)}</a>` : escapeHtml(label);
 }
 
+function sangmataTargetFromText(text = '') {
+  const match = String(text || '').match(/\bUser\s+(\d{5,})\s+changed\s+name\s+from\s+(.+?)\s+to\s+(.+?)(?:\.|$)/i);
+  if (!match) return null;
+  const [, id, oldName, newName] = match;
+  return {
+    id,
+    first_name: newName.trim(),
+    label: newName.trim(),
+    kind: 'user',
+    source: 'sangmata',
+    sangmata: {
+      oldName: oldName.trim(),
+      newName: newName.trim(),
+      evidence: `SangMata rename alert: ${oldName.trim()} -> ${newName.trim()}`
+    }
+  };
+}
+
 export class TelegramShieldBot {
   constructor({ config, analyzer, dkg, store }) {
     this.config = config;
@@ -250,6 +268,11 @@ export class TelegramShieldBot {
     return { id: '', username, kind: 'user' };
   }
 
+  targetFromTelegramId(argText = '') {
+    const id = argText.trim().split(/\s+/)[0] || '';
+    return /^\d{5,}$/.test(id) ? { id, label: id, kind: 'user', source: 'telegram_id' } : null;
+  }
+
   targetFromPlainArgument(argText = '') {
     const firstToken = argText.trim().split(/\s+/)[0] || '';
     const normalized = firstToken.replace(/^@/, '').replace(/[^\p{L}\p{N}_-]/gu, '');
@@ -286,14 +309,23 @@ export class TelegramShieldBot {
     const argText = this.commandText(message, command);
     const reply = message.reply_to_message;
     const mentioned = this.targetFromMention(message);
+    const telegramIdTarget = this.targetFromTelegramId(argText);
+    const sangmataTarget = sangmataTargetFromText(reply?.text || '') || sangmataTargetFromText(argText);
     const walletTarget = this.targetFromWallet(argText || reply?.text || '');
     const plainTarget = this.targetFromPlainArgument(argText);
     const replyTarget = reply ? actorFromMessage(reply) : null;
     const target = ['watch', 'unwatch'].includes(command)
-      ? mentioned || replyTarget || walletTarget || plainTarget || actorFromMessage(message)
-      : mentioned || walletTarget || plainTarget || replyTarget || actorFromMessage(message);
+      ? mentioned || telegramIdTarget || sangmataTarget || replyTarget || walletTarget || plainTarget || actorFromMessage(message)
+      : mentioned || telegramIdTarget || walletTarget || sangmataTarget || plainTarget || replyTarget || actorFromMessage(message);
     const text = boundedText([argText, reply?.text || ''].filter(Boolean).join('\n') || message.text || '');
-    return { target, text, reply };
+    return { target, text, reply, sangmataTarget, telegramIdTarget };
+  }
+
+  commandReason(message, command, fallback = 'admin action') {
+    const argText = this.commandText(message, command);
+    const reason = argText.replace(/^@?\w{3,32}\s*/, '').trim();
+    const sangmata = sangmataTargetFromText(message.reply_to_message?.text || '') || sangmataTargetFromText(argText);
+    return reason || sangmata?.sangmata?.evidence || fallback;
   }
 
   resolveReportTarget(message) {
@@ -334,13 +366,13 @@ export class TelegramShieldBot {
     const ban = this.config.banThreshold ?? this.config.actionThreshold ?? 85;
     return [
       'tracabot commands:',
-      '/scan <user|wallet|message> - check risk using local analysis + DKG shared memory.',
+      '/scan <user|id|wallet|message> - check risk using local analysis + DKG shared memory. Reply to SangMata alerts works.',
       '/report <user|wallet|text> - submit suspicious evidence to DKG when it has independent signal.',
       '/ban - admin-only; reply to a user to ban and publish evidence.',
       '/stats - show recent DKG threat activity. Use /stats sources for receipts.',
       '/why <event-id> - explain local + DKG evidence behind a decision.',
-      '/watch reason - admin-only; reply to a user to watch them. Also works as /watch @user reason.',
-      '/unwatch reason - admin-only; reply to a user to close a watch. Also works as /unwatch @user reason.',
+      '/watch - admin-only; reply to a user or SangMata alert. Also works as /watch <telegram-id> or /watch @user.',
+      '/unwatch - admin-only; reply to a user or SangMata alert. Also works as /unwatch <telegram-id> or /unwatch @user.',
       '/appeal <event-id> reason - submit a correction or appeal to DKG. Use /why <event-id> first if unsure.',
       '/review <event-id> uphold reason - admin-only; keep the decision. Use overturn to reverse it.',
       '/stats campaigns - show repeated domains, wallets, patterns, or text fingerprints.',
@@ -674,15 +706,16 @@ export class TelegramShieldBot {
         return;
       }
       const { target } = this.resolveCommandTarget(message, 'watch');
-      const reason = this.commandText(message, 'watch').replace(/^@?\S+\s*/, '').trim() || 'admin watch';
+      const reason = this.commandReason(message, 'watch', 'admin watch');
+      const evidence = ['admin watch started: ' + reason, target.sangmata?.evidence, target.id && target.source === 'telegram_id' ? `Telegram user ID watched: ${target.id}` : ''].filter(Boolean);
       const event = await this.record('watch_started', { ...message, from: target }, {
         watch_target_key: targetKey(target),
         target,
         reason,
         moderator: actorFromMessage(message),
-        evidence: [`admin watch started: ${reason}`]
+        evidence
       }, { writeDkg: !this.config.testMode });
-      await this.send(chatId, `👀 Watching ${userMention(target)}. Event: ${event.id}. Reason: ${escapeHtml(reason)}. This increases scrutiny only; it will not ban by itself.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
+      await this.send(chatId, `👀 Watching ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}. Event: ${event.id}. Reason: ${escapeHtml(reason)}. This increases scrutiny only; it will not ban by itself.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
       return;
     }
     if (text.startsWith('/unwatch')) {
@@ -691,15 +724,16 @@ export class TelegramShieldBot {
         return;
       }
       const { target } = this.resolveCommandTarget(message, 'unwatch');
-      const reason = this.commandText(message, 'unwatch').replace(/^@?\S+\s*/, '').trim() || 'admin unwatch';
+      const reason = this.commandReason(message, 'unwatch', 'admin unwatch');
+      const evidence = ['admin watch ended: ' + reason, target.sangmata?.evidence].filter(Boolean);
       const event = await this.record('watch_ended', { ...message, from: target }, {
         watch_target_key: targetKey(target),
         target,
         reason,
         moderator: actorFromMessage(message),
-        evidence: [`admin watch ended: ${reason}`]
+        evidence
       }, { writeDkg: !this.config.testMode });
-      await this.send(chatId, `✅ Removed watch for ${userMention(target)}. Event: ${event.id}. Reason: ${escapeHtml(reason)}.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
+      await this.send(chatId, `✅ Removed watch for ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}. Event: ${event.id}. Reason: ${escapeHtml(reason)}.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
       return;
     }
     if (text.startsWith('/appeal')) {
@@ -801,7 +835,7 @@ export class TelegramShieldBot {
     }
     if (text.startsWith('/ban')) {
       const { target, text: targetText } = this.resolveCommandTarget(message, 'ban');
-      const replyUser = message.reply_to_message?.from;
+      const replyUser = target?.id ? target : message.reply_to_message?.from;
       if (!await this.isTrustedModerator(message)) {
         const event = await this.record('ban_rejected_unauthorized', { ...message, from: target }, {
           reason: 'manual /ban rejected because requester is not a configured admin or Telegram chat admin',
@@ -811,7 +845,7 @@ export class TelegramShieldBot {
         await this.send(chatId, `⚠️ /ban is restricted to configured admins or Telegram chat admins. Request logged locally as ${event.id}.`, { reply_to_message_id: message.message_id });
         return;
       }
-      if (!replyUser) {
+      if (!replyUser?.id) {
         const risk = await this.assess({ ...message, from: target, text: targetText }, target, targetText);
         const event = await this.record('ban_requested_no_reply', { ...message, from: target }, {
           ...risk,
@@ -820,7 +854,7 @@ export class TelegramShieldBot {
         await this.send(chatId, `⚠️ I can scan/report ${target.label || target.username || 'that target'}, but Telegram needs a replied message so I can ban the exact user. Evidence logged to DKG event ${event.id}.`, { reply_to_message_id: message.message_id });
         return;
       }
-      const reason = this.commandText(message, 'ban') || 'admin requested ban';
+      const reason = this.commandReason(message, 'ban', 'admin requested ban');
       const context = [reason, message.reply_to_message?.text || ''].filter(Boolean).join('\n');
       const risk = await this.assess({ ...message, from: replyUser, text: context }, replyUser, context);
       if (!await this.hasBanRights(chatId)) {
@@ -838,7 +872,7 @@ export class TelegramShieldBot {
         reason,
         confidence: Math.max(100, risk.confidence),
         scam_type: risk.scam_type || 'admin_action',
-        evidence: [...risk.evidence, reason, 'manual /ban command']
+        evidence: [...risk.evidence, reason, replyUser.sangmata?.evidence || '', 'manual /ban command'].filter(Boolean)
       });
       await this.maybeRecordCampaign({ ...message, from: replyUser, text: context }, risk);
       await this.send(chatId, formatBanReply(replyUser, event.id));
@@ -857,7 +891,7 @@ export class TelegramShieldBot {
     }
     if (this.isRiskQuery(message)) {
       const targetMessage = message.reply_to_message || message;
-      const target = this.targetFromMention(message) || actorFromMessage(targetMessage);
+      const target = this.targetFromMention(message) || sangmataTargetFromText(targetMessage.text || '') || actorFromMessage(targetMessage);
       const risk = await this.assess({ ...message, from: target }, target, `${message.text}\n${targetMessage.text || ''}`);
       const event = await this.record('risk_query', { ...message, from: target }, risk);
       const finding = risk.confidence >= 80 ? await this.publishHighConfidenceFinding({ ...message, from: target }, risk) : null;

@@ -254,6 +254,60 @@ test('/watch falls back to clickable username text when only @username is known'
   assert.equal(reply.parse_mode, 'HTML');
 });
 
+test('/watch and /unwatch accept numeric Telegram IDs without a reason', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    analyzer: () => ({ is_scam: false, confidence: 50, scam_type: 'other', evidence: ['thin signal'], recommended_action: 'ignore' }),
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] }
+  });
+  const chat = { id: -100, title: 'demo' };
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 40, text: '/watch 8388593201' });
+  const watchEvent = bot.store.all().find((event) => event.event_type === 'watch_started');
+  assert.equal(watchEvent.payload.watch_target_key, 'id:8388593201');
+  assert.equal(watchEvent.payload.reason, 'admin watch');
+  const risk = await bot.assess({ chat, from: { id: 8388593201 }, text: 'hello' }, { id: 8388593201 }, 'hello');
+  assert.equal(risk.confidence, 65);
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('tg://user?id=8388593201')));
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 41, text: '/unwatch 8388593201' });
+  const riskAfter = await bot.assess({ chat, from: { id: 8388593201 }, text: 'hello' }, { id: 8388593201 }, 'hello');
+  assert.equal(riskAfter.confidence, 50);
+});
+
+test('/watch replying to SangMata rename watches the renamed user ID', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  const sangmata = { chat, from: { id: 461843263, username: 'SangMataInfo_bot', is_bot: true }, text: 'User 8388593201 changed name from QQQ to Kristian Baumgartner.' };
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 42, text: '/watch', reply_to_message: sangmata });
+  const event = bot.store.all().find((item) => item.event_type === 'watch_started');
+  assert.equal(event.payload.watch_target_key, 'id:8388593201');
+  assert.match(event.payload.reason, /QQQ -> Kristian Baumgartner/);
+  assert.match(JSON.stringify(event.payload.evidence), /SangMata rename alert/);
+  const reply = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Watching'))?.payload || {};
+  assert.match(reply.text || '', /tg:\/\/user\?id=8388593201/);
+  assert.match(reply.text || '', /Kristian Baumgartner/);
+});
+
+test('/scan replying to SangMata rename scans the renamed user ID', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  const sangmata = { chat, from: { id: 461843263, username: 'SangMataInfo_bot', is_bot: true }, text: 'User 8388593201 changed name from QQQ to Kristian Baumgartner.' };
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 43, text: '/scan', reply_to_message: sangmata });
+  const event = bot.store.all().find((item) => item.event_type === 'risk_query');
+  assert.equal(event.user.id, '8388593201');
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Kristian Baumgartner')));
+});
+
+test('/ban replying to SangMata rename bans the renamed user ID', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  const sangmata = { chat, from: { id: 461843263, username: 'SangMataInfo_bot', is_bot: true }, text: 'User 8388593201 changed name from QQQ to Kristian Baumgartner.' };
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 44, text: '/ban', reply_to_message: sangmata });
+  assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === '8388593201'));
+  const event = bot.store.all().find((item) => item.event_type === 'ban_executed');
+  assert.equal(event.user.id, '8388593201');
+  assert.match(JSON.stringify(event.payload.evidence), /SangMata rename alert/);
+});
+
 test('/stats campaigns and /digest summarize local memory', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   const timestamp = new Date().toISOString();
