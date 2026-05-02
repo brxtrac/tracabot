@@ -10,6 +10,7 @@ export const TELEGRAM_COMMANDS = [
   { command: 'why', description: 'Explain a tracabot event decision' },
   { command: 'watch', description: 'Admin: watch a suspicious actor' },
   { command: 'unwatch', description: 'Admin: remove a watched actor' },
+  { command: 'watchlist', description: 'Admin: show watches, mutes, and review items' },
   { command: 'appeal', description: 'Submit an appeal or correction for an event' },
   { command: 'review', description: 'Admin: uphold or overturn an event' },
   { command: 'digest', description: 'Show recent moderation digest' },
@@ -93,6 +94,20 @@ function plural(count, singular, pluralWord = `${singular}s`) {
   return `${count} ${count === 1 ? singular : pluralWord}`;
 }
 
+function shortId(id = '') {
+  return String(id || '').slice(0, 8) || 'unknown';
+}
+
+function ageLabel(timestamp = '') {
+  const age = Date.now() - Date.parse(timestamp || '');
+  if (!Number.isFinite(age) || age < 0) return 'unknown age';
+  const minutes = Math.floor(age / 60000);
+  if (minutes < 60) return `${minutes || 1}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
 function escapeHtml(value = '') {
   return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
@@ -120,6 +135,15 @@ function sangmataTargetFromText(text = '') {
       evidence: `SangMata rename alert: ${oldName.trim()} -> ${newName.trim()}`
     }
   };
+}
+
+function hasEvidenceForDkg(eventType = '', payload = {}) {
+  if (['watch_started', 'watch_ended', 'reporter_reputation_update'].includes(eventType)) return false;
+  if (['ban_executed', 'restrict_executed', 'fraud_finding', 'report_submitted', 'fraud_campaign', 'appeal_submitted', 'review_upheld', 'review_overturned'].includes(eventType)) return true;
+  if (['risk_review_needed', 'risk_action_suppressed', 'report_review_needed'].includes(eventType)) {
+    return Number(payload.confidence || 0) >= 60 || Boolean(payload.dkg_evidence?.length || payload.wallets?.length || payload.domains?.length || payload.patterns?.length);
+  }
+  return false;
 }
 
 export class TelegramShieldBot {
@@ -373,6 +397,7 @@ export class TelegramShieldBot {
       '/why <event-id> - explain local + DKG evidence behind a decision.',
       '/watch - admin-only; reply to a user or SangMata alert. Also works as /watch <telegram-id> or /watch @user.',
       '/unwatch - admin-only; reply to a user or SangMata alert. Also works as /unwatch <telegram-id> or /unwatch @user.',
+      '/watchlist - admin-only; show active watches, temp mutes, and review items. Use /watchlist muted or /watchlist review.',
       '/appeal <event-id> reason - submit a correction or appeal to DKG. Use /why <event-id> first if unsure.',
       '/review <event-id> uphold reason - admin-only; keep the decision. Use overturn to reverse it.',
       '/stats campaigns - show repeated domains, wallets, patterns, or text fingerprints.',
@@ -385,7 +410,7 @@ export class TelegramShieldBot {
     ].join('\n');
   }
 
-  async record(eventType, message, payload, { writeDkg = true } = {}) {
+  async record(eventType, message, payload, { writeDkg = null } = {}) {
     const decoratedPayload = this.config.testMode
       ? { ...payload, source: payload?.source || 'test-command-loop', test_mode: true }
       : payload;
@@ -398,7 +423,8 @@ export class TelegramShieldBot {
       user: actorFromMessage(message),
       payload: decoratedPayload
     };
-    if (writeDkg) {
+    const shouldWriteDkg = writeDkg ?? (!this.config.testMode && hasEvidenceForDkg(eventType, decoratedPayload));
+    if (shouldWriteDkg) {
       try {
         event.dkg = await this.dkg.writeEvent(event);
       } catch (error) {
@@ -426,6 +452,70 @@ export class TelegramShieldBot {
       if (event.event_type === 'watch_ended') active = null;
     }
     return active;
+  }
+
+  activeWatches() {
+    const active = new Map();
+    for (const event of this.store.all()) {
+      const key = event.payload?.watch_target_key;
+      if (!key) continue;
+      if (event.event_type === 'watch_started') active.set(key, event);
+      if (['watch_ended', 'ban_executed', 'review_overturned'].includes(event.event_type)) active.delete(key);
+    }
+    return [...active.values()].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+  }
+
+  recentRestrictions() {
+    const now = Date.now();
+    return this.store.all()
+      .filter((event) => event.event_type === 'restrict_executed')
+      .filter((event) => !event.payload?.restricted_until || Date.parse(event.payload.restricted_until) >= now)
+      .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+  }
+
+  pendingReviewItems() {
+    const resolved = new Set(this.store.all().filter((event) => ['review_upheld', 'review_overturned', 'ban_executed'].includes(event.event_type)).map((event) => event.payload?.target_event_id || event.payload?.report_event_id).filter(Boolean));
+    return this.store.all()
+      .filter((event) => ['risk_review_needed', 'risk_action_suppressed', 'report_review_needed', 'ban_requested_no_reply', 'ban_requested_no_rights'].includes(event.event_type))
+      .filter((event) => !resolved.has(event.id))
+      .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+  }
+
+  formatWatchItem(event, index) {
+    const target = event.payload?.target || event.user || {};
+    const reason = event.payload?.reason || event.payload?.evidence?.[0] || event.payload?.report_reason || 'watching';
+    const key = event.payload?.watch_target_key || targetKey(target) || 'unknown';
+    return `${index}. ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}\n   ${ageLabel(event.timestamp)} | Event ${shortId(event.id)} | ${escapeHtml(reason)}\n   Actions: /scan ${escapeHtml(String(target.id || target.username || key))} | /unwatch ${escapeHtml(String(target.id || target.username || key))} | /why ${event.id}`;
+  }
+
+  formatRestrictionItem(event, index) {
+    const target = event.user || {};
+    const until = event.payload?.restricted_until ? `until ${event.payload.restricted_until.replace(/\.\d{3}Z$/, 'Z')}` : 'expiry unknown';
+    const evidence = event.payload?.evidence?.slice(-2).join('; ') || event.payload?.scam_type || 'restriction';
+    return `${index}. ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}\n   ${ageLabel(event.timestamp)} | ${until} | Event ${shortId(event.id)}\n   ${escapeHtml(evidence)}\n   Actions: /scan ${escapeHtml(String(target.id || target.username || ''))} | /why ${event.id}`;
+  }
+
+  formatReviewItem(event, index) {
+    const target = event.user || event.payload?.target || {};
+    const confidence = event.payload?.confidence !== undefined ? `${event.payload.confidence}%` : 'n/a';
+    const evidence = event.payload?.evidence?.slice(0, 2).join('; ') || event.payload?.reason || event.event_type;
+    return `${index}. ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}\n   ${ageLabel(event.timestamp)} | ${confidence} | Event ${shortId(event.id)}\n   ${escapeHtml(evidence)}\n   Actions: /why ${event.id} | /review ${event.id} uphold reason | /review ${event.id} overturn reason`;
+  }
+
+  formatWatchlist(filter = '') {
+    const watches = this.activeWatches();
+    const restrictions = this.recentRestrictions();
+    const reviews = this.pendingReviewItems();
+    const sections = [`👀 Watchlist manager`, `${watches.length} active watches | ${restrictions.length} active mutes | ${reviews.length} review items`];
+    const addSection = (title, items, formatter) => {
+      if (!items.length) return;
+      sections.push('', title, ...items.slice(0, 8).map((event, index) => formatter.call(this, event, index + 1)));
+    };
+    if (!filter || filter === 'all' || filter === 'active') addSection('Active watches', watches, this.formatWatchItem);
+    if (!filter || filter === 'all' || filter === 'muted' || filter === 'mutes') addSection('Temp mutes', restrictions, this.formatRestrictionItem);
+    if (!filter || filter === 'all' || filter === 'review') addSection('Needs review', reviews, this.formatReviewItem);
+    if (sections.length === 2) sections.push('', 'Nothing matching that filter. Try /watchlist all, /watchlist muted, or /watchlist review.');
+    return sections.join('\n');
   }
 
   formatWhy(eventId = '') {
@@ -504,13 +594,26 @@ export class TelegramShieldBot {
     const count = (types) => events.filter((event) => types.includes(event.event_type)).length;
     const campaigns = this.campaignSummary(24 * 60 * 60 * 1000);
     const high = events.filter((event) => Number(event.payload?.confidence || 0) >= 80).length;
+    const watches = this.activeWatches();
+    const restrictions = this.recentRestrictions();
+    const reviews = this.pendingReviewItems();
     return [
-      `tracabot digest (24h): ${plural(events.length, 'event')}, ${plural(high, 'high-confidence signal')}.`,
-      `Actions: ${plural(count(['ban_executed']), 'ban')}, ${plural(count(['restrict_executed']), 'restriction')}, ${plural(count(['report_submitted']), 'accepted report')}.`,
-      `Review: ${plural(count(['risk_review_needed', 'risk_action_suppressed']), 'admin review item')}, ${plural(count(['appeal_submitted']), 'appeal')}, ${plural(count(['review_upheld', 'review_overturned']), 'review decision')}.`,
-      `Watchlist: ${plural(count(['watch_started']), 'watch started')}, ${plural(count(['watch_ended']), 'watch ended')}.`,
-      campaigns.length ? `Top campaign: ${campaigns[0].key} across ${campaigns[0].events.length} events.` : 'No repeated campaign cluster in the last 24h.',
-      'Use /stats sources for DKG receipts or /why <event-id> for a decision explanation.'
+      '📌 tracabot digest (24h)',
+      '',
+      'Risk movement',
+      `- ${plural(events.length, 'local event')}; ${plural(high, 'high-confidence signal')}`,
+      `- ${plural(count(['ban_executed']), 'ban')}; ${plural(count(['restrict_executed']), 'temp mute')}; ${plural(count(['report_submitted']), 'accepted report')}`,
+      `- ${plural(count(['appeal_submitted']), 'appeal')}; ${plural(count(['review_upheld', 'review_overturned']), 'review decision')}`,
+      '',
+      'Watchlist',
+      `- ${plural(watches.length, 'active watch')}; ${plural(restrictions.length, 'active temp mute')}; ${plural(reviews.length, 'pending review item')}`,
+      campaigns.length ? `- Top campaign: ${campaigns[0].key} across ${campaigns[0].events.length} events` : '- No repeated campaign cluster in the last 24h',
+      '',
+      'Recommended follow-up',
+      '- /watchlist review',
+      '- /watchlist muted',
+      '- /stats sources',
+      '- /why <event-id>'
     ].join('\n');
   }
 
@@ -657,9 +760,12 @@ export class TelegramShieldBot {
 
     if (risk.confidence >= restrictThreshold && this.config.autoRestrict !== false && await this.hasRestrictRights(message.chat.id)) {
       const finding = await this.publishHighConfidenceFinding(message, risk);
-      await this.restrict(message.chat.id, actorFromMessage(message).id);
+      const restrictedUntil = Math.floor(Date.now() / 1000) + 24 * 60 * 60;
+      await this.restrict(message.chat.id, actorFromMessage(message).id, restrictedUntil);
       await this.record('restrict_executed', message, {
         ...risk,
+        restricted_until: new Date(restrictedUntil * 1000).toISOString(),
+        action_duration_seconds: 24 * 60 * 60,
         evidence: [...risk.evidence, `auto-restrict threshold ${restrictThreshold}% met`, deletedMessage ? 'triggering message removed' : 'triggering message removal unavailable', `finding event ${finding.id}`]
       });
       await this.send(message.chat.id, `tracabot restricted ${actorFromMessage(message).username || actorFromMessage(message).id}. ${formatRiskAssessment({ target: actorFromMessage(message), risk })} DKG finding: ${finding.id}`, { reply_to_message_id: message.message_id });
@@ -700,6 +806,15 @@ export class TelegramShieldBot {
       await this.send(chatId, this.formatDigest(), { reply_to_message_id: message.message_id });
       return;
     }
+    if (text.startsWith('/watchlist')) {
+      if (!await this.isTrustedModerator(message)) {
+        await this.send(chatId, '⚠️ /watchlist is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
+        return;
+      }
+      const filter = this.commandText(message, 'watchlist').split(/\s+/)[0]?.toLowerCase() || '';
+      await this.send(chatId, this.formatWatchlist(filter), { reply_to_message_id: message.message_id, parse_mode: 'HTML', disable_web_page_preview: true });
+      return;
+    }
     if (text.startsWith('/watch')) {
       if (!await this.isTrustedModerator(message)) {
         await this.send(chatId, '⚠️ /watch is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
@@ -714,7 +829,7 @@ export class TelegramShieldBot {
         reason,
         moderator: actorFromMessage(message),
         evidence
-      }, { writeDkg: !this.config.testMode });
+      }, { writeDkg: false });
       await this.send(chatId, `👀 Watching ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}. Event: ${event.id}. Reason: ${escapeHtml(reason)}. This increases scrutiny only; it will not ban by itself.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
       return;
     }
@@ -732,7 +847,7 @@ export class TelegramShieldBot {
         reason,
         moderator: actorFromMessage(message),
         evidence
-      }, { writeDkg: !this.config.testMode });
+      }, { writeDkg: false });
       await this.send(chatId, `✅ Removed watch for ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}. Event: ${event.id}. Reason: ${escapeHtml(reason)}.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
       return;
     }

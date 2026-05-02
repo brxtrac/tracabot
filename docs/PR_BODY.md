@@ -16,6 +16,7 @@ Telegram commands are registered on startup:
 - `/stats`: show recent fraud checks and detections, including `/stats campaigns` for repeated scam waves.
 - `/why`: explain a tracabot event decision using local and DKG evidence.
 - `/watch` and `/unwatch`: admin-only scrutiny controls that accept replies, SangMata rename alerts, numeric Telegram IDs, or usernames, then boost scoring without banning by themselves.
+- `/watchlist`: admin-only local queue of active watches, temporary mutes, and pending review items.
 - `/appeal`: submit a correction or appeal to DKG Shared Memory.
 - `/review`: admin-only upheld/overturned review decision written to DKG.
 - `/digest`: summarize recent actions, reports, watches, appeals, reviews, and campaign signals.
@@ -26,7 +27,7 @@ Telegram commands are registered on startup:
 - Public interface: OpenClaw DKG adapter (`DkgDaemonClient`) against the local DKG daemon.
 - Primitives: Context Graph, Assertion, Entity, Integration, Knowledge Asset, Knowledge Collection, UAL.
 - Publication model: high-confidence fraud findings, accepted high-confidence reports, and executed bans are automatically published to the Context Graph with targeted adapter publish calls for the event root. There is no curator-controlled promotion step.
-- Cross-community propagation: `share` writes every accepted finding to Shared Memory with actor IDs, aliases, wallets, domains, patterns, campaign signals, confidence, evidence, and moderation outcome; `query` reads the same graph with `includeSharedMemory: true` before scoring new joins, first posts, `/scan`, and `/report` targets.
+- Cross-community propagation: `share` writes evidence-backed findings to Shared Memory with actor IDs, aliases, wallets, domains, patterns, campaign signals, confidence, evidence, target metadata, restriction expiry, review decisions, and moderation outcome; `query` reads the same graph with `includeSharedMemory: true` before scoring new joins, first posts, `/scan`, and `/report` targets. Plain watchlist monitoring stays local-only.
 - Governance loop: `/why`, `/appeal`, and `/review` make decisions explainable and correctable while preserving an auditable DKG trail instead of silently rewriting moderation history.
 
 ## Verification

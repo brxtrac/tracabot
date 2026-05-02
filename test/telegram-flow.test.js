@@ -177,6 +177,7 @@ test('telegram command descriptions match the public bot command list', () => {
     { command: 'why', description: 'Explain a tracabot event decision' },
     { command: 'watch', description: 'Admin: watch a suspicious actor' },
     { command: 'unwatch', description: 'Admin: remove a watched actor' },
+    { command: 'watchlist', description: 'Admin: show watches, mutes, and review items' },
     { command: 'appeal', description: 'Submit an appeal or correction for an event' },
     { command: 'review', description: 'Admin: uphold or overturn an event' },
     { command: 'digest', description: 'Show recent moderation digest' },
@@ -196,6 +197,7 @@ test('/help explains commands, thresholds, and DKG memory', async () => {
   assert.match(help, /tracabot commands/);
   assert.match(help, /delete\/restrict at 75%/);
   assert.match(help, /\/why <event-id>/);
+  assert.match(help, /\/watchlist/);
   assert.match(help, /Context Graph tracabot/);
 });
 
@@ -265,6 +267,7 @@ test('/watch and /unwatch accept numeric Telegram IDs without a reason', async (
   const watchEvent = bot.store.all().find((event) => event.event_type === 'watch_started');
   assert.equal(watchEvent.payload.watch_target_key, 'id:8388593201');
   assert.equal(watchEvent.payload.reason, 'admin watch');
+  assert.equal(watchEvent.local_only, true);
   const risk = await bot.assess({ chat, from: { id: 8388593201 }, text: 'hello' }, { id: 8388593201 }, 'hello');
   assert.equal(risk.confidence, 65);
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('tg://user?id=8388593201')));
@@ -282,9 +285,33 @@ test('/watch replying to SangMata rename watches the renamed user ID', async () 
   assert.equal(event.payload.watch_target_key, 'id:8388593201');
   assert.match(event.payload.reason, /QQQ -> Kristian Baumgartner/);
   assert.match(JSON.stringify(event.payload.evidence), /SangMata rename alert/);
+  assert.equal(event.local_only, true);
   const reply = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Watching'))?.payload || {};
   assert.match(reply.text || '', /tg:\/\/user\?id=8388593201/);
   assert.match(reply.text || '', /Kristian Baumgartner/);
+});
+
+test('/watchlist shows active watches, mutes, and review items', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  const now = new Date().toISOString();
+  bot.store.append({ id: 'watch-a', event_type: 'watch_started', timestamp: now, chat, user: { id: '8388593201', first_name: 'Kristian Baumgartner' }, payload: { watch_target_key: 'id:8388593201', target: { id: '8388593201', first_name: 'Kristian Baumgartner' }, reason: 'admin watch', evidence: ['admin watch started'] }, local_only: true });
+  bot.store.append({ id: 'mute-a', event_type: 'restrict_executed', timestamp: now, chat, user: { id: 77, username: 'muted_user' }, payload: { confidence: 78, restricted_until: new Date(Date.now() + 60 * 60 * 1000).toISOString(), evidence: ['medium-risk phishing domain'] } });
+  bot.store.append({ id: 'review-a', event_type: 'risk_review_needed', timestamp: now, chat, user: { id: 88, username: 'review_user' }, payload: { confidence: 70, evidence: ['thin DKG match'] } });
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 45, text: '/watchlist all' });
+  const reply = calls.find((call) => call.method === 'sendMessage')?.payload || {};
+  assert.match(reply.text || '', /Watchlist manager/);
+  assert.match(reply.text || '', /Active watches/);
+  assert.match(reply.text || '', /Temp mutes/);
+  assert.match(reply.text || '', /Needs review/);
+  assert.match(reply.text || '', /tg:\/\/user\?id=8388593201/);
+  assert.equal(reply.parse_mode, 'HTML');
+});
+
+test('/watchlist rejects non-admin requesters', async () => {
+  const { bot, calls } = makeBot({ canBan: true, trustedUserIds: [] });
+  await bot.handleCommand({ chat: { id: -100, title: 'demo' }, from: { id: 2, username: 'member' }, message_id: 46, text: '/watchlist' });
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('restricted')));
 });
 
 test('/scan replying to SangMata rename scans the renamed user ID', async () => {
@@ -318,6 +345,7 @@ test('/stats campaigns and /digest summarize local memory', async () => {
   await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 38, text: '/digest' });
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('domain:fake.example')));
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('tracabot digest')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Recommended follow-up')));
 });
 
 test('medium-risk message is deleted and restricted instead of banned', async () => {

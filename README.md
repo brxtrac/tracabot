@@ -17,6 +17,7 @@ Telegram scam moderation usually stays trapped inside one chat. TRACaBot turns e
 - `/stats campaigns` shows repeated domains, wallets, scam patterns, or text fingerprints from recent local memory.
 - `/why <event-id>` explains the local and DKG evidence behind a tracabot decision.
 - `/watch` and `/unwatch` are admin-only scrutiny controls when replying to a user or SangMata rename alert; `/watch <telegram-id>`, `/watch @user`, `/unwatch <telegram-id>`, and `/unwatch @user` also work. ID/reply-based use creates a clickable Telegram mention and boosts future risk scoring without banning by itself.
+- `/watchlist` is admin-only and shows local active watches, temporary mutes, and pending review items for follow-up.
 - `/appeal <event-id> reason` records a correction request to DKG Shared Memory.
 - `/review <event-id> uphold|overturn reason` is admin-only and writes a DKG review decision for future audits and false-positive correction.
 - `/digest` summarizes recent bans, restrictions, reports, watches, appeals, reviews, and campaign signals.
@@ -33,7 +34,7 @@ TRACaBot uses OpenClaw's DKG adapter as its DKG boundary. The adapter talks to t
 
 This cross-community loop is the core product behavior: observe locally, write structured evidence to DKG Shared Memory, auto-publish high-confidence events, then let every other TRACaBot instance query the same graph before the fraudster can repeat the attack in a different channel.
 
-The bot separates local analysis confidence from DKG confidence. Report-only evidence does not automatically snowball into high-confidence bans; DKG evidence must be credible, and non-admin reports cannot directly trigger a Telegram ban.
+The bot separates local analysis confidence from DKG confidence. Report-only evidence does not automatically snowball into high-confidence bans; DKG evidence must be credible, and non-admin reports cannot directly trigger a Telegram ban. Plain watchlist monitoring stays local-only; DKG writes are reserved for evidence-backed actions, reports, campaigns, appeals, reviews, restrictions, and bans.
 
 TRACaBot applies graduated autonomous enforcement by default: low-confidence events are logged, medium-confidence events can be deleted and restricted, and high-confidence events can be deleted and banned. It also writes and queries scam domains in DKG Shared Memory, so a phishing or Telegram lure domain seen in one community can be flagged in another. Repeated domains, wallets, scam patterns, or text fingerprints are clustered into local campaign signals and can be written as `fraud_campaign` DKG events when the same wave repeats.
 

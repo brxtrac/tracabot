@@ -133,6 +133,19 @@ function eventTriples(event) {
     { subject, predicate: `${NS}reporterTelegramUserId`, object: literal(event.payload?.reporter?.id || '') },
     { subject, predicate: `${NS}reporterUsername`, object: literal(event.payload?.reporter?.username || '') },
     { subject, predicate: `${NS}reportDecision`, object: literal(event.payload?.report_decision || '') },
+    { subject, predicate: `${NS}targetTelegramUserId`, object: literal(event.payload?.target?.id || event.payload?.target_user_id || event.user?.id || '') },
+    { subject, predicate: `${NS}targetUsername`, object: literal(event.payload?.target?.username || event.user?.username || '') },
+    { subject, predicate: `${NS}targetLabel`, object: literal(event.payload?.target?.label || event.payload?.target?.first_name || '') },
+    { subject, predicate: `${NS}targetKey`, object: literal(event.payload?.target_key || event.payload?.watch_target_key || '') },
+    { subject, predicate: `${NS}moderatorTelegramUserId`, object: literal(event.payload?.moderator?.id || event.payload?.reviewer?.id || '') },
+    { subject, predicate: `${NS}moderatorUsername`, object: literal(event.payload?.moderator?.username || event.payload?.reviewer?.username || '') },
+    { subject, predicate: `${NS}reviewDecision`, object: literal(event.payload?.review_decision || '') },
+    { subject, predicate: `${NS}targetEventId`, object: literal(event.payload?.target_event_id || '') },
+    { subject, predicate: `${NS}restrictedUntil`, object: literal(event.payload?.restricted_until || '') },
+    { subject, predicate: `${NS}actionDurationSeconds`, object: literal(event.payload?.action_duration_seconds || '') },
+    { subject, predicate: `${NS}campaignKey`, object: literal(event.payload?.campaign_key || '') },
+    { subject, predicate: `${NS}sangmataOldName`, object: literal(event.payload?.target?.sangmata?.oldName || '') },
+    { subject, predicate: `${NS}sangmataNewName`, object: literal(event.payload?.target?.sangmata?.newName || '') },
     { subject, predicate: `${NS}source`, object: literal(event.payload?.source || '') },
     { subject, predicate: `${NS}testMode`, object: literal(event.payload?.test_mode ? 'true' : '') },
     { subject, predicate: `${NS}confidence`, object: literal(event.payload?.confidence ?? '') },
@@ -156,6 +169,9 @@ function eventTriples(event) {
   }
   for (const pattern of boundedList(event.payload?.patterns || [])) {
     triples.push({ subject, predicate: `${NS}scamPattern`, object: literal(pattern) });
+  }
+  for (const relatedEventId of boundedList(event.payload?.related_event_ids || [])) {
+    triples.push({ subject, predicate: `${NS}relatedEventId`, object: literal(relatedEventId) });
   }
   if (event.payload?.community_verified_flag) {
     triples.push({ subject, predicate: `${NS}communityVerifiedFlag`, object: literal(event.payload.community_verified_flag) });

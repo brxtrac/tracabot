@@ -204,6 +204,34 @@ test('writes scam domains as DKG indicators', async () => {
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#scamDomain') && triple.object === '"fake-claim.example"'));
 });
 
+test('writes structured evidence fields for moderation knowledge', async () => {
+  const adapterClient = makeAdapterClient();
+  const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient });
+  const result = await dkg.writeEvent({
+    id: 'evt-structured',
+    event_type: 'restrict_executed',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    chat: { id: 'chat' },
+    user: { id: '8388593201', username: 'badactor' },
+    payload: {
+      confidence: 78,
+      local_confidence: 75,
+      target_key: 'id:8388593201',
+      target: { id: '8388593201', label: 'Kristian Baumgartner', sangmata: { oldName: 'QQQ', newName: 'Kristian Baumgartner' } },
+      moderator: { id: '1', username: 'admin' },
+      restricted_until: '2026-05-01T00:00:00.000Z',
+      action_duration_seconds: 86400,
+      evidence: ['SangMata rename alert: QQQ -> Kristian Baumgartner']
+    }
+  });
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetTelegramUserId') && triple.object === '"8388593201"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetKey') && triple.object === '"id:8388593201"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#moderatorUsername') && triple.object === '"admin"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#restrictedUntil') && triple.object === '"2026-05-01T00:00:00.000Z"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#sangmataOldName') && triple.object === '"QQQ"'));
+});
+
 test('auto-publishes accepted high-confidence reports to the context graph', async () => {
   const adapterClient = makeAdapterClient();
   const dkg = new DkgClient({ contextGraph: 'tracabot' }, {
