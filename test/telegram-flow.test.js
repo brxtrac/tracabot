@@ -257,7 +257,8 @@ test('low-risk new members receive DKG UAL join challenge', async () => {
   assert.match(challenge, /quick DKG check/);
   assert.match(challenge, /Pick any Knowledge Asset/);
   assert.match(challenge, /A Knowledge Asset is a verifiable data item/);
-  assert.match(challenge, /You can send text only until verified/);
+  assert.match(challenge, /DM the UAL to me: https:\/\/t\.me\/tracethembot\?start=verify_m100_44/);
+  assert.match(challenge, /You are restricted here until verified/);
   assert.match(challenge, /starting with did:dkg/);
   assert.doesNotMatch(challenge, /prove that you’re human and ready to join/);
   assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_started' && event.local_only));
@@ -303,6 +304,40 @@ test('valid DKG UAL solves join challenge and restores permissions', async () =>
   const success = calls.filter((call) => call.method === 'sendMessage').at(-1)?.payload.text || '';
   assert.match(success, /DKG-verified/);
   assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_solved' && event.local_only));
+});
+
+test('DM DKG UAL solves join challenge and restores group permissions', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    configOverrides: { joinChallenge: true },
+    validateUal: async () => ({ ok: true, reason: 'resolved' })
+  });
+  const group = { id: -100, title: 'demo', type: 'supergroup' };
+  await bot.handleNewMembers({ chat: group, from: { id: 1, username: 'admin' }, new_chat_members: [{ id: 145, username: 'dmlearner', first_name: 'Dm', is_bot: false }] });
+  await bot.handleMessage({ chat: { id: 145, type: 'private' }, from: { id: 145, username: 'dmlearner', is_bot: false }, message_id: 1, text: '/start verify_m100_145' });
+  await bot.handleMessage({ chat: { id: 145, type: 'private' }, from: { id: 145, username: 'dmlearner', is_bot: false }, message_id: 2, text: 'did:dkg:knowledge-asset-valid-123456' });
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && call.payload.chat_id === 145 && String(call.payload.text).includes('Paste the full Knowledge Asset UAL')));
+  assert.ok(calls.some((call) => call.method === 'restrictChatMember' && call.payload.chat_id === -100 && call.payload.user_id === 145 && call.payload.permissions.can_send_photos === true));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && call.payload.chat_id === 145 && String(call.payload.text).includes('unlocked in the group')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && call.payload.chat_id === -100 && String(call.payload.text).includes('DKG-verified')));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_solved' && event.payload.verification_channel === 'dm'));
+});
+
+test('wrong user cannot use someone else DM verification link', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    configOverrides: { joinChallenge: true }
+  });
+  const group = { id: -100, title: 'demo', type: 'supergroup' };
+  await bot.handleNewMembers({ chat: group, from: { id: 1, username: 'admin' }, new_chat_members: [{ id: 245, username: 'target', first_name: 'Target', is_bot: false }] });
+  await bot.handleMessage({ chat: { id: 9999, type: 'private' }, from: { id: 9999, username: 'wrong', is_bot: false }, message_id: 1, text: '/start verify_m100_245' });
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && call.payload.chat_id === 9999 && String(call.payload.text).includes('could not match')));
+  assert.ok(!calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 245 && call.payload.permissions.can_send_photos === true));
+  assert.ok(bot.joinChallenges.has('-100:245'));
 });
 
 test('invalid challenge first message is deleted and reminded', async () => {

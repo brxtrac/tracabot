@@ -115,6 +115,16 @@ function conversationKey(message = {}, target = {}) {
   return `${chat}:${actor}:${textFingerprint(message.text || message.reply_to_message?.text || '').slice(0, 80)}`;
 }
 
+function verifyStartPayload(chatId = '', userId = '') {
+  return `verify_${String(chatId).replace(/^-/, 'm')}_${userId}`;
+}
+
+function parseVerifyStartPayload(payload = '') {
+  const match = String(payload || '').match(/^verify_(m?\d+)_(\d+)$/);
+  if (!match) return null;
+  return { chatId: match[1].startsWith('m') ? `-${match[1].slice(1)}` : match[1], userId: match[2] };
+}
+
 function plural(count, singular, pluralWord = `${singular}s`) {
   return `${count} ${count === 1 ? singular : pluralWord}`;
 }
@@ -270,6 +280,11 @@ export class TelegramShieldBot {
         can_manage_topics: false
       }
     });
+  }
+
+  async botUsername() {
+    const me = await this.call('getMe', {});
+    return me.username || 'tracethembot';
   }
 
   async deleteMessage(chatId, messageId) {
@@ -1196,21 +1211,23 @@ export class TelegramShieldBot {
     return `${chatId}:${userId}`;
   }
 
-  challengeText(member) {
+  async challengeText(chatId, member) {
     const ttl = this.config.joinChallengeTtlSeconds || 60;
+    const username = await this.botUsername().catch(() => 'tracethembot');
+    const dmLink = `https://t.me/${username}?start=${verifyStartPayload(chatId, member.id)}`;
     return [
       '🛡️ TRACaBot',
       '',
-      `${userMention(member)}, quick DKG check before you post:`,
+      `${userMention(member)}, quick DKG check before posting:`,
       '',
       '1. Go to https://dkg.origintrail.io/',
       '2. Pick any Knowledge Asset',
       '3. Copy its UAL, starting with did:dkg:',
-      '4. Paste that UAL here',
+      `4. DM the UAL to me: ${dmLink}`,
       '',
       'A Knowledge Asset is a verifiable data item on the Decentralized Knowledge Graph. The UAL is its unique address.',
       '',
-      `You can send text only until verified. Time limit: ${ttl}s.`
+      `You are restricted here until verified. Time limit: ${ttl}s.`
     ].join('\n');
   }
 
@@ -1222,7 +1239,7 @@ export class TelegramShieldBot {
     if (canRestrict) {
       await this.allowTextOnly(chatId, member.id, Math.floor(expiresAt / 1000)).catch(() => null);
     }
-    const sent = await this.send(chatId, this.challengeText(member), { parse_mode: 'HTML', disable_web_page_preview: true });
+    const sent = await this.send(chatId, await this.challengeText(chatId, member), { parse_mode: 'HTML', disable_web_page_preview: true });
     this.joinChallenges.set(key, { chat: message.chat, user: member, startedAt: Date.now(), expiresAt, messageId: sent?.message_id || '', attempts: 0 });
     await this.record('join_challenge_started', { ...message, from: member }, {
       target: member,
@@ -1239,9 +1256,40 @@ export class TelegramShieldBot {
     return this.joinChallenges.get(this.challengeKey(message.chat.id, message.from.id));
   }
 
-  async handleJoinChallengeMessage(message, challenge) {
+  pendingDmChallengeFor(userId) {
+    for (const [key, challenge] of this.joinChallenges.entries()) {
+      if (String(challenge.user?.id) === String(userId)) return { key, challenge };
+    }
+    return null;
+  }
+
+  async sendJoinChallengeDmIntro(message) {
+    const payload = parseVerifyStartPayload(this.commandText(message, 'start'));
+    if (!payload || String(payload.userId) !== String(message.from?.id)) {
+      await this.send(message.chat.id, 'I could not match this verification link to your Telegram account. Please use the link TRACaBot posted for you in the group.');
+      return true;
+    }
+    const challenge = this.joinChallenges.get(this.challengeKey(payload.chatId, payload.userId));
+    if (!challenge) {
+      await this.send(message.chat.id, 'I do not see an active DKG join challenge for you. If you just joined, ask an admin to restart the challenge or try rejoining.');
+      return true;
+    }
+    await this.send(message.chat.id, 'Paste the full Knowledge Asset UAL here. It should start with did:dkg:. I will verify it and unlock your group access.');
+    return true;
+  }
+
+  async handleJoinChallengeDm(message) {
+    if (message.chat?.type !== 'private') return false;
+    const pending = this.pendingDmChallengeFor(message.from?.id);
+    if (!pending) return false;
+    await this.handleJoinChallengeMessage({ ...message, chat: pending.challenge.chat }, pending.challenge, { sourceChatId: message.chat.id, dm: true });
+    return true;
+  }
+
+  async handleJoinChallengeMessage(message, challenge, options = {}) {
     const text = String(message.text || '').trim();
     const chatId = message.chat.id;
+    const replyChatId = options.sourceChatId || chatId;
     const key = this.challengeKey(chatId, message.from.id);
     if (!DKG_UAL_RE.test(text)) {
       challenge.attempts += 1;
@@ -1252,9 +1300,10 @@ export class TelegramShieldBot {
         target: message.from,
         target_key: targetKey(message.from),
         attempts: challenge.attempts,
+        verification_channel: options.dm ? 'dm' : 'group',
         evidence: ['pending join challenge user sent a non-UAL first message']
       }, { writeDkg: false });
-      await this.send(chatId, `${userMention(message.from)}, paste a full DKG UAL that starts with did:dkg: to complete verification.`, { reply_to_message_id: challenge.messageId || message.message_id, parse_mode: 'HTML' });
+      await this.send(replyChatId, `${options.dm ? '' : `${userMention(message.from)}, `}paste a full DKG UAL that starts with did:dkg: to complete verification.`, options.dm ? {} : { reply_to_message_id: challenge.messageId || message.message_id, parse_mode: 'HTML' });
       return true;
     }
     const validation = this.config.joinChallengeDkgValidate === false ? { ok: true, reason: 'format_only' } : await this.dkg.validateUal(text);
@@ -1269,9 +1318,10 @@ export class TelegramShieldBot {
         attempts: challenge.attempts,
         ual: text.slice(0, 240),
         validation_reason: validation.reason,
+        verification_channel: options.dm ? 'dm' : 'group',
         evidence: ['pending join challenge user sent a UAL that did not validate on DKG']
       }, { writeDkg: false });
-      await this.send(chatId, `${userMention(message.from)}, I could not validate that Knowledge Asset UAL on the DKG. Try another UAL from https://dkg.origintrail.io/.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML', disable_web_page_preview: true });
+      await this.send(replyChatId, `${options.dm ? '' : `${userMention(message.from)}, `}I could not validate that Knowledge Asset UAL on the DKG. Try another UAL from https://dkg.origintrail.io/.`, options.dm ? { disable_web_page_preview: true } : { reply_to_message_id: message.message_id, parse_mode: 'HTML', disable_web_page_preview: true });
       return true;
     }
     this.joinChallenges.delete(key);
@@ -1285,9 +1335,11 @@ export class TelegramShieldBot {
       target_key: targetKey(message.from),
       ual: text.slice(0, 240),
       validation_reason: validation.reason,
+      verification_channel: options.dm ? 'dm' : 'group',
       evidence: ['new user completed DKG Knowledge Asset UAL verification']
     }, { writeDkg: false });
-    await this.send(chatId, '✅ DKG-verified!\n\nYou are now on TRAC(k) and protected by our DKG-powered agent with cross-community, persistent memory against scams and impersonators.', { reply_to_message_id: message.message_id });
+    if (options.dm) await this.send(replyChatId, '✅ DKG-verified. You are unlocked in the group now.');
+    await this.send(chatId, '✅ DKG-verified!\n\nYou are now on TRAC(k) and protected by our DKG-powered agent with cross-community, persistent memory against scams and impersonators.', options.dm ? {} : { reply_to_message_id: message.message_id });
     return true;
   }
 
@@ -1297,6 +1349,11 @@ export class TelegramShieldBot {
       return;
     }
     if (!message.text) return;
+    if (message.chat?.type === 'private' && /^\/start\s+verify_/i.test(message.text)) {
+      await this.sendJoinChallengeDmIntro(message);
+      return;
+    }
+    if (await this.handleJoinChallengeDm(message)) return;
     const challenge = this.pendingChallengeFor(message);
     if (challenge) {
       await this.handleJoinChallengeMessage(message, challenge);
