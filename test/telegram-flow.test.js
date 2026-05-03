@@ -348,6 +348,25 @@ test('verified user is challenged again after leaving and rejoining', async () =
   assert.equal(textOnlyRestrictions.length, 2);
 });
 
+test('restricted member without active challenge receives a fresh challenge', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    configOverrides: { joinChallenge: true }
+  });
+  const group = { id: -100, title: 'demo', type: 'supergroup' };
+  const user = { id: 445, username: 'restrictedjoiner', first_name: 'Restricted', is_bot: false };
+  await bot.handleChatMemberUpdate({
+    chat: group,
+    from: { id: 1, username: 'admin' },
+    old_chat_member: { status: 'restricted', user },
+    new_chat_member: { status: 'restricted', user }
+  });
+  assert.equal(bot.joinChallenges.has('-100:445'), true);
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && call.payload.chat_id === -100 && String(call.payload.text).includes('quick DKG check')));
+});
+
 test('wrong user cannot use someone else DM verification link', async () => {
   const { bot, calls } = makeBot({
     canBan: true,
