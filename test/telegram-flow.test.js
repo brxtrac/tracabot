@@ -87,6 +87,7 @@ function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = nu
   });
   bot.call = async (method, payload) => {
     calls.push({ method, payload });
+    if (method === 'getUpdates') return [];
     if (method === 'getMe') return { id: 999, username: 'tracethembot' };
     if (method === 'getChatMember') {
       if (payload.user_id === 999) return { status: canBan ? 'administrator' : 'member', can_restrict_members: canBan, can_delete_messages: canBan };
@@ -260,6 +261,31 @@ test('low-risk new members receive DKG UAL join challenge', async () => {
   assert.match(challenge, /starting with did:dkg/);
   assert.doesNotMatch(challenge, /prove that you’re human and ready to join/);
   assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_started' && event.local_only));
+});
+
+test('chat_member joins receive DKG UAL join challenge', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    configOverrides: { joinChallenge: true }
+  });
+  await bot.handleChatMemberUpdate({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 1, username: 'admin' },
+    old_chat_member: { status: 'left', user: { id: 48, username: 'member48', is_bot: false } },
+    new_chat_member: { status: 'member', user: { id: 48, username: 'member48', first_name: 'Member', is_bot: false } }
+  });
+  assert.ok(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 48 && call.payload.permissions.can_send_messages === true));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('quick DKG check')));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_started' && event.user.id === 48));
+});
+
+test('polling requests chat member updates for joins', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  await bot.pollOnce();
+  const poll = calls.find((call) => call.method === 'getUpdates');
+  assert.deepEqual(poll.payload.allowed_updates, ['message', 'chat_member', 'my_chat_member']);
 });
 
 test('valid DKG UAL solves join challenge and restores permissions', async () => {

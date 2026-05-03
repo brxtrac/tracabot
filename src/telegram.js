@@ -1357,6 +1357,21 @@ export class TelegramShieldBot {
     }
   }
 
+  async handleChatMemberUpdate(chatMemberUpdate) {
+    const oldStatus = chatMemberUpdate.old_chat_member?.status || '';
+    const newStatus = chatMemberUpdate.new_chat_member?.status || '';
+    const member = chatMemberUpdate.new_chat_member?.user;
+    if (!member || member.is_bot) return;
+    const joined = ['left', 'kicked'].includes(oldStatus) && ['member', 'restricted'].includes(newStatus);
+    if (!joined) return;
+    await this.handleNewMembers({
+      chat: chatMemberUpdate.chat,
+      from: chatMemberUpdate.from || member,
+      date: chatMemberUpdate.date,
+      new_chat_members: [member]
+    });
+  }
+
   async expireJoinChallenges() {
     const now = Date.now();
     for (const [key, challenge] of this.joinChallenges.entries()) {
@@ -1396,11 +1411,12 @@ export class TelegramShieldBot {
     const updates = await this.call('getUpdates', {
       offset: this.offset,
       timeout: 25,
-      allowed_updates: ['message']
+      allowed_updates: ['message', 'chat_member', 'my_chat_member']
     });
     for (const update of updates) {
       this.offset = update.update_id + 1;
       if (update.message) await this.handleMessage(update.message);
+      if (update.chat_member) await this.handleChatMemberUpdate(update.chat_member);
     }
     await this.proactiveScan();
     await this.expireJoinChallenges();
