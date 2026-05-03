@@ -1419,8 +1419,14 @@ export class TelegramShieldBot {
     const newStatus = chatMemberUpdate.new_chat_member?.status || '';
     const member = chatMemberUpdate.new_chat_member?.user;
     if (!member || member.is_bot) return;
+    const key = this.challengeKey(chatMemberUpdate.chat?.id, member.id);
+    if (['left', 'kicked'].includes(newStatus)) {
+      this.joinChallenges.delete(key);
+      return;
+    }
     const joined = ['left', 'kicked'].includes(oldStatus) && ['member', 'restricted'].includes(newStatus);
     if (!joined) return;
+    this.joinChallenges.delete(key);
     await this.handleNewMembers({
       chat: chatMemberUpdate.chat,
       from: chatMemberUpdate.from || member,

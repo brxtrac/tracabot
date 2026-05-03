@@ -325,6 +325,29 @@ test('DM DKG UAL solves join challenge and restores group permissions', async ()
   assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_solved' && event.payload.verification_channel === 'dm'));
 });
 
+test('verified user is challenged again after leaving and rejoining', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    configOverrides: { joinChallenge: true },
+    validateUal: async () => ({ ok: true, reason: 'resolved' })
+  });
+  const group = { id: -100, title: 'demo', type: 'supergroup' };
+  const user = { id: 345, username: 'rejoiner', first_name: 'Re', is_bot: false };
+  await bot.handleChatMemberUpdate({ chat: group, from: { id: 1, username: 'admin' }, old_chat_member: { status: 'left', user }, new_chat_member: { status: 'member', user } });
+  await bot.handleMessage({ chat: { id: 345, type: 'private' }, from: user, message_id: 1, text: '/start verify_m100_345' });
+  await bot.handleMessage({ chat: { id: 345, type: 'private' }, from: user, message_id: 2, text: 'did:dkg:knowledge-asset-valid-123456' });
+  assert.equal(bot.joinChallenges.has('-100:345'), false);
+  await bot.handleChatMemberUpdate({ chat: group, from: user, old_chat_member: { status: 'member', user }, new_chat_member: { status: 'left', user } });
+  await bot.handleChatMemberUpdate({ chat: group, from: user, old_chat_member: { status: 'left', user }, new_chat_member: { status: 'member', user } });
+  assert.equal(bot.joinChallenges.has('-100:345'), true);
+  const challengeMessages = calls.filter((call) => call.method === 'sendMessage' && call.payload.chat_id === -100 && String(call.payload.text).includes('quick DKG check'));
+  assert.equal(challengeMessages.length, 2);
+  const textOnlyRestrictions = calls.filter((call) => call.method === 'restrictChatMember' && call.payload.chat_id === -100 && call.payload.user_id === 345 && call.payload.permissions.can_send_messages === true && call.payload.permissions.can_send_photos === false);
+  assert.equal(textOnlyRestrictions.length, 2);
+});
+
 test('wrong user cannot use someone else DM verification link', async () => {
   const { bot, calls } = makeBot({
     canBan: true,
