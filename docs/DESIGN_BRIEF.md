@@ -19,14 +19,14 @@ TRACaBot turns those moderation artifacts into agent-readable knowledge. It obse
 3. Local heuristics detect impersonation, phishing, fake airdrops, wallet-drain lures, investment testimonials, partnership lures, and admin-copycat rename behavior.
 4. The bot queries DKG v10 Shared Memory through OpenClaw's DKG adapter for cross-community evidence.
 5. The risk engine combines local and DKG confidence while guarding against report-only snowballing.
-6. Low-confidence items stay local. Medium-confidence items can be deleted/restricted. High-confidence items can be deleted/banned.
+6. Low-confidence observations stay local. Low-risk joins can be challenged to prove DKG familiarity by DMing a live Knowledge Asset UAL. Medium-confidence items can be deleted/restricted. High-confidence items can be deleted/banned.
 7. Evidence-backed reports, bans, restrictions, campaigns, appeals, and review decisions are written to DKG Shared Memory. High-confidence reports/findings/bans are eligible for Context Graph publication.
 
 ## Memory Layers
 
 TRACaBot currently uses two operational memory layers:
 
-- Local working memory: bounded JSONL event store and in-memory Telegram context used for drafts, watchlists, review queues, digests, and non-evidence monitoring. Plain `/watch`, `/unwatch`, `/watchlist`, and `/digest` remain local-only.
+- Local working memory: bounded JSONL event store and in-memory Telegram context used for drafts, watchlists, review queues, digests, join challenges, and non-evidence monitoring. Plain `/watch`, `/unwatch`, `/watchlist`, `/digest`, and join-challenge housekeeping remain local-only.
 - DKG v10 Shared Memory: evidence-backed artifacts written through `DkgDaemonClient.share` using the OpenClaw DKG adapter.
 
 The repository did not find a confirmed public Working Memory-specific method exposed by the locally available OpenClaw adapter package. The integration therefore uses local operational working memory plus DKG Shared Memory through the supported adapter interface. If a public Working Memory adapter method becomes available, draft scan notes, campaign candidates, and review drafts can be routed there without changing the evidence schema.
@@ -88,6 +88,8 @@ An oracle can later reason over these fields to decide whether an actor, wallet,
 - Secrets: `TELEGRAM_BOT_TOKEN`, `DKG_AUTH_TOKEN`, and adapter credentials remain in environment files.
 - No preinstall/postinstall scripts and no remote code evaluation.
 - Plain watchlist monitoring is local-only and not shared to DKG.
+- Join-challenge starts, failures, solves, and expirations are local-only; only validated evidence-backed fraud/moderation artifacts are shared to DKG.
+- Public Telegram replies redact internal UALs, event IDs, graph names, OpenClaw endpoint/model details, and admin setup details.
 - Telegram enforcement requires configured admin or Telegram chat-admin identity plus bot rights.
 
 ## Maintenance Commitment

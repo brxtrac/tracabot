@@ -4,7 +4,7 @@ Submitted for OriginTrail DKG v10 Bounty Program Round 1 (`cfi-dkgv10-r1`): Work
 
 ## Summary
 
-tracabot is an OpenClaw-compatible Telegram Shieldy-style anti-scam agent. It detects phishing, fake airdrops, investment testimonial scams, support/admin impersonation, join-then-rename impersonators, and suspicious moderation events, then writes structured scam knowledge to DKG v10 Shared Memory in the `tracabot` Context Graph.
+tracabot is a live OpenClaw-compatible Telegram Shieldy-style anti-scam agent. It detects phishing, fake airdrops, investment testimonial scams, support/admin impersonation, join-then-rename impersonators, suspicious moderation events, and low-risk joins that must verify with a DKG Knowledge Asset UAL challenge, then writes structured scam knowledge to DKG v10 Shared Memory in the `tracabot` Context Graph.
 
 It now also exposes a concrete OpenClaw skill surface through `skills/tracabot/skill.json` and `bin/tracabot-skill.js`, allowing OpenClaw agents to call scan, explain, watchlist, digest, campaign, appeal, and review tools directly as JSON.
 
@@ -24,6 +24,7 @@ Telegram commands are registered on startup:
 - `/appeal`: submit a correction or appeal to DKG Shared Memory.
 - `/review`: admin-only upheld/overturned review decision written to DKG.
 - `/digest`: summarize recent actions, reports, watches, appeals, reviews, and campaign signals.
+- Join challenge: low-risk new members verify by DMing a full `did:dkg:` Knowledge Asset UAL to the live bot; challenge state remains local-only and does not pollute DKG.
 
 OpenClaw skill tools are also available: `scan_target`, `explain_event`, `get_watchlist`, `get_digest`, `query_campaigns`, `submit_appeal`, and `review_event`.
 
@@ -61,7 +62,7 @@ Tests and audit:
 
 ```text
 npm test
-73 tests passed
+102 tests passed
 
 npm audit --omit=dev
 found 0 vulnerabilities
@@ -70,7 +71,7 @@ found 0 vulnerabilities
 Telegram runtime:
 
 ```text
-Bot command loop verified with stubbed Telegram API and live DKG v10 read/write calls.
+Bot command loop verified with stubbed Telegram API and live DKG v10 read/write calls. The live deployment runs as @tracethembot with public replies redacted to avoid exposing internal DKG/OpenClaw/admin details.
 ```
 
 ## Security Attestation

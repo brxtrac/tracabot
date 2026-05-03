@@ -5,14 +5,14 @@
 - Name: `tracabot`
 - Version: `0.1.0`
 - Repository: `https://github.com/brxtrac/tracabot`
-- Commit: `bf8dab8dcf3c5af006acef667b7ad26f9d00ed36`
+- Commit: `3b1934a1faea61f344e52d6e7e1b56b32d3de08a`
 - License: MIT
 - Category: OpenClaw agent integration, Telegram safety, DKG v10 Shared Memory
 - Tags: `openclaw`, `dkg-v10`, `shared-memory`, `telegram`, `anti-scam`, `context-graph`, `llm-wiki`, `autoresearch`
 
 ## Summary
 
-TRACaBot is an OpenClaw-compatible Telegram anti-scam agent. It detects phishing, fake airdrops, investment scams, admin/support impersonation, suspicious rename behavior, scam domains, scam wallets, and repeated campaign patterns. Evidence-backed reports, findings, restrictions, reviews, appeals, campaigns, and bans are written to DKG v10 Shared Memory under the `tracabot` Context Graph. High-confidence accepted reports, fraud findings, and executed bans are promoted through targeted Context Graph publication.
+TRACaBot is a live OpenClaw-compatible Telegram anti-scam agent. It detects phishing, fake airdrops, investment scams, admin/support impersonation, suspicious rename behavior, scam domains, scam wallets, repeated campaign patterns, and low-risk joins that must prove DKG familiarity with a Knowledge Asset UAL challenge. Evidence-backed reports, findings, restrictions, reviews, appeals, campaigns, and bans are written to DKG v10 Shared Memory under the `tracabot` Context Graph. High-confidence accepted reports, fraud findings, and executed bans are promoted through targeted Context Graph publication.
 
 ## Interfaces
 
@@ -31,7 +31,7 @@ TRACaBot is an OpenClaw-compatible Telegram anti-scam agent. It detects phishing
 
 ## Memory Policy
 
-- Local working memory: JSONL audit log, watchlist state, digest state, weak reports, and monitoring-only watch/unwatch actions.
+- Local working memory: JSONL audit log, watchlist state, digest state, weak reports, join-challenge state, and monitoring-only watch/unwatch actions.
 - Shared Memory: accepted reports, fraud findings, restrictions, bans, campaigns, appeals, and reviews with structured evidence.
 - Context Graph publication: high-confidence accepted reports, high-confidence findings, and executed bans.
 
@@ -55,6 +55,7 @@ The runtime operator controls the Telegram bot token, DKG adapter endpoint, and 
 - OpenClaw OAuth/API information is discovered read-only from local OpenClaw config when `TRACABOT_LLM_PROVIDER=auto`; it is not copied into TRACaBot `.env` or displayed by `/status`.
 - Network egress and DKG operations are documented in `SECURITY.md`.
 - Production audit command: `npm audit --omit=dev`.
+- Public Telegram replies redact internal DKG UALs, event IDs, graph names, OpenClaw endpoint/model details, and admin setup details. Detailed provenance remains available through controlled local/admin explainability paths.
 
 ## Maintainer
 

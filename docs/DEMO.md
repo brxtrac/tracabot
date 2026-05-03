@@ -1,8 +1,8 @@
 # Demo Walkthrough
 
-Use this walkthrough for a short bounty demo or local smoke test. The goal is to show detection, Telegram action, DKG Shared Memory write/read, explainability, and OpenClaw skill access.
+Use this walkthrough for the live project demonstration or a local smoke test. The goal is to show detection, Telegram action, DKG Shared Memory write/read, explainability, OpenClaw skill access, and the DKG-native join challenge.
 
-Put final demo assets or the hosted demo link in `docs/demo/`. If the video is too large for GitHub, add `docs/demo/tracabot-demo-link.md` with the public URL.
+The project is already live as `@tracethembot`; this document is the repeatable demo script for reviewers and operators. If a recorded walkthrough is added later, place its link in `docs/demo/`.
 
 ## 1. Host Setup
 
@@ -29,7 +29,7 @@ npm run test:commands
 npm audit --omit=dev
 ```
 
-Expected current result: `73` Node tests pass, command-loop smoke test passes, and production audit reports zero vulnerabilities.
+Expected current result: `102` Node tests pass, command-loop smoke test passes, and production audit reports zero vulnerabilities.
 
 ## 3. Telegram Walkthrough
 
@@ -48,8 +48,9 @@ Urgent free USDT airdrop. Connect wallet at claim-example.test and DM support to
 8. Run `/stats`, `/stats campaigns`, `/digest`, and `/watchlist`.
 9. Ask a conversational safety question as a reply: `@tracabot is this a scam?`
 10. Run `/status` as an admin to show DKG, permissions, thresholds, and OpenClaw LLM discovery without exposing secrets.
+11. Have a low-risk test account join the group, click the challenge deep link, and DM a full `did:dkg:` Knowledge Asset UAL to verify DKG familiarity before the TTL expires.
 
-Show that the bot explains local evidence, DKG evidence, confidence, action taken, and promotion status.
+Show that the bot explains local evidence, DKG evidence, confidence, action taken, and promotion status while public group replies avoid exposing internal UALs, graph details, OpenClaw endpoints, model names, and admin setup details.
 
 ## 4. Cross-Community Memory
 
@@ -83,9 +84,10 @@ The demo refuses production writes unless `TRACABOT_TEST_MODE=true` is set.
 - 0:00 Problem: Telegram scam intelligence is siloed.
 - 0:45 Install: DKG/OpenClaw setup and bot configuration.
 - 1:45 Detection: `/scan` and `/report` on a scam message.
-- 3:00 DKG: show Shared Memory write/read and UAL/event ID.
+- 3:00 DKG: show Shared Memory write/read and controlled provenance details.
 - 4:00 Enforcement: `/ban` deletes replied scam message and bans target.
 - 5:00 Explainability: `/why`, `/appeal`, `/review`.
 - 6:00 Conversation: `@tracabot is this a scam?` evidence-bound reply using OpenClaw LLM when available.
 - 7:00 OpenClaw: `tracabot-skill` JSON calls.
 - 8:00 Cross-community: second group/instance sees prior DKG evidence.
+- 9:00 Join challenge: new user verifies with a live DKG Knowledge Asset UAL over DM.

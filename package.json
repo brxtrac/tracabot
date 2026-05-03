@@ -40,7 +40,11 @@
   },
   "files": [
     "bin",
-    "docs",
+    "docs/DEMO.md",
+    "docs/DESIGN_BRIEF.md",
+    "docs/PR_BODY.md",
+    "docs/REGISTRY_ENTRY.md",
+    "docs/demo",
     "scripts",
     "src",
     "skills",
