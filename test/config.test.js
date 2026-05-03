@@ -54,7 +54,11 @@ test('loadConfig parses DKG join challenge settings', () => {
     TRACABOT_JOIN_CHALLENGE_ACTION: 'ban',
     TRACABOT_JOIN_CHALLENGE_DELETE_ON_PASS: 'false',
     TRACABOT_JOIN_CHALLENGE_DELETE_BAD_ATTEMPTS: 'true',
-    TRACABOT_JOIN_CHALLENGE_DKG_VALIDATE: 'false'
+    TRACABOT_JOIN_CHALLENGE_DKG_VALIDATE: 'false',
+    TRACABOT_AUTO_DELETE_BOT_MESSAGES: 'false',
+    TRACABOT_BOT_MESSAGE_TTL_SECONDS: '30',
+    TRACABOT_CHALLENGE_MESSAGE_TTL_SECONDS: '180',
+    TRACABOT_SUCCESS_MESSAGE_TTL_SECONDS: '20'
   });
   assert.equal(config.joinChallenge, true);
   assert.equal(config.joinChallengeTtlSeconds, 90);
@@ -62,5 +66,10 @@ test('loadConfig parses DKG join challenge settings', () => {
   assert.equal(config.joinChallengeDeleteOnPass, false);
   assert.equal(config.joinChallengeDeleteBadAttempts, true);
   assert.equal(config.joinChallengeDkgValidate, false);
+  assert.equal(config.autoDeleteBotMessages, false);
+  assert.equal(config.botMessageTtlSeconds, 30);
+  assert.equal(config.challengeMessageTtlSeconds, 180);
+  assert.equal(config.successMessageTtlSeconds, 20);
   assert.throws(() => loadConfig({ TRACABOT_JOIN_CHALLENGE_TTL_SECONDS: '5' }), /TRACABOT_JOIN_CHALLENGE_TTL_SECONDS/);
+  assert.throws(() => loadConfig({ TRACABOT_BOT_MESSAGE_TTL_SECONDS: '1' }), /TRACABOT_BOT_MESSAGE_TTL_SECONDS/);
 });

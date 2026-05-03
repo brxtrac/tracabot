@@ -207,6 +207,20 @@ export class TelegramShieldBot {
     return this.call('sendMessage', { chat_id: chatId, text, ...extra });
   }
 
+  scheduleDelete(chatId, messageId, ttlSeconds = this.config.botMessageTtlSeconds || 60) {
+    if (!this.config.autoDeleteBotMessages || !messageId || Number(ttlSeconds) <= 0) return;
+    setTimeout(() => {
+      this.deleteMessage(chatId, messageId).catch(() => null);
+    }, Number(ttlSeconds) * 1000).unref?.();
+  }
+
+  async sendEphemeral(chatId, text, extra = {}, ttlSeconds = this.config.botMessageTtlSeconds || 60) {
+    const sent = await this.send(chatId, text, extra);
+    const isPrivate = extra.private === true || Number(chatId) > 0;
+    if (!isPrivate && await this.hasDeleteRights(chatId)) this.scheduleDelete(chatId, sent?.message_id, ttlSeconds);
+    return sent;
+  }
+
   async ban(chatId, userId) {
     return this.call('banChatMember', { chat_id: chatId, user_id: userId });
   }
@@ -976,7 +990,7 @@ export class TelegramShieldBot {
     const chatId = message.chat.id;
     if (text.startsWith('/status')) {
       if (!await this.isTrustedModerator(message)) {
-        await this.send(chatId, '⚠️ /status is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
+        await this.sendEphemeral(chatId, '⚠️ /status is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
         return;
       }
       await this.send(chatId, await this.formatStatus(message), { reply_to_message_id: message.message_id });
@@ -1007,7 +1021,7 @@ export class TelegramShieldBot {
     }
     if (text.startsWith('/watchlist')) {
       if (!await this.isTrustedModerator(message)) {
-        await this.send(chatId, '⚠️ /watchlist is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
+        await this.sendEphemeral(chatId, '⚠️ /watchlist is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
         return;
       }
       const filter = this.commandText(message, 'watchlist').split(/\s+/)[0]?.toLowerCase() || '';
@@ -1016,7 +1030,7 @@ export class TelegramShieldBot {
     }
     if (text.startsWith('/watch')) {
       if (!await this.isTrustedModerator(message)) {
-        await this.send(chatId, '⚠️ /watch is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
+        await this.sendEphemeral(chatId, '⚠️ /watch is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
         return;
       }
       const { target } = this.resolveCommandTarget(message, 'watch');
@@ -1034,7 +1048,7 @@ export class TelegramShieldBot {
     }
     if (text.startsWith('/unwatch')) {
       if (!await this.isTrustedModerator(message)) {
-        await this.send(chatId, '⚠️ /unwatch is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
+        await this.sendEphemeral(chatId, '⚠️ /unwatch is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
         return;
       }
       const { target } = this.resolveCommandTarget(message, 'unwatch');
@@ -1064,13 +1078,13 @@ export class TelegramShieldBot {
     }
     if (text.startsWith('/review')) {
       if (!await this.isTrustedModerator(message)) {
-        await this.send(chatId, '⚠️ /review is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
+        await this.sendEphemeral(chatId, '⚠️ /review is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
         return;
       }
       const [eventId, decisionRaw, ...reasonParts] = this.commandText(message, 'review').split(/\s+/);
       const decision = /^(uphold|upheld)$/i.test(decisionRaw || '') ? 'upheld' : /^(overturn|overturned|reject)$/i.test(decisionRaw || '') ? 'overturned' : '';
       if (!eventId || !decision) {
-        await this.send(chatId, 'Usage: /review <event-id> uphold reason or /review <event-id> overturn reason', { reply_to_message_id: message.message_id });
+        await this.sendEphemeral(chatId, 'Usage: /review <event-id> uphold reason or /review <event-id> overturn reason', { reply_to_message_id: message.message_id });
         return;
       }
       const reason = reasonParts.join(' ').trim() || `review ${decision}`;
@@ -1156,7 +1170,7 @@ export class TelegramShieldBot {
           requester: actorFromMessage(message),
           evidence: ['manual /ban requires trusted moderator privileges']
         }, { writeDkg: false });
-        await this.send(chatId, `⚠️ /ban is restricted to configured admins or Telegram chat admins. Request logged locally as ${event.id}.`, { reply_to_message_id: message.message_id });
+        await this.sendEphemeral(chatId, `⚠️ /ban is restricted to configured admins or Telegram chat admins. Request logged locally as ${event.id}.`, { reply_to_message_id: message.message_id });
         return;
       }
       if (!replyUser?.id) {
@@ -1165,7 +1179,7 @@ export class TelegramShieldBot {
           ...risk,
           evidence: [...risk.evidence, 'manual /ban requested without a replied Telegram user ID']
         });
-        await this.send(chatId, `⚠️ I can scan or report ${target.label || target.username || 'that target'}, but Telegram needs you to reply to the exact user's message before I can ban them. I saved the evidence for admin review.`, { reply_to_message_id: message.message_id });
+        await this.sendEphemeral(chatId, `⚠️ I can scan or report ${target.label || target.username || 'that target'}, but Telegram needs you to reply to the exact user's message before I can ban them. I saved the evidence for admin review.`, { reply_to_message_id: message.message_id });
         return;
       }
       const reason = this.commandReason(message, 'ban', 'admin requested ban');
@@ -1303,7 +1317,9 @@ export class TelegramShieldBot {
         verification_channel: options.dm ? 'dm' : 'group',
         evidence: ['pending join challenge user sent a non-UAL first message']
       }, { writeDkg: false });
-      await this.send(replyChatId, `${options.dm ? '' : `${userMention(message.from)}, `}paste a full DKG UAL that starts with did:dkg: to complete verification.`, options.dm ? {} : { reply_to_message_id: challenge.messageId || message.message_id, parse_mode: 'HTML' });
+      const reminderText = `${options.dm ? '' : `${userMention(message.from)}, `}paste a full DKG UAL that starts with did:dkg: to complete verification.`;
+      if (options.dm) await this.send(replyChatId, reminderText, { private: true });
+      else await this.sendEphemeral(replyChatId, reminderText, { reply_to_message_id: challenge.messageId || message.message_id, parse_mode: 'HTML' });
       return true;
     }
     const validation = this.config.joinChallengeDkgValidate === false ? { ok: true, reason: 'format_only' } : await this.dkg.validateUal(text);
@@ -1321,7 +1337,9 @@ export class TelegramShieldBot {
         verification_channel: options.dm ? 'dm' : 'group',
         evidence: ['pending join challenge user sent a UAL that did not validate on DKG']
       }, { writeDkg: false });
-      await this.send(replyChatId, `${options.dm ? '' : `${userMention(message.from)}, `}I could not validate that Knowledge Asset UAL on the DKG. Try another UAL from https://dkg.origintrail.io/.`, options.dm ? { disable_web_page_preview: true } : { reply_to_message_id: message.message_id, parse_mode: 'HTML', disable_web_page_preview: true });
+      const invalidText = `${options.dm ? '' : `${userMention(message.from)}, `}I could not validate that Knowledge Asset UAL on the DKG. Try another UAL from https://dkg.origintrail.io/.`;
+      if (options.dm) await this.send(replyChatId, invalidText, { disable_web_page_preview: true, private: true });
+      else await this.sendEphemeral(replyChatId, invalidText, { reply_to_message_id: message.message_id, parse_mode: 'HTML', disable_web_page_preview: true });
       return true;
     }
     this.joinChallenges.delete(key);
@@ -1339,7 +1357,9 @@ export class TelegramShieldBot {
       evidence: ['new user completed DKG Knowledge Asset UAL verification']
     }, { writeDkg: false });
     if (options.dm) await this.send(replyChatId, '✅ DKG-verified. You are unlocked in the group now.');
-    await this.send(chatId, '✅ DKG-verified!\n\nYou are now on TRAC(k) and protected by our DKG-powered agent with cross-community, persistent memory against scams and impersonators.', options.dm ? {} : { reply_to_message_id: message.message_id });
+    const successText = '✅ DKG-verified!\n\nYou are now on TRAC(k) and protected by our DKG-powered agent with cross-community, persistent memory against scams and impersonators.';
+    if (options.dm) await this.sendEphemeral(chatId, successText, {}, this.config.successMessageTtlSeconds || 45);
+    else await this.sendEphemeral(chatId, successText, { reply_to_message_id: message.message_id }, this.config.successMessageTtlSeconds || 45);
     return true;
   }
 
@@ -1367,7 +1387,7 @@ export class TelegramShieldBot {
       const targetMessage = message.reply_to_message || message;
       const explicitNamedTarget = this.targetFromSafetyQuestion(message);
       if (!message.reply_to_message && !this.targetFromMention(message) && !explicitNamedTarget && /\b(?:is|are)\s+(?!(?:this|that|it|he|she|they|them|him|her|me|i)\b)[\p{L}\p{N}_-]{2,32}\s+(?:a\s+|an\s+)?(?:legit(?:imate)?|safe|unsafe|real|fake|scam(?:mer|ming)?|fraud(?:ster)?|risky?|trusted|trustworthy|blacklisted|flagged|suspicious|sus|dangerous|malicious)\b/iu.test(String(message.text || '').replace(/@(?:tracabot|tracethembot)\b/ig, ' '))) {
-        await this.send(message.chat.id, 'I cannot identify that user from a display name alone. Reply to one of their messages and ask “is this a scam?” so I can check the actual Telegram account.', { reply_to_message_id: message.message_id });
+        await this.sendEphemeral(message.chat.id, 'I cannot identify that user from a display name alone. Reply to one of their messages and ask “is this a scam?” so I can check the actual Telegram account.', { reply_to_message_id: message.message_id });
         return;
       }
       const target = this.targetFromMention(message) || explicitNamedTarget || sangmataTargetFromText(targetMessage.text || '') || actorFromMessage(targetMessage);
@@ -1453,7 +1473,8 @@ export class TelegramShieldBot {
         attempts: challenge.attempts,
         evidence: ['new user did not complete DKG Knowledge Asset UAL verification before timeout']
       }, { writeDkg: false });
-      await this.send(challenge.chat.id, `${userMention(challenge.user)} did not complete DKG verification in time.`, { parse_mode: 'HTML' }).catch(() => null);
+      if (challenge.messageId && await this.hasDeleteRights(challenge.chat.id)) await this.deleteMessage(challenge.chat.id, challenge.messageId).catch(() => null);
+      await this.sendEphemeral(challenge.chat.id, `${userMention(challenge.user)} did not complete DKG verification in time.`, { parse_mode: 'HTML' }, this.config.successMessageTtlSeconds || 45).catch(() => null);
     }
   }
 

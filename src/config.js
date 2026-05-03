@@ -58,6 +58,9 @@ export function loadConfig(env = process.env) {
   const conversationRateLimitSeconds = Number(env.TRACABOT_CONVERSATION_RATE_LIMIT_SECONDS || 60);
   const conversationMaxChars = Number(env.TRACABOT_CONVERSATION_MAX_CHARS || 700);
   const joinChallengeTtlSeconds = Number(env.TRACABOT_JOIN_CHALLENGE_TTL_SECONDS || 60);
+  const botMessageTtlSeconds = Number(env.TRACABOT_BOT_MESSAGE_TTL_SECONDS || 60);
+  const challengeMessageTtlSeconds = Number(env.TRACABOT_CHALLENGE_MESSAGE_TTL_SECONDS || 120);
+  const successMessageTtlSeconds = Number(env.TRACABOT_SUCCESS_MESSAGE_TTL_SECONDS || 45);
   if (!Number.isFinite(conversationMinConfidence) || conversationMinConfidence < 0 || conversationMinConfidence > 100) {
     throw new Error('TRACABOT_CONVERSATION_MIN_CONFIDENCE must be a number from 0 to 100');
   }
@@ -72,6 +75,15 @@ export function loadConfig(env = process.env) {
   }
   if (!Number.isFinite(joinChallengeTtlSeconds) || joinChallengeTtlSeconds < 15 || joinChallengeTtlSeconds > 900) {
     throw new Error('TRACABOT_JOIN_CHALLENGE_TTL_SECONDS must be a number from 15 to 900');
+  }
+  if (!Number.isFinite(botMessageTtlSeconds) || botMessageTtlSeconds < 5 || botMessageTtlSeconds > 86400) {
+    throw new Error('TRACABOT_BOT_MESSAGE_TTL_SECONDS must be a number from 5 to 86400');
+  }
+  if (!Number.isFinite(challengeMessageTtlSeconds) || challengeMessageTtlSeconds < 15 || challengeMessageTtlSeconds > 86400) {
+    throw new Error('TRACABOT_CHALLENGE_MESSAGE_TTL_SECONDS must be a number from 15 to 86400');
+  }
+  if (!Number.isFinite(successMessageTtlSeconds) || successMessageTtlSeconds < 5 || successMessageTtlSeconds > 86400) {
+    throw new Error('TRACABOT_SUCCESS_MESSAGE_TTL_SECONDS must be a number from 5 to 86400');
   }
   return {
     telegramToken: env.TELEGRAM_BOT_TOKEN || '',
@@ -109,6 +121,10 @@ export function loadConfig(env = process.env) {
     joinChallengeAction: /^(kick|ban|mute)$/i.test(env.TRACABOT_JOIN_CHALLENGE_ACTION || '') ? env.TRACABOT_JOIN_CHALLENGE_ACTION.toLowerCase() : 'kick',
     joinChallengeDeleteOnPass: parseBoolean(env.TRACABOT_JOIN_CHALLENGE_DELETE_ON_PASS, true),
     joinChallengeDeleteBadAttempts: parseBoolean(env.TRACABOT_JOIN_CHALLENGE_DELETE_BAD_ATTEMPTS, true),
-    joinChallengeDkgValidate: parseBoolean(env.TRACABOT_JOIN_CHALLENGE_DKG_VALIDATE, true)
+    joinChallengeDkgValidate: parseBoolean(env.TRACABOT_JOIN_CHALLENGE_DKG_VALIDATE, true),
+    autoDeleteBotMessages: parseBoolean(env.TRACABOT_AUTO_DELETE_BOT_MESSAGES, true),
+    botMessageTtlSeconds,
+    challengeMessageTtlSeconds,
+    successMessageTtlSeconds
   };
 }

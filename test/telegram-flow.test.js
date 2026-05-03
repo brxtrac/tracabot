@@ -72,6 +72,10 @@ function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = nu
         contextGraph: 'tracabot',
       proactiveScanMinutes: 30,
       agentDid: 'did:dkg:agent:test',
+      autoDeleteBotMessages: true,
+      botMessageTtlSeconds: 60,
+      challengeMessageTtlSeconds: 120,
+      successMessageTtlSeconds: 45,
       joinChallenge: false,
       joinChallengeTtlSeconds: 60,
       joinChallengeAction: 'kick',
@@ -97,6 +101,7 @@ function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = nu
       return chatAdmins.map((user) => ({ status: 'administrator', user }));
     }
     if (method === 'unbanChatMember') return { ok: true };
+    if (method === 'sendMessage') return { message_id: calls.length, ...payload };
     return { ok: true };
   };
   return { bot, calls, dkgWrites };
@@ -395,7 +400,39 @@ test('invalid challenge first message is deleted and reminded', async () => {
   assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 46));
   const reminder = calls.filter((call) => call.method === 'sendMessage').at(-1)?.payload.text || '';
   assert.match(reminder, /starts with did:dkg/);
+  assert.equal(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id !== 46), false);
   assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_bad_attempt' && event.local_only));
+});
+
+test('noisy group replies are scheduled for cleanup but scan replies remain visible', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    configOverrides: { botMessageTtlSeconds: 60 }
+  });
+  const scheduled = [];
+  bot.scheduleDelete = (chatId, messageId, ttlSeconds) => scheduled.push({ chatId, messageId, ttlSeconds });
+  await bot.handleMessage({ chat: { id: -100, title: 'demo' }, from: { id: 1947, username: 'BRX86' }, message_id: 39, text: '@tracethembot is Dmitry a scammer?' });
+  assert.equal(scheduled.length, 1);
+  assert.equal(scheduled[0].ttlSeconds, 60);
+  await bot.handleCommand({ chat: { id: -100, title: 'demo' }, from: { id: 86, username: 'BRX86' }, message_id: 14, text: '/scan Dmitry' });
+  assert.equal(scheduled.length, 1);
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('@Dmitry')));
+});
+
+test('private DM challenge replies are not scheduled for cleanup', async () => {
+  const { bot } = makeBot({
+    canBan: true,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    configOverrides: { joinChallenge: true }
+  });
+  const scheduled = [];
+  bot.scheduleDelete = (chatId, messageId, ttlSeconds) => scheduled.push({ chatId, messageId, ttlSeconds });
+  await bot.handleNewMembers({ chat: { id: -100, title: 'demo', type: 'supergroup' }, from: { id: 1, username: 'admin' }, new_chat_members: [{ id: 546, username: 'dmuser', first_name: 'Dm', is_bot: false }] });
+  await bot.handleMessage({ chat: { id: 546, type: 'private' }, from: { id: 546, username: 'dmuser', is_bot: false }, message_id: 1, text: '/start verify_m100_546' });
+  assert.equal(scheduled.length, 0);
 });
 
 test('invalid DKG UAL challenge attempt is deleted and not accepted', async () => {
