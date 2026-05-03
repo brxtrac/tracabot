@@ -1,3 +1,5 @@
+import { safetyCloser } from './reply-style.js';
+
 export function displayName(target) {
   if (!target) return 'this account';
   if (target.label) return target.label;
@@ -5,6 +7,14 @@ export function displayName(target) {
   const fullName = [target.first_name, target.last_name].filter(Boolean).join(' ').trim();
   if (fullName) return fullName;
   return target.id || 'this account';
+}
+
+function publicEvidence(risk = {}) {
+  return (risk.evidence || [])
+    .filter((item) => !/\b(DKG|UAL|Context Graph|Shared Memory|event\s+[a-f0-9-]{8,}|Active watchlist|admin watch|configured admin)\b/i.test(String(item)))
+    .map((item) => String(item).replace(/:\s*[a-f0-9-]{8,}/ig, '').slice(0, 140))
+    .filter(Boolean)
+    .slice(0, 3);
 }
 
 export function combineRisk({ analysis, dkgIntel, threshold = 85 }) {
@@ -50,8 +60,8 @@ export function combineRisk({ analysis, dkgIntel, threshold = 85 }) {
 export function formatRiskAssessment({ target, risk }) {
   const name = displayName(target);
   const verdict = risk.confidence >= 85 ? 'HIGH RISK' : risk.confidence >= 60 ? 'REVIEW' : 'LOW RISK';
-  const evidence = risk.evidence?.length ? risk.evidence.slice(0, 6).join('; ') : 'No matching DKG evidence or high-confidence pattern found.';
-  return `tracabot risk for ${name}: ${verdict} (${risk.confidence}%). Type: ${risk.scam_type}. Evidence: ${evidence}. Recommendation: ${risk.recommended_action}.`;
+  const evidence = publicEvidence(risk).join('; ') || 'No strong public scam signal found.';
+  return `TRACaBot risk for ${name}: ${verdict} (${risk.confidence}%). Type: ${risk.scam_type}. Public signals: ${evidence}. Recommendation: ${risk.recommended_action}.`;
 }
 
 export function formatDkgReference(event) {
@@ -65,33 +75,33 @@ export function formatDkgReference(event) {
 
 export function formatScanReply({ target, risk, eventId = '', findingId = '' }) {
   const name = displayName(target);
+  const closer = safetyCloser({ target, risk, seed: eventId || findingId });
   if (risk.confidence < 60) {
-    return `🛡️ ${name} looks clean! DKG scan came back ${risk.confidence}% risk — no strong matches. Safe to chat. Event: ${eventId}`;
+    return `🛡️ ${name} looks low risk (${risk.confidence}%). No strong public scam signal found. ${closer}`;
   }
   if (risk.confidence >= 80) {
-    const evidence = risk.evidence?.slice(0, 3).join('; ') || 'DKG + behavior match';
-    return `🚨 HIGH RISK (${risk.confidence}%) on ${name} — ${evidence}. Full evidence logged${findingId ? ` (${findingId})` : ''}. Want me to /ban or /report this?`;
+    const evidence = publicEvidence(risk).join('; ') || 'behavior matches known scam patterns';
+    return `🚨 HIGH RISK (${risk.confidence}%) on ${name}. Public signals: ${evidence}. ${closer} Admins can use /why privately with the event ID if needed.`;
   }
-  return `⚠️ ${name} needs a closer look (${risk.confidence}% risk). Evidence is thin but not nothing. Event: ${eventId}`;
+  return `⚠️ ${name} needs a closer look (${risk.confidence}% risk). Public signals are limited, but caution is warranted. ${closer}`;
 }
 
 export function formatReportReply(event, decision = null) {
   if (decision && decision.decision !== 'accepted') {
-    return `⚠️ Report not published to DKG: ${decision.reason}. Reply to the suspicious message, mention a recently active suspect, or include the wallet/link/text that should be checked.`;
+    return `⚠️ I need stronger evidence before sharing this with the DKG fraud memory. Reply to the suspicious message, mention a recently active suspect, or include the wallet, link, or text that should be checked.`;
   }
-  const ref = formatDkgReference(event);
   if (event?.dkg?.publish) {
-    return `✅ Reported. Evidence written to DKG and auto-published to the Context Graph. UAL: ${ref}`;
+    return '✅ Reported. I saved the evidence to DKG fraud memory and published the high-confidence signal for cross-community protection.';
   }
   if (event?.dkg?.publish_error) {
-    return `✅ Reported. Evidence written to DKG Shared Memory and automatic Context Graph publish was attempted. UAL: ${ref}`;
+    return '✅ Reported. I saved the evidence to DKG fraud memory. Public sharing was attempted, but the local DKG node did not confirm publication yet.';
   }
-  return `✅ Reported. Evidence published to DKG Shared Memory. UAL: ${ref}`;
+  return '✅ Reported. I saved the evidence to DKG fraud memory so future checks can use it.';
 }
 
 export function formatBanReply(target, eventId) {
   const name = displayName(target);
-  return `🔨 Banned ${name} + evidence logged to DKG v10 (event ID: ${eventId}). This one won't bother us again.`;
+  return `🔨 Banned ${name}. I saved the moderation evidence to DKG fraud memory for future protection.`;
 }
 
 function labelStatKey(key = '') {

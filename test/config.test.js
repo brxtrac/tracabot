@@ -46,3 +46,21 @@ test('loadConfig parses conversational safety settings', () => {
   assert.equal(config.conversationMaxChars, 500);
   assert.throws(() => loadConfig({ TRACABOT_CONVERSATION_MIN_CONFIDENCE: '90', TRACABOT_PROACTIVE_REPLY_THRESHOLD: '80' }), /TRACABOT_PROACTIVE_REPLY_THRESHOLD/);
 });
+
+test('loadConfig parses DKG join challenge settings', () => {
+  const config = loadConfig({
+    TRACABOT_JOIN_CHALLENGE: 'true',
+    TRACABOT_JOIN_CHALLENGE_TTL_SECONDS: '90',
+    TRACABOT_JOIN_CHALLENGE_ACTION: 'ban',
+    TRACABOT_JOIN_CHALLENGE_DELETE_ON_PASS: 'false',
+    TRACABOT_JOIN_CHALLENGE_DELETE_BAD_ATTEMPTS: 'true',
+    TRACABOT_JOIN_CHALLENGE_DKG_VALIDATE: 'false'
+  });
+  assert.equal(config.joinChallenge, true);
+  assert.equal(config.joinChallengeTtlSeconds, 90);
+  assert.equal(config.joinChallengeAction, 'ban');
+  assert.equal(config.joinChallengeDeleteOnPass, false);
+  assert.equal(config.joinChallengeDeleteBadAttempts, true);
+  assert.equal(config.joinChallengeDkgValidate, false);
+  assert.throws(() => loadConfig({ TRACABOT_JOIN_CHALLENGE_TTL_SECONDS: '5' }), /TRACABOT_JOIN_CHALLENGE_TTL_SECONDS/);
+});

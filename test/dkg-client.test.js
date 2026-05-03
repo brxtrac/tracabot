@@ -29,6 +29,14 @@ function makeAdapterClient({ publishError = null } = {}) {
   };
 }
 
+test('validates DKG UALs through adapter resolve or query', async () => {
+  const resolving = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient: { async resolve(ual) { return ual.includes('valid') ? { id: ual } : null; } } });
+  assert.equal((await resolving.validateUal('did:dkg:valid-knowledge-asset')).ok, true);
+  assert.equal((await resolving.validateUal('not-a-ual')).ok, false);
+  const querying = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient: { async query() { return { result: { bindings: [{ s: 'asset' }] } }; } } });
+  assert.equal((await querying.validateUal('did:dkg:another-valid-asset')).ok, true);
+});
+
 test('extracts wallet addresses and scam patterns for DKG lookups', () => {
   const text = 'URGENT official support says verify wallet 0x1111111111111111111111111111111111111111 to claim free USDT airdrop';
   assert.deepEqual(extractWallets(text), ['0x1111111111111111111111111111111111111111']);

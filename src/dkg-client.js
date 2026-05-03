@@ -10,6 +10,7 @@ const ADAPTER_PATHS = [
   '/usr/lib/node_modules/@origintrail-official/dkg/node_modules/@origintrail-official/dkg-adapter-openclaw/dist/index.js',
   '/usr/lib/node_modules/@origintrail-official/dkg-adapter-openclaw/dist/index.js'
 ];
+const UAL_RE = /^did:dkg:[^\s<>"']{8,}$/i;
 
 function literal(value) {
   return JSON.stringify(String(value));
@@ -261,6 +262,27 @@ export class DkgClient {
     } catch (error) {
       console.error(`DKG query failed: ${error instanceof Error ? error.message : String(error)}`);
       return [];
+    }
+  }
+
+  async validateUal(ual = '') {
+    const value = String(ual || '').trim();
+    if (!UAL_RE.test(value)) return { ok: false, reason: 'invalid_ual_format' };
+    const client = await this.client();
+    try {
+      if (typeof client.resolve === 'function') {
+        const result = await client.resolve(value);
+        return { ok: Boolean(result), reason: result ? 'resolved' : 'not_found' };
+      }
+      if (typeof client.query === 'function') {
+        const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        const result = await client.query(`ASK WHERE { GRAPH <${escaped}> { ?s ?p ?o } }`);
+        const bindings = result?.result?.bindings || result?.bindings || [];
+        return { ok: result?.boolean === true || result?.result?.boolean === true || bindings.length > 0, reason: 'queried' };
+      }
+      return { ok: false, reason: 'dkg_validation_unavailable' };
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : String(error) };
     }
   }
 

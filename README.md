@@ -24,6 +24,14 @@ Telegram scam moderation usually stays trapped inside one chat. TRACaBot turns e
 - `/status` is admin-only and shows DKG reachability, Telegram permissions, thresholds, and conversational mode status without exposing secrets.
 - `/help` explains commands, autonomous thresholds, safeguards, and the DKG shared-memory loop for admins.
 
+## DKG Join Challenge
+
+TRACaBot can replace generic captcha bots with a DKG-native onboarding gate. When `TRACABOT_JOIN_CHALLENGE=true`, low-risk new members are allowed to send text only and must verify by finding any Knowledge Asset on `https://dkg.origintrail.io/`, copying its UAL, and pasting it as their first message. TRACaBot validates that the UAL starts with `did:dkg:` and, by default, checks it against the live DKG before restoring normal chat permissions.
+
+A Knowledge Asset is a verifiable data item on the Decentralized Knowledge Graph. Its UAL is the unique address for that item, similar to a link for DKG data. The challenge gives new members a practical first interaction with DKG while TRACaBot continues checking shared scam memory for high-risk joins, impersonators, and scam patterns.
+
+High-risk joins still bypass the challenge and go directly to the configured risk action. Challenge starts, failed attempts, solves, and expirations stay local-only; evidence-backed scam findings and enforcement outcomes remain the events written to DKG Shared Memory.
+
 ## DKG v10 Integration
 
 TRACaBot uses the official DKG/OpenClaw adapter setup as its DKG boundary. `DkgDaemonClient` points at the local DKG v10 daemon at `DKG_NODE_URL` and keeps TRACaBot aligned with the same DKG service OpenClaw uses:
@@ -140,6 +148,12 @@ TRACABOT_CONVERSATION_MIN_CONFIDENCE=60
 TRACABOT_PROACTIVE_REPLY_THRESHOLD=75
 TRACABOT_CONVERSATION_RATE_LIMIT_SECONDS=60
 TRACABOT_CONVERSATION_MAX_CHARS=700
+TRACABOT_JOIN_CHALLENGE=false
+TRACABOT_JOIN_CHALLENGE_TTL_SECONDS=60
+TRACABOT_JOIN_CHALLENGE_ACTION=kick
+TRACABOT_JOIN_CHALLENGE_DELETE_ON_PASS=true
+TRACABOT_JOIN_CHALLENGE_DELETE_BAD_ATTEMPTS=true
+TRACABOT_JOIN_CHALLENGE_DKG_VALIDATE=true
 ```
 
 5. Start manually:
@@ -200,7 +214,7 @@ npm run test:commands
 ## Troubleshooting
 
 - Bot does not respond: confirm `TELEGRAM_BOT_TOKEN`, service logs, group privacy settings, and that the bot was invited to the correct group.
-- Bot cannot delete, restrict, or ban: confirm Telegram admin permissions for deleting messages, restricting users, and banning users.
+- Bot cannot delete, restrict, ban, or run join challenge enforcement: confirm Telegram admin permissions for deleting messages, restricting users, and banning users.
 - `/ban` says admin required: add your numeric Telegram ID or username to `TRACABOT_ADMINS`, or run the command from a Telegram chat-admin account.
 - DKG evidence is missing: confirm `dkg status`, `DKG_NODE_URL`, `TRACABOT_DKG_MODE=openclaw-adapter`, and any `DKG_AUTH_TOKEN` required by your adapter.
 - Skill command returns JSON error: run from the project root, pass valid JSON, and check `OPENCLAW_DKG_ADAPTER_PATH` only if the adapter is installed outside standard OpenClaw paths.

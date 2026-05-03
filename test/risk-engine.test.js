@@ -38,8 +38,39 @@ test('formats Telegram users by friendly name before numeric ID', () => {
     risk: { confidence: 0 },
     eventId: 'evt'
   });
-  assert.match(clean, /BRX 1947 looks clean/);
-  assert.doesNotMatch(clean, /517276940 looks clean/);
+  assert.match(clean, /BRX 1947 looks low risk/);
+  assert.doesNotMatch(clean, /Stay cautious with wallet links or DMs/);
+  assert.doesNotMatch(clean, /517276940 looks low risk/);
+});
+
+test('scan replies vary low-risk safety closers without exposing internals', () => {
+  const first = formatScanReply({ target: { username: 'alice' }, risk: { confidence: 0 }, eventId: 'evt-a' });
+  const second = formatScanReply({ target: { username: 'bob' }, risk: { confidence: 0 }, eventId: 'evt-b' });
+  assert.match(first, /looks low risk/);
+  assert.match(second, /looks low risk/);
+  assert.notEqual(first, second);
+  assert.doesNotMatch(`${first}\n${second}`, /UAL|Context Graph|Shared Memory|evt-a|evt-b/);
+});
+
+test('public risk replies redact internal DKG references', () => {
+  const risk = {
+    confidence: 91,
+    scam_type: 'phishing',
+    recommended_action: 'ban',
+    evidence: [
+      'DKG evidence: UAL did:dkg:context-graph:tracabot/_shared_memory event evt-secret share swm-secret',
+      'Active watchlist entry: configured admin watch',
+      'wallet-drain phrase detected',
+      'Domains checked: fake-claim.example'
+    ]
+  };
+  const scan = formatScanReply({ target: { username: 'badactor' }, risk, eventId: 'evt-secret', findingId: 'finding-secret' });
+  const assessment = formatRiskAssessment({ target: { username: 'badactor' }, risk });
+  assert.match(scan, /HIGH RISK/);
+  assert.match(scan, /wallet-drain phrase detected/);
+  assert.doesNotMatch(scan, /UAL|Context Graph|evt-secret|finding-secret|configured admin|swm-secret/);
+  assert.match(assessment, /Public signals/);
+  assert.doesNotMatch(assessment, /UAL|Context Graph|evt-secret|configured admin|swm-secret/);
 });
 
 test('formats DKG write references as UAL plus share operation', () => {

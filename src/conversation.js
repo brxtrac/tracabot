@@ -1,14 +1,17 @@
 import { displayName } from './risk-engine.js';
+import { safetyCloser, safetyStyleInstruction } from './reply-style.js';
 
-const SAFETY_TERMS = /\b(scam|scammer|fraud|fraudster|phish|phishing|drain|wallet|seed phrase|private key|airdrop|giveaway|safe|risk|trustworthy|blacklisted|impersonat|support|admin|dm)\b/i;
-const ASK_TERMS = /\b(is this|am i|are they|is he|is she|is it|trust|trustworthy|safe|scam|scammed|blacklisted|fraud|risk)\b/i;
+const SAFETY_TERMS = /\b(scam|scammer|scamming|fraud|fraudster|phish|phishing|drain|drainer|wallet|seed phrase|private key|airdrop|giveaway|safe|unsafe|dangerous|suspicious|sus|risk|risky|trusted|trust|trustworthy|legit|legitimate|real|fake|blacklisted|flagged|known|malicious|impersonat|support|admin|dm)\b/i;
+const ASK_TERMS = /\b(is this|am i|are they|is he|is she|is it|can i|should i|trust|trust this|trusted|trustworthy|safe|unsafe|legit|legitimate|real|fake|scam|scammer|scammed|blacklisted|flagged|fraud|fraudster|suspicious|sus|dangerous|malicious|risk|risky)\b/i;
 const FORBIDDEN = /\b(seed phrase|private key)\b.*\b(send|share|paste|enter|provide)\b/i;
 
 export function isSafetyQuestion(message = {}) {
   const text = String(message.text || '');
   const replyText = String(message.reply_to_message?.text || '');
   const mentionsBot = /@tracabot\b|@tracethembot\b/i.test(text);
-  return (mentionsBot || Boolean(message.reply_to_message)) && SAFETY_TERMS.test(`${text}\n${replyText}`) && ASK_TERMS.test(text);
+  const compact = text.replace(/@(?:tracabot|tracethembot)\b/ig, ' ').replace(/\s+/g, ' ').trim();
+  const hasQuestion = ASK_TERMS.test(compact) || /\?/.test(text);
+  return (mentionsBot || Boolean(message.reply_to_message)) && SAFETY_TERMS.test(`${compact}\n${replyText}`) && hasQuestion;
 }
 
 export function shouldConversationallyReply({ message = {}, risk = {}, explicit = false, config = {} }) {
@@ -27,7 +30,7 @@ export function buildSafetyPrompt({ message = {}, target = {}, risk = {}, event 
     'Use only the supplied risk data. Do not invent DKG evidence or claim certainty beyond the confidence score.',
     'Never tell users to share seed phrases, private keys, passwords, or click suspicious links.',
     'Do not execute or suggest bypassing admin-only moderation commands.',
-    `Keep the reply under ${maxChars} characters. Be clear, calm, and practical.`
+    safetyStyleInstruction(maxChars)
   ].join('\n');
   const user = [
     `Telegram question/message: ${String(message.text || '').slice(0, 1000)}`,
@@ -45,14 +48,23 @@ export function buildSafetyPrompt({ message = {}, target = {}, risk = {}, event 
 
 export function fallbackSafetyReply({ target = {}, risk = {}, event = {} }) {
   const name = displayName(target);
-  const evidence = (risk.evidence || []).slice(0, 3).join('; ') || 'no strong local or DKG evidence';
+  const evidence = publicEvidence(risk).join('; ') || 'no strong public scam signal';
+  const closer = safetyCloser({ target, risk, seed: event.id || evidence });
   if (Number(risk.confidence || 0) >= 80) {
-    return `TRACaBot warning: ${name} looks high risk (${risk.confidence}%). Evidence: ${evidence}. Do not click links, DM fake support, or share wallet secrets. Event: ${event.id || 'local'}`;
+    return `TRACaBot warning: ${name} looks high risk (${risk.confidence}%). Public signals: ${evidence}. ${closer}`;
   }
   if (Number(risk.confidence || 0) >= 60) {
-    return `TRACaBot caution: ${name} needs review (${risk.confidence}%). Evidence: ${evidence}. Avoid links or wallet requests until an admin checks it. Event: ${event.id || 'local'}`;
+    return `TRACaBot caution: ${name} needs review (${risk.confidence}%). Public signals: ${evidence}. ${closer}`;
   }
-  return `TRACaBot check: I do not see strong scam evidence for ${name} (${risk.confidence || 0}%). Still avoid sharing seed phrases, private keys, or connecting wallets from chat links. Event: ${event.id || 'local'}`;
+  return `TRACaBot check: I do not see strong scam evidence for ${name} (${risk.confidence || 0}%). ${closer}`;
+}
+
+export function publicEvidence(risk = {}) {
+  return (risk.evidence || [])
+    .filter((item) => !/\b(DKG|UAL|Context Graph|Shared Memory|event\s+[a-f0-9-]{8,}|Active watchlist|admin watch|configured admin)\b/i.test(String(item)))
+    .map((item) => String(item).replace(/:\s*[a-f0-9-]{8,}/ig, '').slice(0, 140))
+    .filter(Boolean)
+    .slice(0, 3);
 }
 
 export function sanitizeSafetyReply(reply = '', { risk = {}, maxChars = 700, fallback = '' } = {}) {
