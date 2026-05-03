@@ -12,8 +12,8 @@
   },
   "type": "module",
   "bin": {
-    "tracabot": "./bin/tracabot.js",
-    "tracabot-skill": "./bin/tracabot-skill.js"
+    "tracabot": "bin/tracabot.js",
+    "tracabot-skill": "bin/tracabot-skill.js"
   },
   "scripts": {
     "start": "node ./bin/tracabot.js",
