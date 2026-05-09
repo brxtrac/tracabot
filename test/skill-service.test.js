@@ -64,6 +64,34 @@ test('skill service monitors unsafe chat events through DKG working memory', asy
   assert.equal(dkgWrites[0].payload.publication_status, 'shared_memory');
 });
 
+test('skill service query_campaigns returns campaign roots and indicators', () => {
+  const { service } = makeService();
+  service.store.append({
+    id: 'campaign-1',
+    event_type: 'fraud_campaign',
+    timestamp: new Date().toISOString(),
+    payload: {
+      campaign_key: 'domain:fake.example',
+      related_event_ids: ['evt-a', 'evt-b'],
+      evidence_root_ids: ['evt-a', 'evt-b'],
+      affected_community_ids: ['-1001', '-1002'],
+      campaign_event_count: 2,
+      campaign_community_count: 2,
+      domains: ['fake.example'],
+      wallets: ['0x0000000000000000000000000000000000000001'],
+      patterns: ['wallet-drain'],
+      evidence: ['Campaign repeated across two communities']
+    }
+  });
+  const result = service.queryCampaigns();
+  assert.equal(result.campaigns[0].eventId, 'campaign-1');
+  assert.deepEqual(result.campaigns[0].evidenceRootIds, ['evt-a', 'evt-b']);
+  assert.deepEqual(result.campaigns[0].affectedCommunityIds, ['-1001', '-1002']);
+  assert.equal(result.campaigns[0].eventCount, 2);
+  assert.deepEqual(result.campaigns[0].domains, ['fake.example']);
+  assert.deepEqual(result.campaigns[0].patterns, ['wallet-drain']);
+});
+
 test('tracabot-skill CLI returns JSON and rejects unknown tools', async () => {
   const env = {
     ...process.env,

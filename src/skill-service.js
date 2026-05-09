@@ -117,7 +117,19 @@ export class TracabotSkillService {
     }
     return {
       tool: 'query_campaigns',
-      campaigns: [...buckets.values()].slice(-20).map((event) => ({ eventId: event.id, key: event.payload?.campaign_key || '', relatedEventIds: event.payload?.related_event_ids || [], evidence: event.payload?.evidence || [] }))
+      campaigns: [...buckets.values()].slice(-20).map((event) => ({
+        eventId: event.id,
+        key: event.payload?.campaign_key || '',
+        relatedEventIds: event.payload?.related_event_ids || [],
+        evidenceRootIds: event.payload?.evidence_root_ids || [],
+        affectedCommunityIds: event.payload?.affected_community_ids || [],
+        eventCount: event.payload?.campaign_event_count || (event.payload?.related_event_ids || []).length,
+        communityCount: event.payload?.campaign_community_count || (event.payload?.affected_community_ids || []).length,
+        domains: event.payload?.domains || [],
+        wallets: event.payload?.wallets || [],
+        patterns: event.payload?.patterns || [],
+        evidence: event.payload?.evidence || []
+      }))
     };
   }
 

@@ -25,6 +25,33 @@ Telegram scam moderation usually stays trapped inside one chat. TRACaBot turns e
 - `/status` is admin-only and shows DKG reachability, Telegram permissions, thresholds, and conversational mode status without exposing secrets.
 - `/help` explains commands, autonomous thresholds, safeguards, and the DKG shared-memory loop for admins.
 
+## Community Workflow
+
+Community members can use TRACaBot without needing admin permissions:
+
+- Reply to a suspicious message with `/scan` to get a risk verdict before engaging.
+- Reply with `/report` when a message, username, wallet, or link looks like a scam. Accepted reports become evidence-backed DKG Shared Memory; weak or duplicate reports stay local-only.
+- Use `/dmreport` for scam DMs, fake support accounts, or impersonators who contact members outside the group.
+- Use `/why <event-id>` when TRACaBot returns an event ID and you want to understand the evidence behind a decision.
+- Use `/appeal <event-id> reason` if you think a report, restriction, or ban was wrong.
+
+## Admin Workflow
+
+Admins keep enforcement guarded and auditable:
+
+- Use `/ban` only as a reply to a scammer, scam message, or supported SangMata rename alert. The bot must have Telegram ban rights.
+- Use `/watch` for suspicious accounts that should receive extra scrutiny but should not be banned yet.
+- Use `/watchlist` to see watched users, temporary mutes, and pending review items.
+- Use `/review <event-id> uphold|overturn reason` to resolve appeals or false positives. Review decisions are written to DKG Shared Memory.
+- Use `/stats`, `/stats campaigns`, and `/digest` to understand recent detections, repeated scam waves, and recommended follow-up.
+- Use `/status` to verify bot permissions, DKG reachability, thresholds, and conversational mode without exposing secrets.
+
+## Campaign Summaries
+
+TRACaBot clusters repeated domains, wallets, scam patterns, and message fingerprints into `fraud_campaign` events. Campaign summaries are only published when they have at least two evidence-backed roots, such as accepted reports, high-confidence findings, restrictions, bans, appeals, or reviews. Weak local detections and prior campaign summaries cannot become campaign evidence roots by themselves.
+
+Published campaign summaries include the campaign key, event count, affected community IDs, evidence root IDs, repeated domains, wallets, and patterns. This lets another TRACaBot instance query the same Context Graph and recognize a repeated scam wave before it spreads further.
+
 ## DKG Join Challenge
 
 TRACaBot can replace generic captcha bots with a DKG-native onboarding gate. When `TRACABOT_JOIN_CHALLENGE=true`, low-risk new members are allowed to send text only and must verify with a Knowledge Asset before normal chat permissions are restored.

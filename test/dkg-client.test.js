@@ -429,6 +429,36 @@ test('publishes campaign summaries with evidence roots', async () => {
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#affectedCommunityId') && triple.object === '"-1002"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#campaignEventCount') && triple.object === '"2"'));
   assert.equal(adapterClient.calls.some(([method]) => method === 'publishSharedMemory'), true);
+  const publishCall = adapterClient.calls.find(([method]) => method === 'publishSharedMemory');
+  assert.equal(publishCall[1], 'tracabot');
+  assert.deepEqual(publishCall[2].sharedMemoryResult, result.share);
+  assert.equal(result.publish.status, 'published');
+  assert.deepEqual(result.publish.rootEntities, ['https://tracabot.org/ontology#event/campaign-1']);
+});
+
+test('does not publish campaign summaries without two evidence roots', async () => {
+  const adapterClient = makeAdapterClient();
+  const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient });
+  const result = await dkg.writeEvent({
+    id: 'campaign-single-root',
+    event_type: 'fraud_campaign',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    chat: { id: '-100123' },
+    user: { id: 'system', username: 'tracabot' },
+    payload: {
+      confidence: 95,
+      local_confidence: 90,
+      campaign_key: 'domain:fake-claim.example',
+      evidence_root_ids: ['evt-a'],
+      related_event_ids: ['evt-a'],
+      domains: ['fake-claim.example'],
+      lifecycle_stage: 'campaign_summary',
+      evidence: ['Only one evidence root']
+    }
+  });
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#publicationStatus') && triple.object === '"shared_memory"'));
+  assert.equal(adapterClient.calls.some(([method]) => method === 'publishSharedMemory'), false);
 });
 
 test('keeps shared-memory write result when automatic context graph publish fails', async () => {

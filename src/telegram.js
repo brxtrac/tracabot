@@ -266,6 +266,11 @@ function hasEvidenceForDkg(eventType = '', payload = {}) {
   return false;
 }
 
+function isCampaignRootEvent(event = {}) {
+  if (event.event_type === 'fraud_campaign') return false;
+  return hasEvidenceForDkg(event.event_type, event.payload || {}) && Boolean(event.payload?.evidence?.length);
+}
+
 function formatDmReportReply(event, decision = {}) {
   if (!decision.accepted) {
     return '⚠️ I logged this DM scam note locally, but need stronger details before sharing it to DKG: impersonated name/role, the request they made, wallet/link, or screenshot caption.';
@@ -843,6 +848,7 @@ export class TelegramShieldBot {
   campaignSummary(windowMs = 24 * 60 * 60 * 1000) {
     const buckets = new Map();
     for (const event of this.recentEvents(windowMs)) {
+      if (!isCampaignRootEvent(event)) continue;
       const payload = event.payload || {};
       for (const domain of payload.domains || []) {
         const key = `domain:${domain}`;

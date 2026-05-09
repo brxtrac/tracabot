@@ -1039,8 +1039,8 @@ test('/ban replying to SangMata rename bans the renamed user ID', async () => {
 test('/stats campaigns and /digest summarize local memory', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   const timestamp = new Date().toISOString();
-  bot.store.append({ id: 'evt-c1', event_type: 'scam_detection', timestamp, payload: { domains: ['fake.example'], confidence: 80, evidence: ['fake.example'] } });
-  bot.store.append({ id: 'evt-c2', event_type: 'report_submitted', timestamp, payload: { domains: ['fake.example'], confidence: 90, evidence: ['fake.example'] } });
+  bot.store.append({ id: 'evt-c1', event_type: 'fraud_finding', timestamp, payload: { domains: ['fake.example'], confidence: 80, local_confidence: 75, evidence: ['fake.example'] } });
+  bot.store.append({ id: 'evt-c2', event_type: 'report_submitted', timestamp, payload: { domains: ['fake.example'], confidence: 90, local_confidence: 85, report_decision: 'accepted', evidence: ['fake.example'] } });
   const chat = { id: -100, title: 'demo' };
   await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 37, text: '/stats campaigns' });
   await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 38, text: '/digest' });
@@ -1058,8 +1058,27 @@ test('campaign summaries include evidence roots and affected communities', async
   assert.equal(campaign.event_type, 'fraud_campaign');
   assert.deepEqual(campaign.payload.evidence_root_ids, ['evt-root-1', 'evt-root-2']);
   assert.deepEqual(campaign.payload.affected_community_ids, ['-1001', '-1002']);
+  assert.equal(campaign.payload.campaign_event_count, 2);
+  assert.equal(campaign.payload.campaign_community_count, 2);
+  assert.deepEqual(campaign.payload.domains, ['fake.example']);
+  assert.deepEqual(campaign.payload.patterns, ['wallet-drain']);
   assert.equal(campaign.payload.lifecycle_stage, 'campaign_summary');
   assert.equal(campaign.payload.publication_status, 'context_graph_auto_publish_eligible');
+});
+
+test('campaign summaries ignore weak local-only and prior campaign events as roots', async () => {
+  const { bot } = makeBot({ canBan: true, testMode: false });
+  const timestamp = new Date().toISOString();
+  bot.store.append({ id: 'evt-weak', event_type: 'scam_detection', timestamp, payload: { domains: ['fake.example'], confidence: 95, evidence: ['fake.example'] } });
+  bot.store.append({ id: 'evt-campaign', event_type: 'fraud_campaign', timestamp, payload: { domains: ['fake.example'], confidence: 95, evidence: ['prior campaign'] } });
+  assert.equal(await bot.maybeRecordCampaign({ chat: { id: -1003 }, from: { id: 1 } }, { confidence: 95, local_confidence: 90 }), null);
+
+  bot.store.append({ id: 'evt-root-1', event_type: 'fraud_finding', timestamp, payload: { domains: ['fake.example'], confidence: 95, local_confidence: 90, evidence: ['fake.example'] } });
+  assert.equal(await bot.maybeRecordCampaign({ chat: { id: -1003 }, from: { id: 1 } }, { confidence: 95, local_confidence: 90 }), null);
+
+  bot.store.append({ id: 'evt-root-2', event_type: 'report_submitted', timestamp, payload: { domains: ['fake.example'], confidence: 90, local_confidence: 85, report_decision: 'accepted', evidence: ['fake.example'] } });
+  const campaign = await bot.maybeRecordCampaign({ chat: { id: -1003 }, from: { id: 1 } }, { confidence: 95, local_confidence: 90 });
+  assert.deepEqual(campaign.payload.evidence_root_ids, ['evt-root-1', 'evt-root-2']);
 });
 
 test('medium-risk message is deleted and restricted instead of banned', async () => {

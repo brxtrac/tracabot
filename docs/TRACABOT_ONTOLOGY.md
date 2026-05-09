@@ -85,4 +85,15 @@ Repeated domains, wallets, scam patterns, and message fingerprints are clustered
 - `tracabot:affectedCommunityId`
 - repeated `tracabot:observedDomain` / `tracabot:observedPattern`
 
-Campaign summaries are publish-eligible only when they point to at least two evidence-backed roots. This prevents a single weak report from becoming global intelligence while still letting repeated scam waves become reusable Verified Memory.
+Campaign summaries are publish-eligible only when they point to at least two evidence-backed roots. Eligible roots are concrete moderation or report events such as `fraud_finding`, accepted `report_submitted`, `dm_scam_report`, `ban_executed`, `restrict_executed`, `appeal_submitted`, and `review_*` events. Weak local-only observations like `scam_detection` and existing `fraud_campaign` summaries must not become roots.
+
+This prevents a single weak report or recursive campaign summary from becoming global intelligence while still letting repeated scam waves become reusable Verified Memory. When a campaign qualifies, the runtime writes it to DKG Shared Memory with `tracabot:lifecycleStage = "campaign_summary"`, `tracabot:publicationStatus = "context_graph_auto_publish_eligible"`, and evidence-root links back to the underlying events before requesting Context Graph publication.
+
+## Interaction Examples
+
+- Member scans a suspicious reply: `/scan`.
+- Member reports a phishing link: reply with `/report fake support wallet drain`.
+- Member reports an off-platform impersonator: `/dmreport name="Fake Support" role="admin" request="verify wallet" link=https://fake.example`.
+- Admin watches a suspicious account without banning: reply with `/watch possible fake support`.
+- Admin reviews a contested event: `/review <event-id> overturn user was discussing scam prevention`.
+- Admin checks repeated waves: `/stats campaigns` or `/digest`.
