@@ -705,9 +705,14 @@ export class TelegramShieldBot {
   }
 
   async record(eventType, message, payload, { writeDkg = null } = {}) {
+    const communityId = this.config.communityId || String(message.chat?.id || '');
     const decoratedPayload = this.config.testMode
       ? { ...payload, source: payload?.source || 'test-command-loop', test_mode: true }
-      : payload;
+      : { ...payload };
+    decoratedPayload.community_id = decoratedPayload.community_id || communityId;
+    decoratedPayload.community_name = decoratedPayload.community_name || this.config.communityName || '';
+    decoratedPayload.community_type = decoratedPayload.community_type || this.config.communityType || 'telegram_group';
+    decoratedPayload.policy_id = decoratedPayload.policy_id || this.config.policyId || 'default';
     const event = {
       id: randomUUID(),
       event_type: eventType,

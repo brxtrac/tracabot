@@ -81,6 +81,13 @@ Events are shaped for downstream oracle consumption with structured predicates r
 
 An oracle can later reason over these fields to decide whether an actor, wallet, domain, or campaign has matured from shared evidence into verified fraud intelligence.
 
+## Scaling Plan
+
+- Multi-community support: configure `TRACABOT_COMMUNITY_ID`, optional `TRACABOT_COMMUNITY_NAME`, `TRACABOT_COMMUNITY_TYPE`, and `TRACABOT_POLICY_ID` per deployment. These fields are written to DKG events for provenance and policy-aware scoring.
+- OpenClaw workflows: use skill tools for scanning, unsafe event monitoring, report review, appeals, campaign summaries, and operator digests. Skills do not execute Telegram enforcement directly.
+- MCP integrations: coding and operations agents should query the `tracabot` Context Graph for campaign evidence, ontology fields, and review tasks before modifying policy or publishing durable decisions.
+- Verified Memory discipline: publish only admin-verified, very-high-confidence, upheld, or repeated-campaign evidence. Weak reports and plain watchlist state remain local or Shared Memory.
+
 ## Security Notes
 
 - Runtime egress: `api.telegram.org` and the configured DKG node, default `http://127.0.0.1:9200`.

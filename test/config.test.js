@@ -19,6 +19,19 @@ test('loadConfig parses on-chain publish context graph id', () => {
   assert.throws(() => loadConfig({ TRACABOT_PUBLISH_CONTEXT_GRAPH_ID: 'tracabot' }), /TRACABOT_PUBLISH_CONTEXT_GRAPH_ID/);
 });
 
+test('loadConfig parses community scope settings', () => {
+  const config = loadConfig({
+    TRACABOT_COMMUNITY_ID: '-100123',
+    TRACABOT_COMMUNITY_NAME: 'Example DAO',
+    TRACABOT_COMMUNITY_TYPE: 'telegram_group',
+    TRACABOT_POLICY_ID: 'strict-v1'
+  });
+  assert.equal(config.communityId, '-100123');
+  assert.equal(config.communityName, 'Example DAO');
+  assert.equal(config.communityType, 'telegram_group');
+  assert.equal(config.policyId, 'strict-v1');
+});
+
 test('loadConfig parses boolean environment values strictly', () => {
   assert.equal(loadConfig({ TRACABOT_AUTO_BAN: '0' }).autoBan, false);
   assert.equal(loadConfig({ TRACABOT_AUTO_BAN: 'yes' }).autoBan, true);

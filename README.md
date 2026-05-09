@@ -48,6 +48,8 @@ TRACaBot uses the official DKG/OpenClaw adapter setup as its DKG boundary. `DkgD
 
 This cross-community loop is the core product behavior: observe locally, write structured evidence to DKG Shared Memory, auto-publish high-confidence events, then let every other TRACaBot instance query the same graph before the fraudster can repeat the attack in a different channel.
 
+TRACaBot's event ontology and lifecycle are documented in `docs/TRACABOT_ONTOLOGY.md`. The lifecycle is `observed -> shared_memory -> admin_reviewed -> verified_memory -> campaign_summary`; runtime events include community scope (`communityId`, optional `communityName`, `communityType`) and `policyId` so multiple communities can share one Context Graph without losing policy provenance.
+
 TRACaBot also ships an OpenClaw skill interface in `skills/tracabot/skill.json` and a JSON CLI bridge, `tracabot-skill`, so OpenClaw agents can call the same fraud intelligence without going through Telegram. Skill tools include `scan_target`, `monitor_chat_event`, `explain_event`, `get_watchlist`, `get_digest`, `query_campaigns`, `submit_appeal`, and `review_event`.
 
 TRACaBot can also run in conversational safety mode. It keeps its own standalone Telegram bot token, but can read local OpenClaw OAuth/model/gateway configuration to draft scam-safety replies through the same OpenClaw LLM account already configured on the host. If OpenClaw chat access is unavailable, TRACaBot falls back to deterministic evidence-based safety templates. Conversation is limited to scam/fraud/wallet-safety questions and proactive scam warnings; LLM text never executes Telegram bans, deletes, restrictions, or DKG writes by itself.

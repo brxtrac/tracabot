@@ -35,6 +35,8 @@ node ./bin/tracabot-skill.js explain_event '{"eventId":"<event-id>"}'
 
 Evidence-backed unsafe chat observations, reports, findings, bans, restrictions, campaigns, appeals, and reviews can be written to DKG through the OpenClaw adapter. Plain watchlist state, digest generation, and watchlist reads remain local-only.
 
+Events follow the lifecycle in `docs/TRACABOT_ONTOLOGY.md`: `observed`, `shared_memory`, `admin_reviewed`, `verified_memory`, and `campaign_summary`. Skill callers should pass community scope fields when available: `communityId`, `communityName`, `communityType`, and `policyId`.
+
 ## Guardrails
 
 The skill tools do not ban Telegram users directly. Telegram enforcement remains inside the bot runtime where admin identity, bot permissions, and chat context can be verified.

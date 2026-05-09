@@ -105,6 +105,13 @@ function shouldAutoPublishEvent(event = {}) {
   return false;
 }
 
+function lifecycleStage(event = {}) {
+  if (event.payload?.lifecycle_stage) return String(event.payload.lifecycle_stage);
+  if (shouldAutoPublishEvent(event)) return 'verified_memory';
+  if (event.payload?.review_decision || event.payload?.report_decision) return 'admin_reviewed';
+  return 'shared_memory';
+}
+
 async function loadOpenClawAdapter(config = {}) {
   const candidates = [
     config.openClawDkgAdapterPath,
@@ -132,8 +139,13 @@ function eventTriples(event) {
     { subject, predicate: 'rdf:type', object: `${NS}${event.event_type}` },
     { subject, predicate: `${NS}eventId`, object: literal(event.id) },
     { subject, predicate: `${NS}eventType`, object: literal(event.event_type) },
+    { subject, predicate: `${NS}lifecycleStage`, object: literal(lifecycleStage(event)) },
     { subject, predicate: 'dcterms:created', object: literal(event.timestamp) },
     { subject, predicate: 'dcterms:creator', object: literal(event.agentDid) },
+    { subject, predicate: `${NS}communityId`, object: literal(event.payload?.community_id || event.chat?.id || '') },
+    { subject, predicate: `${NS}communityName`, object: literal(event.payload?.community_name || '') },
+    { subject, predicate: `${NS}communityType`, object: literal(event.payload?.community_type || 'telegram_group') },
+    { subject, predicate: `${NS}policyId`, object: literal(event.payload?.policy_id || 'default') },
     { subject, predicate: `${NS}telegramChatId`, object: literal(event.chat?.id || '') },
     { subject, predicate: `${NS}telegramUserId`, object: literal(event.user?.id || '') },
     { subject, predicate: `${NS}username`, object: literal(event.user?.username || '') },

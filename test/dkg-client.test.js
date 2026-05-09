@@ -292,6 +292,10 @@ test('writes unsafe chat event publication and review metadata', async () => {
       confidence: 96,
       local_confidence: 90,
       scam_type: 'phishing',
+      community_id: '-100123',
+      community_name: 'Example DAO',
+      community_type: 'telegram_group',
+      policy_id: 'strict-v1',
       message_text: 'official support says verify wallet now',
       admin_verified: true,
       publication_status: 'context_graph_auto_publish_eligible',
@@ -303,6 +307,10 @@ test('writes unsafe chat event publication and review metadata', async () => {
     }
   });
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#adminVerified') && triple.object === '"true"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#lifecycleStage') && triple.object === '"verified_memory"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#communityId') && triple.object === '"-100123"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#communityName') && triple.object === '"Example DAO"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#policyId') && triple.object === '"strict-v1"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#publicationStatus') && triple.object === '"context_graph_auto_publish_eligible"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#messageText') && /verify wallet/.test(triple.object)));
   assert.ok(result.triples.some((triple) => triple.predicate === 'rdf:type' && triple.object === 'http://dkg.io/ontology#KnowledgeAsset'));
