@@ -4,9 +4,11 @@ import { pathToFileURL } from 'node:url';
 const NS = 'https://tracabot.org/ontology#';
 const MAX_EVIDENCE_ITEMS = 12;
 const MAX_EVIDENCE_LENGTH = 500;
+const MAX_FACT_ID_LENGTH = 80;
 const MAX_INDICATORS = 20;
 const ADAPTER_PACKAGE = '@origintrail-official/dkg-adapter-openclaw';
 const ADAPTER_PATHS = [
+  '/root/.dkg/releases/current/node_modules/@origintrail-official/dkg-adapter-openclaw/dist/index.js',
   '/usr/lib/node_modules/@origintrail-official/dkg/node_modules/@origintrail-official/dkg-adapter-openclaw/dist/index.js',
   '/usr/lib/node_modules/@origintrail-official/dkg-adapter-openclaw/dist/index.js'
 ];
@@ -17,7 +19,8 @@ function literal(value) {
 }
 
 function cleanValue(value = '') {
-  return String(value).replace(/^"/, '').replace(/"$/, '');
+  if (value && typeof value === 'object' && 'value' in value) return cleanValue(value.value);
+  return String(value).replace(/^"/, '').replace(/"(?:\^\^<[^>]+>)?$/, '');
 }
 
 function numeric(value = '') {
@@ -75,7 +78,7 @@ function isCredibleRiskBinding(binding = {}) {
 function graphBelongsToContext(binding = {}, contextGraph = '') {
   const graph = cleanValue(binding.g || '');
   const expected = `did:dkg:context-graph:${contextGraph}`;
-  return graph === expected || graph === `${expected}/_shared_memory`;
+  return graph === expected || graph.startsWith(`${expected}/`);
 }
 
 function isTestStatsBinding(binding = {}) {
@@ -93,9 +96,12 @@ function isProductionBindingForContext(binding = {}, contextGraph = '') {
 function shouldAutoPublishEvent(event = {}) {
   const confidence = Number(event.payload?.confidence || 0);
   const localConfidence = Number(event.payload?.local_confidence || 0);
+  const verifiedByAdmin = Boolean(event.payload?.admin_verified || event.payload?.community_verified_flag || event.payload?.review_decision);
   if (event.event_type === 'ban_executed') return confidence >= 80;
+  if (['review_upheld', 'review_overturned'].includes(event.event_type)) return verifiedByAdmin;
   if (event.event_type === 'fraud_finding') return confidence >= 80 && localConfidence >= 60;
   if (event.event_type === 'report_submitted') return confidence >= 80 && localConfidence >= 60 && event.payload?.report_decision === 'accepted';
+  if (event.event_type === 'unsafe_chat_event') return verifiedByAdmin || (confidence >= 95 && localConfidence >= 80);
   return false;
 }
 
@@ -141,13 +147,22 @@ function eventTriples(event) {
     { subject, predicate: `${NS}moderatorTelegramUserId`, object: literal(event.payload?.moderator?.id || event.payload?.reviewer?.id || '') },
     { subject, predicate: `${NS}moderatorUsername`, object: literal(event.payload?.moderator?.username || event.payload?.reviewer?.username || '') },
     { subject, predicate: `${NS}reviewDecision`, object: literal(event.payload?.review_decision || '') },
+    { subject, predicate: `${NS}adminVerified`, object: literal(event.payload?.admin_verified ? 'true' : '') },
+    { subject, predicate: `${NS}publicationStatus`, object: literal(event.payload?.publication_status || status) },
     { subject, predicate: `${NS}targetEventId`, object: literal(event.payload?.target_event_id || '') },
     { subject, predicate: `${NS}restrictedUntil`, object: literal(event.payload?.restricted_until || '') },
     { subject, predicate: `${NS}actionDurationSeconds`, object: literal(event.payload?.action_duration_seconds || '') },
     { subject, predicate: `${NS}campaignKey`, object: literal(event.payload?.campaign_key || '') },
+    { subject, predicate: `${NS}reportedAlias`, object: literal(event.payload?.reported_alias || event.payload?.reportedAlias || '') },
+    { subject, predicate: `${NS}claimedRole`, object: literal(event.payload?.claimed_role || event.payload?.claimedRole || '') },
+    { subject, predicate: `${NS}claimedOrganization`, object: literal(event.payload?.claimed_organization || event.payload?.claimedOrganization || '') },
+    { subject, predicate: `${NS}dmPlatform`, object: literal(event.payload?.dm_platform || '') },
+    { subject, predicate: `${NS}scamRequest`, object: literal(event.payload?.scam_request || event.payload?.scamRequest || '') },
+    { subject, predicate: `${NS}screenshotCaption`, object: literal(event.payload?.screenshot_caption || '') },
     { subject, predicate: `${NS}sangmataOldName`, object: literal(event.payload?.target?.sangmata?.oldName || '') },
     { subject, predicate: `${NS}sangmataNewName`, object: literal(event.payload?.target?.sangmata?.newName || '') },
     { subject, predicate: `${NS}source`, object: literal(event.payload?.source || '') },
+    { subject, predicate: `${NS}messageText`, object: literal(String(event.payload?.message_text || '').slice(0, MAX_EVIDENCE_LENGTH)) },
     { subject, predicate: `${NS}testMode`, object: literal(event.payload?.test_mode ? 'true' : '') },
     { subject, predicate: `${NS}confidence`, object: literal(event.payload?.confidence ?? '') },
     { subject, predicate: `${NS}localConfidence`, object: literal(event.payload?.local_confidence ?? '') },
@@ -156,23 +171,48 @@ function eventTriples(event) {
     { subject, predicate: `${NS}evidence`, object: literal(JSON.stringify(evidence)) },
     { subject, predicate: `${NS}status`, object: literal(event.payload?.publication_status || status) }
   ];
-  if (['fraud_finding', 'ban_executed', 'report_submitted'].includes(event.event_type)) {
+  if (['fraud_finding', 'ban_executed', 'report_submitted', 'dm_scam_report', 'unsafe_chat_event'].includes(event.event_type)) {
     triples.push({ subject, predicate: 'rdf:type', object: 'http://dkg.io/ontology#KnowledgeAsset' });
   }
   for (const alias of boundedList(actorAliases(event.user))) {
     triples.push({ subject, predicate: `${NS}actorAlias`, object: literal(alias) });
   }
+  evidence.forEach((item, index) => {
+    const fact = `${subject}/evidence/${index + 1}`;
+    triples.push({ subject, predicate: `${NS}hasEvidence`, object: fact });
+    triples.push({ subject: fact, predicate: 'rdf:type', object: `${NS}EvidenceItem` });
+    triples.push({ subject: fact, predicate: `${NS}evidenceText`, object: literal(item) });
+    triples.push({ subject: fact, predicate: `${NS}evidenceIndex`, object: literal(index + 1) });
+  });
+  for (const signal of boundedList(event.payload?.signals || [], MAX_EVIDENCE_ITEMS, MAX_EVIDENCE_LENGTH)) {
+    triples.push({ subject, predicate: `${NS}detectionSignal`, object: literal(signal) });
+  }
+  for (const url of boundedList(event.payload?.urls || [], MAX_EVIDENCE_ITEMS, MAX_EVIDENCE_LENGTH)) {
+    triples.push({ subject, predicate: `${NS}suspiciousUrl`, object: literal(url) });
+  }
   for (const wallet of boundedList(event.payload?.wallets || [])) {
     triples.push({ subject, predicate: `${NS}wallet`, object: literal(wallet) });
   }
   for (const domain of boundedList(event.payload?.domains || [])) {
-    triples.push({ subject, predicate: `${NS}scamDomain`, object: literal(normalizeDomain(domain)) });
+    const normalized = normalizeDomain(domain);
+    const domainSubject = `${NS}domain/${encodeURIComponent(normalized).slice(0, MAX_FACT_ID_LENGTH)}`;
+    triples.push({ subject, predicate: `${NS}scamDomain`, object: literal(normalized) });
+    triples.push({ subject, predicate: `${NS}observedDomain`, object: domainSubject });
+    triples.push({ subject: domainSubject, predicate: 'rdf:type', object: `${NS}ScamDomain` });
+    triples.push({ subject: domainSubject, predicate: `${NS}domainName`, object: literal(normalized) });
   }
   for (const pattern of boundedList(event.payload?.patterns || [])) {
+    const patternSubject = `${NS}pattern/${encodeURIComponent(pattern).slice(0, MAX_FACT_ID_LENGTH)}`;
     triples.push({ subject, predicate: `${NS}scamPattern`, object: literal(pattern) });
+    triples.push({ subject, predicate: `${NS}observedPattern`, object: patternSubject });
+    triples.push({ subject: patternSubject, predicate: 'rdf:type', object: `${NS}ScamPattern` });
+    triples.push({ subject: patternSubject, predicate: `${NS}patternName`, object: literal(pattern) });
   }
   for (const relatedEventId of boundedList(event.payload?.related_event_ids || [])) {
     triples.push({ subject, predicate: `${NS}relatedEventId`, object: literal(relatedEventId) });
+  }
+  for (const fileId of boundedList(event.payload?.screenshot_file_ids || [])) {
+    triples.push({ subject, predicate: `${NS}screenshotFileId`, object: literal(fileId) });
   }
   if (event.payload?.community_verified_flag) {
     triples.push({ subject, predicate: `${NS}communityVerifiedFlag`, object: literal(event.payload.community_verified_flag) });
@@ -244,10 +284,21 @@ export class DkgClient {
 
   async publishEvent(subject) {
     const client = await this.client();
-    const publish = await client.publishSharedMemory(this.config.contextGraph, {
+    const opts = {
       rootEntities: [subject],
       clearAfter: false
-    });
+    };
+    if (this.config.publishContextGraphId) {
+      opts.publishContextGraphId = this.config.publishContextGraphId;
+    }
+    const publish = this.config.publishContextGraphId && typeof client.post === 'function' && typeof client.getAuthToken === 'function'
+      ? await client.post('/api/shared-memory/publish', {
+        contextGraphId: this.config.contextGraph,
+        selection: opts.rootEntities,
+        clearAfter: opts.clearAfter,
+        publishContextGraphId: opts.publishContextGraphId
+      })
+      : await client.publishSharedMemory(this.config.contextGraph, opts);
     return { mode: 'openclaw-dkg-adapter-context-graph', output: JSON.stringify(publish), subject, ...publish };
   }
 
@@ -362,9 +413,10 @@ export class DkgClient {
     const sparql = `SELECT ?g ?s ?eventType ?created ?confidence ?scamType ?chatId ?username ?eventSource ?testMode WHERE { GRAPH ?g { ?s <${NS}eventType> ?eventType . OPTIONAL { ?s <dcterms:created> ?created . } OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}scamType> ?scamType . } OPTIONAL { ?s <${NS}telegramChatId> ?chatId . } OPTIONAL { ?s <${NS}username> ?username . } OPTIONAL { ?s <${NS}source> ?eventSource . } OPTIONAL { ?s <${NS}testMode> ?testMode . } } } LIMIT 1000`;
     const bindings = await this.queryBindings(sparql);
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-    const production = bindings.filter((binding) => isProductionBindingForContext(binding, this.config.contextGraph));
+    const production = bindings.filter((binding) => isProductionBindingForContext(binding, this.config.contextGraph) && !isTestStatsBinding(binding));
     const recent = production.filter((binding) => {
       if (!binding.created) return true;
+      if (typeof binding.created === 'object') return true;
       const createdAt = Date.parse(cleanValue(binding.created));
       return Number.isNaN(createdAt) || createdAt >= cutoff;
     });

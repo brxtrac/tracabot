@@ -17,6 +17,22 @@ function publicEvidence(risk = {}) {
     .slice(0, 3);
 }
 
+function hasDkgEvidence(dkgIntel = {}) {
+  return Boolean(
+    Number(dkgIntel.riskScore || 0) > 0
+    || Number(dkgIntel.reportsAcrossCommunities || 0) > 0
+    || dkgIntel.evidence?.length
+  );
+}
+
+function hasStrongLocalPattern(analysis = {}) {
+  const evidence = (analysis.evidence || []).join('\n');
+  if (/changed identity after joining|resembles configured admin|Investment-profit testimonial lure/i.test(evidence)) return true;
+  if (/Active watchlist entry/i.test(evidence)) return true;
+  if (/Suspicious link or claim-link pattern/i.test(evidence) && /Crypto lure terms|Impersonation indicators|Suspicious request to move help\/support into DMs/i.test(evidence)) return true;
+  return false;
+}
+
 export function combineRisk({ analysis, dkgIntel, threshold = 85 }) {
   const evidence = [...(analysis.evidence || [])];
   const dkgEvidence = dkgIntel?.evidence || [];
@@ -39,12 +55,17 @@ export function combineRisk({ analysis, dkgIntel, threshold = 85 }) {
     evidence.push(`DKG evidence: ${ref}${event}`);
   }
 
-  const confidence = Math.max(analysis.confidence || 0, dkgScore);
+  const dkgBacked = hasDkgEvidence(dkgIntel) || Boolean(dkgIntel?.domains?.length || dkgIntel?.wallets?.length || dkgIntel?.patterns?.length);
+  const strongLocalPattern = hasStrongLocalPattern(analysis);
+  const localConfidence = analysis.confidence || 0;
+  const cappedLocalConfidence = !dkgBacked && !strongLocalPattern && localConfidence >= 60 ? Math.min(localConfidence, 59) : localConfidence;
+  const confidence = Math.max(cappedLocalConfidence, dkgScore);
   const highConfidence = confidence >= threshold;
   return {
-    is_scam: highConfidence || analysis.is_scam,
+    is_scam: highConfidence || Boolean((dkgBacked || strongLocalPattern) && analysis.is_scam),
     confidence,
-    local_confidence: analysis.confidence || 0,
+    local_confidence: cappedLocalConfidence,
+    raw_local_confidence: localConfidence,
     dkg_confidence: dkgScore,
     scam_type: analysis.scam_type || 'unknown',
     evidence,
@@ -53,8 +74,23 @@ export function combineRisk({ analysis, dkgIntel, threshold = 85 }) {
     wallets: dkgIntel?.wallets || [],
     domains: dkgIntel?.domains || [],
     patterns: dkgIntel?.patterns || [],
+    dkg_backed: dkgBacked,
+    strong_local_pattern: strongLocalPattern,
     community_verified_flag: highConfidence ? 'auto-publish-high-confidence' : ''
   };
+}
+
+export function canAutonomouslyEscalate(risk = {}) {
+  return Boolean(risk.dkg_backed || risk.dkg_evidence?.length);
+}
+
+export function isObviousLocalScam(risk = {}) {
+  return Boolean(
+    !canAutonomouslyEscalate(risk)
+    && risk.strong_local_pattern
+    && Number(risk.confidence || 0) >= 80
+    && (risk.evidence?.length || 0) > 0
+  );
 }
 
 export function formatRiskAssessment({ target, risk }) {

@@ -145,11 +145,46 @@ export class TracabotSkillService {
       agentDid: this.config.agentDid,
       chat: input.chat || { id: input.chatId || 'openclaw-skill' },
       user: input.actor || { id: input.actorId || 'openclaw-skill', username: input.actorUsername || 'openclaw' },
-      payload: { target_event_id: input.eventId || '', review_decision: decision, reason: input.reason || `review ${decision} via OpenClaw skill`, evidence: [`OpenClaw skill review ${decision}: ${input.reason || ''}`] }
+      payload: { target_event_id: input.eventId || '', review_decision: decision, admin_verified: true, reviewer: { id: input.actorId || '', username: input.actorUsername || 'openclaw' }, reason: input.reason || `review ${decision} via OpenClaw skill`, evidence: [`OpenClaw skill review ${decision}: ${input.reason || ''}`] }
     };
     event.dkg = await this.dkg.writeEvent(event);
     this.store.append(event);
     return { tool: 'review_event', eventId: event.id, decision, dkg: event.dkg };
+  }
+
+  async monitorChatEvent(input = {}) {
+    const target = targetFromInput(input);
+    const text = String(input.text || input.messageText || input.context || '').slice(0, 4096);
+    const dkgIntel = await this.dkg.queryRiskIndicators({ username: target.username, userId: target.id, aliases: actorAliases(target), text });
+    const local = this.analyzer({ text, user: { ...target, adminUsernames: [...this.config.adminIds].filter((id) => !/^\d+$/.test(id)) }, globalIntel: dkgIntel });
+    const risk = combineRisk({ analysis: local, dkgIntel, threshold: this.config.actionThreshold });
+    const unsafe = Boolean(risk.is_scam || risk.confidence >= 60 || ['phishing', 'impersonation', 'giveaway', 'investment_scam'].includes(risk.scam_type));
+    if (!unsafe) return { tool: 'monitor_chat_event', monitored: false, risk, writesDkg: false };
+    const adminVerified = Boolean(input.adminVerified || input.verifiedByAdmin);
+    const highConfidence = Number(risk.confidence || 0) >= 95 && Number(risk.local_confidence || 0) >= 80;
+    const event = {
+      id: randomUUID(),
+      event_type: 'unsafe_chat_event',
+      timestamp: new Date().toISOString(),
+      agentDid: this.config.agentDid,
+      chat: input.chat || { id: input.chatId || 'openclaw-skill' },
+      user: target,
+      payload: {
+        ...risk,
+        target,
+        target_key: target.kind === 'wallet' ? `wallet:${target.id}` : target.id ? `id:${target.id}` : target.username ? `username:${target.username.toLowerCase()}` : target.label || '',
+        message_text: text.slice(0, 1000),
+        source: 'openclaw_monitor_chat_event',
+        admin_verified: adminVerified,
+        reviewer: adminVerified ? { id: input.actorId || '', username: input.actorUsername || 'openclaw' } : undefined,
+        community_verified_flag: adminVerified ? 'group_admin_verified' : '',
+        publication_status: adminVerified || highConfidence ? 'context_graph_auto_publish_eligible' : 'shared_memory',
+        evidence: [...(risk.evidence || []), `OpenClaw monitor classified chat event as ${risk.scam_type || 'unsafe'} with ${risk.confidence || 0}% confidence`]
+      }
+    };
+    event.dkg = await this.dkg.writeEvent(event);
+    this.store.append(event);
+    return { tool: 'monitor_chat_event', monitored: true, eventId: event.id, risk, adminVerified, highConfidence, dkg: event.dkg, writesDkg: true };
   }
 }
 
@@ -160,6 +195,7 @@ export async function runSkillTool(tool, input = {}, env = process.env) {
   if (tool === 'get_digest') return service.getDigest(input);
   if (tool === 'get_watchlist') return service.getWatchlist(input);
   if (tool === 'query_campaigns') return service.queryCampaigns(input);
+  if (tool === 'monitor_chat_event') return service.monitorChatEvent(input);
   if (tool === 'submit_appeal') return service.submitAppeal(input);
   if (tool === 'review_event') return service.reviewEvent(input);
   throw new Error(`Unknown tracabot skill tool: ${tool}`);

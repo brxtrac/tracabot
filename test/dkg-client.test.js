@@ -23,9 +23,15 @@ function makeAdapterClient({ publishError = null } = {}) {
       if (publishError) throw publishError;
       return { status: 'published', rootEntities: opts.rootEntities };
     },
+    async post(path, body) {
+      calls.push(['post', path, body]);
+      if (publishError) throw publishError;
+      return { status: 'published', rootEntities: body.selection, publishContextGraphId: body.publishContextGraphId };
+    },
     async query() {
       return { result: { bindings: [] } };
-    }
+    },
+    getAuthToken: null
   };
 }
 
@@ -241,6 +247,73 @@ test('writes structured evidence fields for moderation knowledge', async () => {
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#sangmataOldName') && triple.object === '"QQQ"'));
 });
 
+test('writes structured DM impersonation report fields', async () => {
+  const adapterClient = makeAdapterClient();
+  const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient });
+  const result = await dkg.writeEvent({
+    id: 'evt-dm-report',
+    event_type: 'dm_scam_report',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    chat: { id: 'chat' },
+    user: { id: 'reporter', username: 'brx' },
+    payload: {
+      confidence: 90,
+      local_confidence: 90,
+      scam_type: 'dm_impersonation',
+      reported_alias: 'Branimir Rakic',
+      claimed_role: 'cto',
+      claimed_organization: 'OriginTrail',
+      dm_platform: 'telegram_dm',
+      scam_request: 'connect wallet',
+      screenshot_file_ids: ['tg-photo-id'],
+      screenshot_caption: 'fake CTO DM asks to connect wallet',
+      evidence: ['reported alias: Branimir Rakic']
+    }
+  });
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#reportedAlias') && triple.object === '"Branimir Rakic"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#claimedRole') && triple.object === '"cto"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#scamRequest') && triple.object === '"connect wallet"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#screenshotFileId') && triple.object === '"tg-photo-id"'));
+  assert.ok(result.triples.some((triple) => triple.predicate === 'rdf:type' && triple.object === 'http://dkg.io/ontology#KnowledgeAsset'));
+});
+
+test('writes unsafe chat event publication and review metadata', async () => {
+  const adapterClient = makeAdapterClient();
+  const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient });
+  const result = await dkg.writeEvent({
+    id: 'evt-unsafe-meta',
+    event_type: 'unsafe_chat_event',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    chat: { id: 'chat' },
+    user: { id: 'user', username: 'badactor' },
+    payload: {
+      confidence: 96,
+      local_confidence: 90,
+      scam_type: 'phishing',
+      message_text: 'official support says verify wallet now',
+      admin_verified: true,
+      publication_status: 'context_graph_auto_publish_eligible',
+      evidence: ['wallet verification lure'],
+      domains: ['fake-claim.example'],
+      patterns: ['wallet-drain'],
+      urls: ['https://fake-claim.example/claim'],
+      signals: ['admin verified screenshot']
+    }
+  });
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#adminVerified') && triple.object === '"true"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#publicationStatus') && triple.object === '"context_graph_auto_publish_eligible"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#messageText') && /verify wallet/.test(triple.object)));
+  assert.ok(result.triples.some((triple) => triple.predicate === 'rdf:type' && triple.object === 'http://dkg.io/ontology#KnowledgeAsset'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#hasEvidence')));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#evidenceText') && /wallet verification/.test(triple.object)));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#observedDomain')));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#observedPattern')));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#suspiciousUrl') && /fake-claim/.test(triple.object)));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#detectionSignal') && /screenshot/.test(triple.object)));
+});
+
 test('auto-publishes accepted high-confidence reports to the context graph', async () => {
   const adapterClient = makeAdapterClient();
   const dkg = new DkgClient({ contextGraph: 'tracabot' }, {
@@ -263,6 +336,55 @@ test('auto-publishes accepted high-confidence reports to the context graph', asy
   });
   assert.ok(result.publish);
   assert.ok(adapterClient.calls.some(([method, contextGraphId, opts]) => method === 'publishSharedMemory' && contextGraphId === 'tracabot' && opts.rootEntities.includes('https://tracabot.org/ontology#event/evt-report-auto')));
+});
+
+test('publishes unsafe chat events only when admin verified or very high confidence', async () => {
+  const sharedOnly = makeAdapterClient();
+  const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient: sharedOnly });
+  await dkg.writeEvent({
+    id: 'evt-unsafe-shared',
+    event_type: 'unsafe_chat_event',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    chat: { id: 'chat' },
+    user: { id: 'user' },
+    payload: { confidence: 75, local_confidence: 70, scam_type: 'phishing', evidence: ['phishing lure'] }
+  });
+  assert.equal(sharedOnly.calls.some(([method]) => method === 'publishSharedMemory'), false);
+
+  const verified = makeAdapterClient();
+  const verifiedDkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient: verified });
+  await verifiedDkg.writeEvent({
+    id: 'evt-unsafe-verified',
+    event_type: 'unsafe_chat_event',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    chat: { id: 'chat' },
+    user: { id: 'user' },
+    payload: { confidence: 75, local_confidence: 70, admin_verified: true, scam_type: 'phishing', evidence: ['admin verified phishing lure'] }
+  });
+  assert.equal(verified.calls.some(([method]) => method === 'publishSharedMemory'), true);
+});
+
+test('uses configured on-chain context graph id for verified publish', async () => {
+  const adapterClient = makeAdapterClient();
+  adapterClient.getAuthToken = () => 'test-token';
+  const dkg = new DkgClient({ contextGraph: 'tracabot', publishContextGraphId: '13' }, { adapterClient });
+  await dkg.writeEvent({
+    id: 'evt-on-chain-cg',
+    event_type: 'unsafe_chat_event',
+    targetUserId: '44',
+    text: 'urgent wallet verification airdrop https://fake.example',
+    confidence: 96,
+    adminVerified: true,
+    source: 'openclaw_monitor_chat_event',
+    payload: { confidence: 96, local_confidence: 96, admin_verified: true },
+    risk: { confidence: 96, local_confidence: 96, dkg_confidence: 0, scam_type: 'wallet-drain', evidence: [] }
+  });
+  const publishCall = adapterClient.calls.find(([method]) => method === 'post');
+  assert.equal(publishCall[1], '/api/shared-memory/publish');
+  assert.equal(publishCall[2].contextGraphId, 'tracabot');
+  assert.equal(publishCall[2].publishContextGraphId, '13');
 });
 
 test('keeps shared-memory write result when automatic context graph publish fails', async () => {
@@ -295,7 +417,7 @@ test('stats count only production events from the configured DKG graph', async (
       g: 'did:dkg:context-graph:tracabot/_shared_memory',
       s: 'https://tracabot.org/ontology#event/real-ban',
       eventType: '"ban_executed"',
-      created: '"2026-04-30T00:00:00.000Z"',
+      created: new Date().toISOString(),
       confidence: '"95"',
       scamType: '"impersonation"',
       chatId: '"-100123"',
@@ -305,7 +427,7 @@ test('stats count only production events from the configured DKG graph', async (
       g: 'did:dkg:context-graph:legacy-scam-intel/_shared_memory',
       s: 'https://tracabot.org/ontology#event/old-ban',
       eventType: '"ban_executed"',
-      created: '"2026-04-30T00:00:00.000Z"',
+      created: new Date().toISOString(),
       confidence: '"95"',
       scamType: '"impersonation"'
     },
@@ -313,7 +435,7 @@ test('stats count only production events from the configured DKG graph', async (
       g: 'did:dkg:context-graph:tracabot/_shared_memory',
       s: 'https://tracabot.org/ontology#event/demo-ban',
       eventType: '"ban_executed"',
-      created: '"2026-04-30T00:00:00.000Z"',
+      created: new Date().toISOString(),
       confidence: '"95"',
       scamType: '"impersonation"',
       chatId: '"-100777"',
@@ -323,7 +445,7 @@ test('stats count only production events from the configured DKG graph', async (
       g: 'did:dkg:context-graph:tracabot/_shared_memory',
       s: 'https://tracabot.org/ontology#event/test-report',
       eventType: '"report_submitted"',
-      created: '"2026-04-30T00:00:00.000Z"',
+      created: new Date().toISOString(),
       confidence: '"90"',
       scamType: '"impersonation"',
       eventSource: '"test-command-loop"',

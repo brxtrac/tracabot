@@ -5,6 +5,18 @@ import { loadConfig } from '../src/config.js';
 test('loadConfig rejects unsafe context graph names', () => {
   assert.throws(() => loadConfig({ TRACABOT_CONTEXT_GRAPH: 'bad graph' }), /TRACABOT_CONTEXT_GRAPH/);
   assert.throws(() => loadConfig({ TRACABOT_CONTEXT_GRAPH: '../bad' }), /TRACABOT_CONTEXT_GRAPH/);
+  assert.throws(() => loadConfig({ TRACABOT_CONTEXT_GRAPH: 'owner/project/extra' }), /TRACABOT_CONTEXT_GRAPH/);
+});
+
+test('loadConfig accepts wallet-scoped context graph names', () => {
+  const config = loadConfig({ TRACABOT_CONTEXT_GRAPH: '0x6c6ad1453153ea0dc5e0c86524e1756aa279C1Ad/tracabot' });
+  assert.equal(config.contextGraph, '0x6c6ad1453153ea0dc5e0c86524e1756aa279C1Ad/tracabot');
+});
+
+test('loadConfig parses on-chain publish context graph id', () => {
+  const config = loadConfig({ TRACABOT_PUBLISH_CONTEXT_GRAPH_ID: '13' });
+  assert.equal(config.publishContextGraphId, '13');
+  assert.throws(() => loadConfig({ TRACABOT_PUBLISH_CONTEXT_GRAPH_ID: 'tracabot' }), /TRACABOT_PUBLISH_CONTEXT_GRAPH_ID/);
 });
 
 test('loadConfig parses boolean environment values strictly', () => {
@@ -52,6 +64,9 @@ test('loadConfig parses DKG join challenge settings', () => {
     TRACABOT_JOIN_CHALLENGE: 'true',
     TRACABOT_JOIN_CHALLENGE_TTL_SECONDS: '90',
     TRACABOT_JOIN_CHALLENGE_ACTION: 'ban',
+    TRACABOT_JOIN_CHALLENGE_MODE: 'qa',
+    TRACABOT_JOIN_CHALLENGE_ASSET_URL: 'https://dkg.origintrail.io/explore?ual=did:dkg:test/1',
+    TRACABOT_JOIN_CHALLENGE_QA_BANK: '[{"id":"signal","question":"What is the signal color?","answers":["amber"]}]',
     TRACABOT_JOIN_CHALLENGE_DELETE_ON_PASS: 'false',
     TRACABOT_JOIN_CHALLENGE_DELETE_BAD_ATTEMPTS: 'true',
     TRACABOT_JOIN_CHALLENGE_DKG_VALIDATE: 'false',
@@ -61,6 +76,9 @@ test('loadConfig parses DKG join challenge settings', () => {
     TRACABOT_SUCCESS_MESSAGE_TTL_SECONDS: '20'
   });
   assert.equal(config.joinChallenge, true);
+  assert.equal(config.joinChallengeMode, 'qa');
+  assert.equal(config.joinChallengeAssetUrl, 'https://dkg.origintrail.io/explore?ual=did:dkg:test/1');
+  assert.deepEqual(config.joinChallengeQaBank, [{ id: 'signal', question: 'What is the signal color?', answers: ['amber'] }]);
   assert.equal(config.joinChallengeTtlSeconds, 90);
   assert.equal(config.joinChallengeAction, 'ban');
   assert.equal(config.joinChallengeDeleteOnPass, false);
@@ -71,5 +89,10 @@ test('loadConfig parses DKG join challenge settings', () => {
   assert.equal(config.challengeMessageTtlSeconds, 180);
   assert.equal(config.successMessageTtlSeconds, 20);
   assert.throws(() => loadConfig({ TRACABOT_JOIN_CHALLENGE_TTL_SECONDS: '5' }), /TRACABOT_JOIN_CHALLENGE_TTL_SECONDS/);
+  assert.throws(() => loadConfig({ TRACABOT_JOIN_CHALLENGE_QA_BANK: 'not json' }), /TRACABOT_JOIN_CHALLENGE_QA_BANK/);
   assert.throws(() => loadConfig({ TRACABOT_BOT_MESSAGE_TTL_SECONDS: '1' }), /TRACABOT_BOT_MESSAGE_TTL_SECONDS/);
+});
+
+test('loadConfig rejects unsupported DKG modes', () => {
+  assert.throws(() => loadConfig({ TRACABOT_DKG_MODE: 'shell' }), /openclaw-adapter/);
 });

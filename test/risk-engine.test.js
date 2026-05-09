@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { combineRisk, displayName, formatDkgReference, formatRiskAssessment, formatScanReply, formatStatsReply, formatStatsSourcesReply } from '../src/risk-engine.js';
+import { canAutonomouslyEscalate, combineRisk, displayName, formatDkgReference, formatRiskAssessment, formatScanReply, formatStatsReply, formatStatsSourcesReply, isObviousLocalScam } from '../src/risk-engine.js';
 
 test('combines DKG evidence with local analysis and triggers ban threshold', () => {
   const risk = combineRisk({
@@ -28,6 +28,26 @@ test('combines DKG evidence with local analysis and triggers ban threshold', () 
   assert.match(risk.evidence.join('\n'), /DKG evidence: UAL did:dkg:context-graph:tracabot\/_shared_memory event known-scam/);
   assert.match(risk.evidence.join('\n'), /Domains checked: fake-claim\.example/);
   assert.doesNotMatch(risk.evidence.join('\n'), /https:\/\/tracabot\.org\/ontology#event/);
+  assert.equal(canAutonomouslyEscalate(risk), true);
+});
+
+test('local-only strong patterns are delete-review only, not autonomous escalation', () => {
+  const risk = combineRisk({
+    threshold: 85,
+    analysis: {
+      is_scam: true,
+      confidence: 90,
+      scam_type: 'phishing',
+      evidence: ['Suspicious link or claim-link pattern', 'Crypto lure terms: wallet verification/claim phrase'],
+      recommended_action: 'ban'
+    },
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, evidence: [] }
+  });
+  assert.equal(risk.confidence, 90);
+  assert.equal(risk.strong_local_pattern, true);
+  assert.equal(risk.dkg_backed, false);
+  assert.equal(canAutonomouslyEscalate(risk), false);
+  assert.equal(isObviousLocalScam(risk), true);
 });
 
 test('formats Telegram users by friendly name before numeric ID', () => {

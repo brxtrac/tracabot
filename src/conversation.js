@@ -16,9 +16,13 @@ export function isSafetyQuestion(message = {}) {
 
 export function shouldConversationallyReply({ message = {}, risk = {}, explicit = false, config = {} }) {
   if (config.conversational === false) return false;
-  if (explicit) return true;
+  const confidence = Number(risk.confidence || 0);
+  const threshold = Number(config.proactiveReplyThreshold ?? 75);
+  if (explicit) return confidence >= threshold;
   if (!SAFETY_TERMS.test(message.text || '')) return false;
-  return Number(risk.confidence || 0) >= Number(config.proactiveReplyThreshold ?? 75);
+  const actionable = ['warn', 'restrict', 'ban'].includes(String(risk.recommended_action || '').toLowerCase());
+  const strongEvidence = (risk.evidence?.length || 0) > 0 || (risk.dkg_evidence?.length || 0) > 0;
+  return confidence >= threshold && actionable && strongEvidence;
 }
 
 export function buildSafetyPrompt({ message = {}, target = {}, risk = {}, event = {}, maxChars = 700 }) {

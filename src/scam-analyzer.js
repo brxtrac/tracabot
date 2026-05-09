@@ -1,5 +1,12 @@
 const URGENCY = ['urgent', 'hurry', 'fast', 'last chance', 'limited', 'now', 'expires'];
-const CRYPTO_LURES = ['airdrop', 'free usdt', 'giveaway', 'double your', 'claim', 'wallet', 'seed phrase', 'private key'];
+const CRYPTO_LURES = ['airdrop', 'free usdt', 'giveaway', 'double your', 'seed phrase', 'private key'];
+const WALLET_LURE_PATTERNS = [
+  /\b(?:verify|validate|sync|connect|link|unlock|restore)\s+(?:your\s+)?wallet\b/i,
+  /\bwallet\s+(?:verification|validation|sync|connect|drain(?:er)?)\b/i,
+  /\b(?:claim|airdrop|giveaway)\b.*\bwallet\b/i,
+  /\bwallet\b.*\b(?:claim|airdrop|giveaway)\b/i,
+  /\b(?:seed phrase|private key|recovery phrase)\b/i
+];
 const IMPERSONATION = ['admin', 'support', 'moderator', 'mod', 'official', 'verify me'];
 const LINK_PATTERNS = [/https?:\/\/\S+/i, /\bt\.me\/\S+/i, /\bbit\.ly\/\S+/i, /\bclaim\b.*\blink\b/i];
 const INVESTMENT_TESTIMONIAL_PATTERNS = [
@@ -47,7 +54,10 @@ export function analyzeMessage({ text = '', user = {}, globalIntel = null }) {
   const evidence = [];
   const urgency = matchesAny(text, URGENCY);
   const lures = matchesAny(text, CRYPTO_LURES);
-  const impersonation = matchesAny(`${text} ${user.username || ''} ${user.first_name || ''}`, IMPERSONATION);
+  const walletLures = WALLET_LURE_PATTERNS.filter((pattern) => pattern.test(text));
+  const userIdentityText = `${user.username || ''} ${user.first_name || ''}`;
+  const impersonation = matchesAny(text, IMPERSONATION);
+  const identityImpersonation = matchesAny(userIdentityText, IMPERSONATION);
   const links = LINK_PATTERNS.filter((pattern) => pattern.test(text));
   const investmentTestimonials = INVESTMENT_TESTIMONIAL_PATTERNS.filter((pattern) => pattern.test(text));
   const partnershipLures = PARTNERSHIP_LURE_PATTERNS.filter((pattern) => pattern.test(text));
@@ -60,13 +70,17 @@ export function analyzeMessage({ text = '', user = {}, globalIntel = null }) {
     score += 20;
     evidence.push(`Urgency language: ${urgency.slice(0, 3).join(', ')}`);
   }
-  if (lures.length) {
+  if (lures.length || walletLures.length) {
     score += 30;
-    evidence.push(`Crypto lure terms: ${lures.slice(0, 3).join(', ')}`);
+    evidence.push(`Crypto lure terms: ${[...lures, walletLures.length ? 'wallet verification/claim phrase' : ''].filter(Boolean).slice(0, 3).join(', ')}`);
   }
   if (impersonation.length) {
     score += 25;
     evidence.push(`Impersonation indicators: ${impersonation.slice(0, 3).join(', ')}`);
+  }
+  if (identityImpersonation.length && (links.length || walletLures.length || lures.length || dmHelp.length)) {
+    score += 25;
+    evidence.push(`Identity impersonation indicators: ${identityImpersonation.slice(0, 3).join(', ')}`);
   }
   if (links.length) {
     score += 15;
@@ -99,7 +113,7 @@ export function analyzeMessage({ text = '', user = {}, globalIntel = null }) {
   }
 
   const confidence = Math.max(0, Math.min(99, score));
-  const scamType = investmentTestimonials.length || partnershipLures.length ? 'investment_scam' : impersonation.length || adminCopycats.length || adminRenameCopycat || dmHelp.length ? 'impersonation' : lures.length ? 'giveaway' : links.length ? 'phishing' : 'other';
+  const scamType = investmentTestimonials.length || partnershipLures.length ? 'investment_scam' : impersonation.length || identityImpersonation.length || adminCopycats.length || adminRenameCopycat || dmHelp.length ? 'impersonation' : lures.length || walletLures.length ? 'giveaway' : links.length ? 'phishing' : 'other';
   const isScam = confidence >= 70;
   const recommendedAction = confidence >= 90 ? 'ban' : confidence >= 70 ? 'warn' : 'ignore';
 

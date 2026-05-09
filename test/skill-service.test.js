@@ -51,6 +51,17 @@ test('skill service appeal and review write DKG evidence', async () => {
   assert.equal(review.decision, 'overturned');
   assert.ok(dkgWrites.some((event) => event.event_type === 'appeal_submitted'));
   assert.ok(dkgWrites.some((event) => event.event_type === 'review_overturned'));
+  assert.equal(dkgWrites.find((event) => event.event_type === 'review_overturned').payload.admin_verified, true);
+});
+
+test('skill service monitors unsafe chat events through DKG working memory', async () => {
+  const { service, dkgWrites } = makeService();
+  const result = await service.monitorChatEvent({ telegramUserId: '8388593201', username: 'fake_support', text: 'official support says verify wallet now', adminVerified: false });
+  assert.equal(result.tool, 'monitor_chat_event');
+  assert.equal(result.monitored, true);
+  assert.equal(result.writesDkg, true);
+  assert.equal(dkgWrites[0].event_type, 'unsafe_chat_event');
+  assert.equal(dkgWrites[0].payload.publication_status, 'shared_memory');
 });
 
 test('tracabot-skill CLI returns JSON and rejects unknown tools', async () => {

@@ -1,0 +1,15 @@
+@prefix schema: <https://schema.org/> .
+@prefix dkg: <http://dkg.io/ontology#> .
+@prefix tracabot: <https://tracabot.org/ontology#> .
+
+<https://tracabot.org/knowledge/challenge/community-safety-v1>
+  a dkg:KnowledgeAsset, schema:CreativeWork ;
+  schema:name "TRACaBot: DKG-Powered Community Safety" ;
+  schema:description "TRACaBot helps Telegram communities reduce scams by combining local moderation signals with OriginTrail DKG v10 Shared Memory. It watches for impersonation, fake airdrops, wallet-drain lures, suspicious joins, scam domains, scam wallets, and repeated campaign patterns. Evidence-backed reports and moderation outcomes become reusable fraud intelligence for other communities and OpenClaw agents." ;
+  tracabot:signalColor "amber" ;
+  tracabot:memoryPhrase "shared trail" ;
+  tracabot:safetyAnimal "lobster" ;
+  tracabot:checkpointWord "atlas" ;
+  tracabot:guardPhrase "quiet graph" ;
+  tracabot:communityMarker "relay" ;
+  tracabot:friendlyMotto "stay on TRAC(k)" .

@@ -23,6 +23,16 @@ test('does not flag normal community messages', () => {
   assert.equal(result.recommended_action, 'ignore');
 });
 
+test('does not flag ordinary scam-prevention discussion', () => {
+  const result = analyzeMessage({
+    text: 'We should discuss scam prevention in the next community call.',
+    user: { username: 'supportive_member', first_name: 'Supportive' }
+  });
+  assert.equal(result.is_scam, false);
+  assert.equal(result.confidence, 0);
+  assert.deepEqual(result.evidence, []);
+});
+
 test('scores DM help requests as report-worthy impersonation evidence', () => {
   const result = analyzeMessage({
     text: 'DM me for help with your wallet issue',

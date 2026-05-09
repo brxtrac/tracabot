@@ -2,7 +2,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 
-const CONTEXT_GRAPH_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+const CONTEXT_GRAPH_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}(?:\/[a-zA-Z0-9][a-zA-Z0-9_-]{0,63})?$/;
+const ON_CHAIN_CONTEXT_GRAPH_ID_RE = /^\d+$/;
 
 function parseBoolean(value, fallback = false) {
   if (value === undefined || value === '') return fallback;
@@ -18,6 +19,25 @@ function readLocalDkgToken() {
     .split('\n')
     .map((line) => line.trim())
     .find((line) => line && !line.startsWith('#')) || '';
+}
+
+function parseChallengeBank(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error('challenge bank must be an array');
+    return parsed.map((entry, index) => {
+      const answers = Array.isArray(entry.answers) ? entry.answers : [entry.answer];
+      return {
+        id: String(entry.id || `challenge-${index + 1}`),
+        question: String(entry.question || '').trim(),
+        answers: answers.map((answer) => String(answer || '').trim()).filter(Boolean)
+      };
+    }).filter((entry) => entry.question && entry.answers.length);
+  } catch (error) {
+    throw new Error(`TRACABOT_JOIN_CHALLENGE_QA_BANK must be JSON array of {question, answers}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 export function loadConfig(env = process.env) {
@@ -45,7 +65,11 @@ export function loadConfig(env = process.env) {
     throw new Error('TRACABOT_BAN_THRESHOLD must be a number from restrict threshold to 100');
   }
   if (!CONTEXT_GRAPH_RE.test(contextGraph)) {
-    throw new Error('TRACABOT_CONTEXT_GRAPH must be 1-64 characters using letters, numbers, underscores, or hyphens');
+    throw new Error('TRACABOT_CONTEXT_GRAPH must be one or two slash-separated segments, each 1-64 characters using letters, numbers, underscores, or hyphens');
+  }
+  const publishContextGraphId = String(env.TRACABOT_PUBLISH_CONTEXT_GRAPH_ID || '').trim();
+  if (publishContextGraphId && !ON_CHAIN_CONTEXT_GRAPH_ID_RE.test(publishContextGraphId)) {
+    throw new Error('TRACABOT_PUBLISH_CONTEXT_GRAPH_ID must be a decimal on-chain context graph ID');
   }
   if (!Number.isFinite(proactiveScanMinutes) || proactiveScanMinutes < 5) {
     throw new Error('TRACABOT_PROACTIVE_SCAN_MINUTES must be at least 5');
@@ -61,6 +85,12 @@ export function loadConfig(env = process.env) {
   const botMessageTtlSeconds = Number(env.TRACABOT_BOT_MESSAGE_TTL_SECONDS || 60);
   const challengeMessageTtlSeconds = Number(env.TRACABOT_CHALLENGE_MESSAGE_TTL_SECONDS || 120);
   const successMessageTtlSeconds = Number(env.TRACABOT_SUCCESS_MESSAGE_TTL_SECONDS || 45);
+  const joinChallengeMode = /^(qa|ual)$/i.test(env.TRACABOT_JOIN_CHALLENGE_MODE || '') ? env.TRACABOT_JOIN_CHALLENGE_MODE.toLowerCase() : 'qa';
+  const joinChallengeQaBank = parseChallengeBank(env.TRACABOT_JOIN_CHALLENGE_QA_BANK || '');
+  const dkgMode = env.TRACABOT_DKG_MODE || 'openclaw-adapter';
+  if (dkgMode !== 'openclaw-adapter') {
+    throw new Error('TRACABOT_DKG_MODE currently supports only openclaw-adapter');
+  }
   if (!Number.isFinite(conversationMinConfidence) || conversationMinConfidence < 0 || conversationMinConfidence > 100) {
     throw new Error('TRACABOT_CONVERSATION_MIN_CONFIDENCE must be a number from 0 to 100');
   }
@@ -98,7 +128,8 @@ export function loadConfig(env = process.env) {
     proactiveScanMinutes,
     telegramTimeoutMs,
     contextGraph,
-    dkgMode: env.TRACABOT_DKG_MODE || 'openclaw-adapter',
+    publishContextGraphId,
+    dkgMode,
     dkgNodeUrl: env.DKG_NODE_URL || 'http://127.0.0.1:9200',
     dkgAuthToken: env.DKG_AUTH_TOKEN || readLocalDkgToken(),
     openClawDkgAdapterPath: env.OPENCLAW_DKG_ADAPTER_PATH || '',
@@ -117,6 +148,9 @@ export function loadConfig(env = process.env) {
     conversationRateLimitSeconds,
     conversationMaxChars,
     joinChallenge: parseBoolean(env.TRACABOT_JOIN_CHALLENGE, false),
+    joinChallengeMode,
+    joinChallengeAssetUrl: env.TRACABOT_JOIN_CHALLENGE_ASSET_URL || '',
+    joinChallengeQaBank,
     joinChallengeTtlSeconds,
     joinChallengeAction: /^(kick|ban|mute)$/i.test(env.TRACABOT_JOIN_CHALLENGE_ACTION || '') ? env.TRACABOT_JOIN_CHALLENGE_ACTION.toLowerCase() : 'kick',
     joinChallengeDeleteOnPass: parseBoolean(env.TRACABOT_JOIN_CHALLENGE_DELETE_ON_PASS, true),

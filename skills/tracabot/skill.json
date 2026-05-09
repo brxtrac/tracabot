@@ -31,6 +31,11 @@
       "inputSchema": { "type": "object", "properties": {} }
     },
     {
+      "name": "monitor_chat_event",
+      "description": "Classify an unsafe, scam, spam, phishing, or scam-advertisement chat event and write it to DKG v10 Shared Memory. It is only eligible for verified Context Graph publication when adminVerified is true or confidence is very high.",
+      "inputSchema": { "type": "object", "required": ["text"], "properties": { "telegramUserId": { "type": "string" }, "username": { "type": "string" }, "text": { "type": "string" }, "chatId": { "type": "string" }, "label": { "type": "string" }, "adminVerified": { "type": "boolean" } } }
+    },
+    {
       "name": "submit_appeal",
       "description": "Write an evidence-backed appeal/correction event to DKG Shared Memory.",
       "inputSchema": { "type": "object", "required": ["eventId", "reason"], "properties": { "eventId": { "type": "string" }, "reason": { "type": "string" }, "actorId": { "type": "string" }, "actorUsername": { "type": "string" } } }

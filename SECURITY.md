@@ -22,7 +22,7 @@ Local JSONL files are operational working memory for weak reports, watchlist sta
 
 - Manual `/ban` requires the sender to be listed in `TRACABOT_ADMINS` or to be a Telegram chat admin.
 - Non-admin `/report` calls can publish accepted evidence, but they cannot directly execute a Telegram ban.
-- Rejected and weak reports are stored locally only and are not written to DKG Shared Memory.
+- Rejected and weak reports are stored locally only and are not written to DKG Shared Memory. Unsafe monitoring events are written only when the analyzer finds concrete evidence; publication requires admin verification or very high confidence.
 - Duplicate reports and reporter bursts are rate-limited to reduce abuse.
 - Telegram message and evidence fields are bounded before analysis, local logging, and DKG writes.
 - Conversational LLM replies are bounded, topic-gated to scam/fraud/wallet safety, and cannot execute Telegram moderation actions or DKG writes.
