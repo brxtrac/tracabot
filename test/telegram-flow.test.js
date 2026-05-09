@@ -1049,6 +1049,19 @@ test('/stats campaigns and /digest summarize local memory', async () => {
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Recommended follow-up')));
 });
 
+test('campaign summaries include evidence roots and affected communities', async () => {
+  const { bot } = makeBot({ canBan: true, testMode: false });
+  const timestamp = new Date().toISOString();
+  bot.store.append({ id: 'evt-root-1', event_type: 'fraud_finding', timestamp, chat: { id: '-1001' }, payload: { domains: ['fake.example'], patterns: ['wallet-drain'], confidence: 95, local_confidence: 90, community_id: '-1001', evidence: ['fake.example'] } });
+  bot.store.append({ id: 'evt-root-2', event_type: 'report_submitted', timestamp, chat: { id: '-1002' }, payload: { domains: ['fake.example'], patterns: ['wallet-drain'], confidence: 90, local_confidence: 85, community_id: '-1002', evidence: ['fake.example'] } });
+  const campaign = await bot.maybeRecordCampaign({ chat: { id: -1003, title: 'demo' }, from: { id: 1, username: 'admin' } }, { scam_type: 'phishing', confidence: 91, local_confidence: 88 });
+  assert.equal(campaign.event_type, 'fraud_campaign');
+  assert.deepEqual(campaign.payload.evidence_root_ids, ['evt-root-1', 'evt-root-2']);
+  assert.deepEqual(campaign.payload.affected_community_ids, ['-1001', '-1002']);
+  assert.equal(campaign.payload.lifecycle_stage, 'campaign_summary');
+  assert.equal(campaign.payload.publication_status, 'context_graph_auto_publish_eligible');
+});
+
 test('medium-risk message is deleted and restricted instead of banned', async () => {
   const { bot, calls } = makeBot({
     canBan: true,

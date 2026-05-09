@@ -863,7 +863,14 @@ export class TelegramShieldBot {
       }
     }
     return [...buckets.entries()]
-      .map(([key, events]) => ({ key, events: [...new Map(events.map((event) => [event.id, event])).values()] }))
+      .map(([key, events]) => {
+        const uniqueEvents = [...new Map(events.map((event) => [event.id, event])).values()];
+        const affectedCommunities = [...new Set(uniqueEvents.map((event) => event.payload?.community_id || event.chat?.id || '').filter(Boolean))];
+        const domains = [...new Set(uniqueEvents.flatMap((event) => event.payload?.domains || []))];
+        const wallets = [...new Set(uniqueEvents.flatMap((event) => event.payload?.wallets || []))];
+        const patterns = [...new Set(uniqueEvents.flatMap((event) => event.payload?.patterns || []))];
+        return { key, events: uniqueEvents, affectedCommunities, domains, wallets, patterns };
+      })
       .filter((item) => item.events.length >= 2)
       .sort((a, b) => b.events.length - a.events.length || a.key.localeCompare(b.key));
   }
@@ -875,11 +882,25 @@ export class TelegramShieldBot {
     if (!campaign) return null;
     return this.record('fraud_campaign', message, {
       scam_type: risk.scam_type || 'campaign',
-      confidence: Math.max(80, risk.confidence || 0),
+      confidence: Math.max(85, risk.confidence || 0),
       local_confidence: risk.local_confidence || risk.confidence || 0,
       campaign_key: campaign.key,
       related_event_ids: campaign.events.slice(0, 10).map((event) => event.id),
-      evidence: [`Campaign signal ${campaign.key} repeated across ${campaign.events.length} recent events`]
+      evidence_root_ids: campaign.events.slice(0, 10).map((event) => event.id),
+      affected_community_ids: campaign.affectedCommunities,
+      campaign_event_count: campaign.events.length,
+      campaign_community_count: campaign.affectedCommunities.length,
+      domains: campaign.domains,
+      wallets: campaign.wallets,
+      patterns: campaign.patterns,
+      publication_status: 'context_graph_auto_publish_eligible',
+      lifecycle_stage: 'campaign_summary',
+      evidence: [
+        `Campaign signal ${campaign.key} repeated across ${campaign.events.length} recent events`,
+        campaign.affectedCommunities.length ? `Affected communities: ${campaign.affectedCommunities.join(', ')}` : 'Affected community not disclosed',
+        campaign.domains.length ? `Repeated domains: ${campaign.domains.join(', ')}` : '',
+        campaign.patterns.length ? `Repeated patterns: ${campaign.patterns.join(', ')}` : ''
+      ].filter(Boolean)
     }, { writeDkg: !this.config.testMode });
   }
 

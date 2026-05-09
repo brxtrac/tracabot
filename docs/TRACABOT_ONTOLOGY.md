@@ -72,3 +72,17 @@ Verified Memory should be reserved for events with one of these conditions:
 ## Scaling Guidance
 
 Each new community integration should produce the same event shape. Telegram-specific fields may be empty for non-Telegram sources, but lifecycle, evidence, confidence, community scope, and publication policy should remain consistent.
+
+## Campaign Summaries
+
+Repeated domains, wallets, scam patterns, and message fingerprints are clustered into `tracabot:FraudCampaign` events. A campaign summary should include:
+
+- `tracabot:campaignKey`
+- `tracabot:campaignEventCount`
+- `tracabot:campaignCommunityCount`
+- `tracabot:evidenceRootId`
+- `tracabot:evidenceRoot -> tracabot:event/<event-id>`
+- `tracabot:affectedCommunityId`
+- repeated `tracabot:observedDomain` / `tracabot:observedPattern`
+
+Campaign summaries are publish-eligible only when they point to at least two evidence-backed roots. This prevents a single weak report from becoming global intelligence while still letting repeated scam waves become reusable Verified Memory.

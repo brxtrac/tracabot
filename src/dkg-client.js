@@ -100,6 +100,7 @@ function shouldAutoPublishEvent(event = {}) {
   if (event.event_type === 'ban_executed') return confidence >= 80;
   if (['review_upheld', 'review_overturned'].includes(event.event_type)) return verifiedByAdmin;
   if (event.event_type === 'fraud_finding') return confidence >= 80 && localConfidence >= 60;
+  if (event.event_type === 'fraud_campaign') return confidence >= 85 && boundedList(event.payload?.evidence_root_ids || event.payload?.related_event_ids || []).length >= 2;
   if (event.event_type === 'report_submitted') return confidence >= 80 && localConfidence >= 60 && event.payload?.report_decision === 'accepted';
   if (event.event_type === 'unsafe_chat_event') return verifiedByAdmin || (confidence >= 95 && localConfidence >= 80);
   return false;
@@ -183,8 +184,13 @@ function eventTriples(event) {
     { subject, predicate: `${NS}evidence`, object: literal(JSON.stringify(evidence)) },
     { subject, predicate: `${NS}status`, object: literal(event.payload?.publication_status || status) }
   ];
-  if (['fraud_finding', 'ban_executed', 'report_submitted', 'dm_scam_report', 'unsafe_chat_event'].includes(event.event_type)) {
+  if (['fraud_finding', 'ban_executed', 'report_submitted', 'dm_scam_report', 'unsafe_chat_event', 'fraud_campaign'].includes(event.event_type)) {
     triples.push({ subject, predicate: 'rdf:type', object: 'http://dkg.io/ontology#KnowledgeAsset' });
+  }
+  if (event.event_type === 'fraud_campaign') {
+    triples.push({ subject, predicate: 'rdf:type', object: `${NS}FraudCampaign` });
+    triples.push({ subject, predicate: `${NS}campaignEventCount`, object: literal(event.payload?.campaign_event_count || boundedList(event.payload?.related_event_ids || []).length) });
+    triples.push({ subject, predicate: `${NS}campaignCommunityCount`, object: literal(event.payload?.campaign_community_count || boundedList(event.payload?.affected_community_ids || []).length) });
   }
   for (const alias of boundedList(actorAliases(event.user))) {
     triples.push({ subject, predicate: `${NS}actorAlias`, object: literal(alias) });
@@ -222,6 +228,13 @@ function eventTriples(event) {
   }
   for (const relatedEventId of boundedList(event.payload?.related_event_ids || [])) {
     triples.push({ subject, predicate: `${NS}relatedEventId`, object: literal(relatedEventId) });
+  }
+  for (const rootId of boundedList(event.payload?.evidence_root_ids || [])) {
+    triples.push({ subject, predicate: `${NS}evidenceRootId`, object: literal(rootId) });
+    triples.push({ subject, predicate: `${NS}evidenceRoot`, object: `${NS}event/${rootId}` });
+  }
+  for (const communityId of boundedList(event.payload?.affected_community_ids || [])) {
+    triples.push({ subject, predicate: `${NS}affectedCommunityId`, object: literal(communityId) });
   }
   for (const fileId of boundedList(event.payload?.screenshot_file_ids || [])) {
     triples.push({ subject, predicate: `${NS}screenshotFileId`, object: literal(fileId) });

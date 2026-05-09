@@ -395,6 +395,42 @@ test('uses configured on-chain context graph id for verified publish', async () 
   assert.equal(publishCall[2].publishContextGraphId, '13');
 });
 
+test('publishes campaign summaries with evidence roots', async () => {
+  const adapterClient = makeAdapterClient();
+  const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient });
+  const result = await dkg.writeEvent({
+    id: 'campaign-1',
+    event_type: 'fraud_campaign',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    chat: { id: '-100123' },
+    user: { id: 'system', username: 'tracabot' },
+    payload: {
+      confidence: 90,
+      local_confidence: 85,
+      scam_type: 'wallet-drain',
+      campaign_key: 'domain:fake-claim.example',
+      campaign_event_count: 2,
+      campaign_community_count: 2,
+      evidence_root_ids: ['evt-a', 'evt-b'],
+      related_event_ids: ['evt-a', 'evt-b'],
+      affected_community_ids: ['-1001', '-1002'],
+      domains: ['fake-claim.example'],
+      patterns: ['wallet-drain'],
+      lifecycle_stage: 'campaign_summary',
+      publication_status: 'context_graph_auto_publish_eligible',
+      evidence: ['Campaign repeated across two communities']
+    }
+  });
+  assert.ok(result.triples.some((triple) => triple.predicate === 'rdf:type' && triple.object.endsWith('#FraudCampaign')));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#lifecycleStage') && triple.object === '"campaign_summary"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#evidenceRootId') && triple.object === '"evt-a"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#evidenceRoot') && triple.object.endsWith('#event/evt-a')));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#affectedCommunityId') && triple.object === '"-1002"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#campaignEventCount') && triple.object === '"2"'));
+  assert.equal(adapterClient.calls.some(([method]) => method === 'publishSharedMemory'), true);
+});
+
 test('keeps shared-memory write result when automatic context graph publish fails', async () => {
   const adapterClient = makeAdapterClient({ publishError: new Error('publish command failed') });
   const dkg = new DkgClient({ contextGraph: 'tracabot' }, {
