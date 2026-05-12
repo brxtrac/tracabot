@@ -16,9 +16,10 @@ Telegram scam moderation usually stays trapped inside one chat. TRACaBot turns e
 - `/ban` is restricted to configured admins or Telegram chat admins; it bans replied users or users extracted from replied SangMata rename alerts only when the bot has Telegram ban rights and logs full evidence.
 - `/stats` returns readable DKG aggregate activity for recent fraud events, high-confidence findings, risk types, and action guidance.
 - `/stats campaigns` shows repeated domains, wallets, scam patterns, or text fingerprints from recent local memory.
-- `/why <event-id>` explains the local and DKG evidence behind a tracabot decision.
+- `/why <event-id>` explains the local and DKG evidence behind a tracabot decision, including Shared Memory write metadata and publish status when available.
 - `/watch` and `/unwatch` are admin-only scrutiny controls when replying to a user or SangMata rename alert; `/watch <telegram-id>`, `/watch @user`, `/unwatch <telegram-id>`, and `/unwatch @user` also work. ID/reply-based use creates a clickable Telegram mention and boosts future risk scoring without banning by itself.
 - `/watchlist` is admin-only and shows local active watches, temporary mutes, and pending review items for follow-up.
+- `/challenge on|off|status` is admin-only and toggles the new-user DKG join challenge per chat without restarting the bot.
 - `/appeal <event-id> reason` records a correction request to DKG Shared Memory.
 - `/review <event-id> uphold|overturn reason` is admin-only and writes a DKG review decision for future audits and false-positive correction.
 - `/digest` summarizes recent bans, restrictions, reports, watches, appeals, reviews, and campaign signals.
@@ -89,6 +90,8 @@ TRACaBot applies graduated autonomous enforcement by default: low-confidence eve
 
 TRACaBot treats DKG Shared Memory as collaborative evidence memory and Context Graph publication as verified/high-confidence memory. Once an event meets the publish policy through admin verification or very high confidence, the bot asks the OpenClaw DKG adapter to publish that event root. If the publish step fails, the Shared Memory write is kept and the error is recorded for audit.
 
+Transient DKG Shared Memory write failures such as temporary network errors, timeouts, 429s, and 5xx responses are retried before the bot gives up. If DKG remains unavailable, Telegram moderation continues and the local event is retained with `dkg_error` so admins can audit the downtime without losing the moderation trail.
+
 ## Security Model
 
 - Secrets stay in `.env` or service environment files and are ignored by Git.
@@ -138,6 +141,7 @@ why - Explain evidence behind a tracabot event
 watch - Locally watch a user, ID, username, or SangMata target
 unwatch - Remove a local watch target
 watchlist - Show active watches, mutes, and review items
+challenge - Turn new-user join challenge on or off
 appeal - Submit a correction request for an event
 review - Admin review decision for an event
 digest - Summarize recent actions and campaign signals
@@ -189,6 +193,7 @@ TRACABOT_JOIN_CHALLENGE_MODE=qa
 TRACABOT_JOIN_CHALLENGE_ASSET_URL=
 TRACABOT_JOIN_CHALLENGE_QA_BANK=[]
 TRACABOT_JOIN_CHALLENGE_TTL_SECONDS=120
+TRACABOT_JOIN_CHALLENGE_MAX_ATTEMPTS=3
 TRACABOT_JOIN_CHALLENGE_ACTION=kick
 TRACABOT_JOIN_CHALLENGE_DELETE_ON_PASS=true
 TRACABOT_JOIN_CHALLENGE_DELETE_BAD_ATTEMPTS=true
