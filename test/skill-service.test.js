@@ -100,8 +100,8 @@ test('tracabot-skill CLI returns JSON and rejects unknown tools', async () => {
     TRACABOT_DKG_MODE: 'openclaw-adapter',
     DKG_NODE_URL: 'http://127.0.0.1:9200'
   };
-  const ok = await execFileAsync('node', ['./bin/tracabot-skill.js', 'get_digest', '{}'], { cwd: '/root/tracabot', env });
+  const ok = await execFileAsync('node', ['./bin/tracabot-skill.js', 'get_digest', '{}'], { cwd: process.cwd(), env });
   const parsed = JSON.parse(ok.stdout);
   assert.equal(parsed.ok, true);
-  await assert.rejects(() => execFileAsync('node', ['./bin/tracabot-skill.js', 'missing_tool', '{}'], { cwd: '/root/tracabot', env }), /Command failed/);
+  await assert.rejects(() => execFileAsync('node', ['./bin/tracabot-skill.js', 'missing_tool', '{}'], { cwd: process.cwd(), env }), /Command failed/);
 });
