@@ -6,6 +6,7 @@ const MAX_EVIDENCE_ITEMS = 12;
 const MAX_EVIDENCE_LENGTH = 500;
 const MAX_FACT_ID_LENGTH = 80;
 const MAX_INDICATORS = 20;
+const SHARE_RETRY_DELAYS_MS = [250, 1000];
 const ADAPTER_PACKAGE = '@origintrail-official/dkg-adapter-openclaw';
 const ADAPTER_PATHS = [
   '/root/.dkg/releases/current/node_modules/@origintrail-official/dkg-adapter-openclaw/dist/index.js',
@@ -71,7 +72,7 @@ function isCredibleRiskBinding(binding = {}) {
   const confidence = numeric(binding.confidence || '0');
   const localConfidence = numeric(binding.localConfidence || '0');
   if (eventType === 'ban_executed') return confidence >= 80;
-  if (['fraud_finding', 'report_submitted'].includes(eventType)) return confidence >= 80 && localConfidence >= 60;
+  if (['fraud_finding', 'report_submitted', 'dm_scam_report'].includes(eventType)) return confidence >= 80 && localConfidence >= 60;
   return false;
 }
 
@@ -111,6 +112,15 @@ function lifecycleStage(event = {}) {
   if (shouldAutoPublishEvent(event)) return 'verified_memory';
   if (event.payload?.review_decision || event.payload?.report_decision) return 'admin_reviewed';
   return 'shared_memory';
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableDkgError(error) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return /timeout|timed?\s*out|econnreset|econnrefused|enetunreach|socket|fetch failed|temporar|503|502|504|429/i.test(message);
 }
 
 async function loadOpenClawAdapter(config = {}) {
@@ -194,6 +204,12 @@ function eventTriples(event) {
   }
   for (const alias of boundedList(actorAliases(event.user))) {
     triples.push({ subject, predicate: `${NS}actorAlias`, object: literal(alias) });
+  }
+  const reportedAlias = event.payload?.reported_alias || event.payload?.reportedAlias || '';
+  if (reportedAlias) {
+    for (const alias of boundedList(actorAliases({ username: reportedAlias, first_name: reportedAlias }))) {
+      triples.push({ subject, predicate: `${NS}actorAlias`, object: literal(alias) });
+    }
   }
   evidence.forEach((item, index) => {
     const fact = `${subject}/evidence/${index + 1}`;
@@ -284,7 +300,7 @@ export class DkgClient {
     await this.ensureContextGraph();
     const triples = eventTriples(event);
     const client = await this.client();
-    const write = await client.share(this.config.contextGraph, triples, { localOnly: false });
+    const write = await this.shareWithRetry(client, triples);
     const output = JSON.stringify(write);
     const subject = `${NS}event/${event.id}`;
     const result = {
@@ -305,6 +321,21 @@ export class DkgClient {
       result.publish_error = error instanceof Error ? error.message : String(error);
     }
     return result;
+  }
+
+  async shareWithRetry(client, triples) {
+    const attempts = [0, ...SHARE_RETRY_DELAYS_MS];
+    let lastError;
+    for (let index = 0; index < attempts.length; index += 1) {
+      if (attempts[index] > 0) await sleep(attempts[index]);
+      try {
+        return await client.share(this.config.contextGraph, triples, { localOnly: false });
+      } catch (error) {
+        lastError = error;
+        if (!isRetryableDkgError(error) || index === attempts.length - 1) throw error;
+      }
+    }
+    throw lastError;
   }
 
   async publishEvent(subject) {

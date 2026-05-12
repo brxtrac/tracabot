@@ -35,6 +35,36 @@ function makeAdapterClient({ publishError = null } = {}) {
   };
 }
 
+function makeFlakyShareAdapterClient({ failures = [], success = {} } = {}) {
+  const calls = [];
+  return {
+    calls,
+    async createContextGraph(id, name, description) {
+      calls.push(['createContextGraph', id, name, description]);
+      return { created: id, uri: `did:dkg:context-graph:${id}` };
+    },
+    async share(contextGraphId, quads, opts) {
+      calls.push(['share', contextGraphId, quads, opts]);
+      const failure = failures.shift();
+      if (failure) throw failure;
+      return {
+        shareOperationId: 'swm-retry-test',
+        graph: `did:dkg:context-graph:${contextGraphId}/_shared_memory`,
+        triplesWritten: quads.length,
+        ...success
+      };
+    },
+    async publishSharedMemory(contextGraphId, opts) {
+      calls.push(['publishSharedMemory', contextGraphId, opts]);
+      return { status: 'published', rootEntities: opts.rootEntities };
+    },
+    async query() {
+      return { result: { bindings: [] } };
+    },
+    getAuthToken: null
+  };
+}
+
 test('validates DKG UALs through adapter resolve or query', async () => {
   const resolving = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient: { async resolve(ual) { return ual.includes('valid') ? { id: ual } : null; } } });
   assert.equal((await resolving.validateUal('did:dkg:valid-knowledge-asset')).ok, true);
@@ -461,6 +491,47 @@ test('does not publish campaign summaries without two evidence roots', async () 
   assert.equal(adapterClient.calls.some(([method]) => method === 'publishSharedMemory'), false);
 });
 
+test('retries transient DKG shared-memory write failures', async () => {
+  const adapterClient = makeFlakyShareAdapterClient({ failures: [new Error('fetch failed')] });
+  const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient });
+  const result = await dkg.writeEvent({
+    id: 'evt-retry',
+    event_type: 'fraud_finding',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    chat: { id: '-100123' },
+    user: { id: 'user', username: 'badactor' },
+    payload: {
+      confidence: 70,
+      local_confidence: 65,
+      scam_type: 'phishing',
+      evidence: ['transient DKG failure should be retried']
+    }
+  });
+  assert.equal(result.shareOperation, 'swm-retry-test');
+  assert.equal(adapterClient.calls.filter(([method]) => method === 'share').length, 2);
+});
+
+test('does not retry non-transient DKG shared-memory write failures', async () => {
+  const adapterClient = makeFlakyShareAdapterClient({ failures: [new Error('invalid RDF payload')] });
+  const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient });
+  await assert.rejects(() => dkg.writeEvent({
+    id: 'evt-no-retry',
+    event_type: 'fraud_finding',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    chat: { id: '-100123' },
+    user: { id: 'user', username: 'badactor' },
+    payload: {
+      confidence: 70,
+      local_confidence: 65,
+      scam_type: 'phishing',
+      evidence: ['non-transient error should not retry']
+    }
+  }), /invalid RDF payload/);
+  assert.equal(adapterClient.calls.filter(([method]) => method === 'share').length, 1);
+});
+
 test('keeps shared-memory write result when automatic context graph publish fails', async () => {
   const adapterClient = makeAdapterClient({ publishError: new Error('publish command failed') });
   const dkg = new DkgClient({ contextGraph: 'tracabot' }, {
@@ -482,6 +553,56 @@ test('keeps shared-memory write result when automatic context graph publish fail
   });
   assert.equal(result.ual, 'did:dkg:context-graph:tracabot/_shared_memory');
   assert.match(result.publish_error, /publish command failed/);
+});
+
+test('DM scam reports publish reported aliases as reusable DKG actor aliases', async () => {
+  const adapterClient = makeAdapterClient();
+  const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient });
+  const result = await dkg.writeEvent({
+    id: 'evt-dm-alias',
+    event_type: 'dm_scam_report',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    chat: { id: 'chat' },
+    user: { id: 'reporter', username: 'reporter' },
+    payload: {
+      confidence: 86,
+      local_confidence: 82,
+      reported_alias: 'fake_helper',
+      scam_type: 'dm_impersonation',
+      report_decision: 'accepted',
+      evidence: ['fake_helper asked for wallet validation in DM']
+    }
+  });
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#actorAlias') && triple.object === '"fake_helper"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#reportedAlias') && triple.object === '"fake_helper"'));
+});
+
+test('risk lookups reuse credible DM scam reports by reported alias', async () => {
+  const dkg = new DkgClient({ contextGraph: 'tracabot' });
+  dkg.queryBindings = async () => [
+    {
+      g: 'did:dkg:context-graph:tracabot/_shared_memory',
+      s: 'https://tracabot.org/ontology#event/dm-credible',
+      eventType: '"dm_scam_report"',
+      confidence: '"88"',
+      localConfidence: '"82"',
+      evidence: '"accepted DM impersonation report"'
+    },
+    {
+      g: 'did:dkg:context-graph:tracabot/_shared_memory',
+      s: 'https://tracabot.org/ontology#event/dm-weak',
+      eventType: '"dm_scam_report"',
+      confidence: '"70"',
+      localConfidence: '"65"',
+      evidence: '"weak DM report"'
+    }
+  ];
+  const intel = await dkg.queryRiskIndicators({ aliases: ['fake_helper'] });
+  assert.equal(intel.reportsAcrossCommunities, 1);
+  assert.equal(intel.riskScore, 25);
+  assert.equal(intel.evidence[0].eventId, 'dm-credible');
+  assert.equal(intel.evidence[0].eventType, 'dm_scam_report');
 });
 
 test('stats count only production events from the configured DKG graph', async () => {
