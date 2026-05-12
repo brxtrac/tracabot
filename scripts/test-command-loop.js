@@ -18,7 +18,28 @@ const config = {
   proactiveScanMinutes: 30,
   storePath: join(mkdtempSync(join(tmpdir(), 'tracabot-live-loop-')), 'events.jsonl')
 };
-const dkg = new DkgClient(config);
+const sharedTriples = [];
+const adapterClient = {
+  async createContextGraph(id) {
+    return { created: id };
+  },
+  async share(contextGraphId, triples) {
+    sharedTriples.push(...triples);
+    return {
+      shareOperationId: `test-loop-${sharedTriples.length}`,
+      graph: `did:dkg:context-graph:${contextGraphId}/_shared_memory`,
+      triplesWritten: triples.length
+    };
+  },
+  async publishSharedMemory(contextGraphId, opts) {
+    return { status: 'published', contextGraphId, rootEntities: opts.rootEntities };
+  },
+  async query() {
+    return { result: { bindings: [] } };
+  },
+  getAuthToken: null
+};
+const dkg = new DkgClient(config, { adapterClient });
 const store = new EventStore(config.storePath);
 const bot = new TelegramShieldBot({ config, analyzer: analyzeMessage, dkg, store });
 const calls = [];
