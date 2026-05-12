@@ -14,6 +14,7 @@ export const TELEGRAM_COMMANDS = [
   { command: 'watch', description: 'Admin: watch a suspicious actor' },
   { command: 'unwatch', description: 'Admin: remove a watched actor' },
   { command: 'watchlist', description: 'Admin: show watches, mutes, and review items' },
+  { command: 'challenge', description: 'Admin: turn new-user join challenge on or off' },
   { command: 'appeal', description: 'Submit an appeal or correction for an event' },
   { command: 'review', description: 'Admin: uphold or overturn an event' },
   { command: 'digest', description: 'Show recent moderation digest' },
@@ -594,6 +595,13 @@ export class TelegramShieldBot {
     return this.config.adminIds.has(String(user.id).toLowerCase()) || this.config.adminIds.has(String(user.username || '').replace(/^@/, '').toLowerCase());
   }
 
+  chatJoinChallengeEnabled(chatId) {
+    const key = String(chatId || '');
+    const latest = [...this.store.all()].reverse().find((event) => event.event_type === 'join_challenge_setting_changed' && String(event.chat?.id || '') === key);
+    if (latest) return latest.payload?.enabled === true;
+    return Boolean(this.config.joinChallenge);
+  }
+
   async isTrustedModerator(message) {
     const user = actorFromMessage(message);
     return this.isConfiguredAdmin(user) || await this.isTelegramChatAdmin(message.chat.id, user.id);
@@ -674,6 +682,7 @@ export class TelegramShieldBot {
       '/watch - admin-only; reply to a user or SangMata alert. Also works as /watch <telegram-id> or /watch @user.',
       '/unwatch - admin-only; reply to a user or SangMata alert. Also works as /unwatch <telegram-id> or /unwatch @user.',
       '/watchlist - admin-only; show active watches, temp mutes, and review items. Use /watchlist muted or /watchlist review.',
+      '/challenge on|off|status - admin-only; turn the new-user join challenge on or off for this chat.',
       '/appeal <event-id> reason - submit a correction or appeal to DKG. Use /why <event-id> first if unsure.',
       '/review <event-id> uphold reason - admin-only; keep the decision. Use overturn to reverse it.',
       '/stats campaigns - show repeated domains, wallets, patterns, or text fingerprints.',
@@ -683,7 +692,7 @@ export class TelegramShieldBot {
       '',
       `Autonomous policy: warn/log at ${warn}%, delete/restrict at ${restrict}%, delete/ban at ${ban}%.`,
       'DKG memory: reads and writes shared fraud evidence for cross-community protection.',
-      `Join challenge: ${this.config.joinChallenge ? `new users verify with a Knowledge Asset address within ${this.config.joinChallengeTtlSeconds || 60}s` : 'off'}.`,
+      `Join challenge default: ${this.config.joinChallenge ? `new users verify with a Knowledge Asset address within ${this.config.joinChallengeTtlSeconds || 60}s` : 'off'}.`,
       'Conversational mode: answers scam/safety questions only and falls back to evidence-based templates if OpenClaw LLM is unavailable.',
       'Safeguards: no auto-action against Telegram admins or bot accounts; weak reports stay local.'
     ].join('\n');
@@ -702,7 +711,7 @@ export class TelegramShieldBot {
       `DKG: ${dkgOk ? 'reachable' : 'unreachable'}`,
       `Telegram rights: delete=${canDelete ? 'yes' : 'no'}, restrict/ban=${canBan ? 'yes' : 'no'}`,
       `Autonomous thresholds: warn ${this.config.warnThreshold}%, restrict ${this.config.restrictThreshold}%, ban ${this.config.banThreshold}%`,
-      `Join challenge: ${this.config.joinChallenge ? `on; Knowledge Asset address; ttl ${this.config.joinChallengeTtlSeconds || 60}s; timeout ${this.config.joinChallengeAction || 'kick'}` : 'off'}`,
+      `Join challenge: ${this.chatJoinChallengeEnabled(chatId) ? `on; Knowledge Asset address; ttl ${this.config.joinChallengeTtlSeconds || 60}s; max attempts ${this.config.joinChallengeMaxAttempts || 3}; timeout ${this.config.joinChallengeAction || 'kick'}` : 'off'}`,
       `Conversation: ${this.config.conversational === false ? 'off' : 'on'}; provider=${this.config.llmProvider || 'auto'}; proactive >= ${this.config.proactiveReplyThreshold}%`,
       `OpenClaw LLM: ${openclaw.available ? 'configured' : 'not discovered'}`,
       'Secrets and internal endpoints are not displayed in group chat.'
@@ -830,6 +839,22 @@ export class TelegramShieldBot {
     const dkgRefs = risk.dkg_evidence?.length ? risk.dkg_evidence.slice(0, 4).map((item) => `- ${item.ual || 'DKG'}${item.eventId ? ` event ${item.eventId}` : ''}`).join('\n') : '- No DKG source refs on this event.';
     const action = event.event_type;
     const ref = formatDkgReference(event) || event.id;
+    const dkg = event.dkg || {};
+    const dkgLines = [
+      event.local_only ? '- Stored locally only.' : '',
+      event.dkg_error ? `- DKG write error: ${event.dkg_error}` : '',
+      dkg.ual ? `- Shared Memory graph: ${dkg.ual}` : '',
+      dkg.shareOperation ? `- Share operation: ${dkg.shareOperation}` : '',
+      dkg.subject ? `- Subject: ${dkg.subject}` : '',
+      dkg.publish ? `- Context Graph publish: ${dkg.publish.status || 'requested'}` : '',
+      dkg.publish_error ? `- Context Graph publish error: ${dkg.publish_error}` : '',
+      risk.publication_status ? `- Publication status: ${risk.publication_status}` : '',
+      risk.lifecycle_stage ? `- Lifecycle stage: ${risk.lifecycle_stage}` : '',
+      risk.review_decision ? `- Review decision: ${risk.review_decision}` : '',
+      risk.report_decision ? `- Report decision: ${risk.report_decision}` : '',
+      risk.campaign_key ? `- Campaign key: ${risk.campaign_key}` : '',
+      risk.evidence_root_ids?.length ? `- Evidence roots: ${risk.evidence_root_ids.slice(0, 6).join(', ')}` : ''
+    ].filter(Boolean);
     return [
       `Why ${event.id}: ${action}`,
       `Confidence: ${risk.confidence ?? 0}% (local ${risk.local_confidence ?? 0}%, DKG ${risk.dkg_confidence ?? 0}%). Type: ${risk.scam_type || 'unknown'}.`,
@@ -837,7 +862,9 @@ export class TelegramShieldBot {
       'Evidence:',
       evidence,
       'DKG sources:',
-      dkgRefs
+      dkgRefs,
+      'DKG write/publish:',
+      dkgLines.length ? dkgLines.join('\n') : '- No local DKG write metadata recorded.'
     ].join('\n');
   }
 
@@ -1292,6 +1319,29 @@ export class TelegramShieldBot {
       await this.send(chatId, this.formatWatchlist(filter), { reply_to_message_id: message.message_id, parse_mode: 'HTML', disable_web_page_preview: true });
       return;
     }
+    if (text.startsWith('/challenge')) {
+      if (!await this.isTrustedModerator(message)) {
+        await this.sendEphemeral(chatId, '⚠️ /challenge is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
+        return;
+      }
+      const arg = this.commandText(message, 'challenge').split(/\s+/)[0]?.toLowerCase() || 'status';
+      if (!['on', 'off', 'status'].includes(arg)) {
+        await this.sendEphemeral(chatId, 'Usage: /challenge on, /challenge off, or /challenge status', { reply_to_message_id: message.message_id });
+        return;
+      }
+      if (arg === 'status') {
+        await this.send(chatId, `Join challenge is ${this.chatJoinChallengeEnabled(chatId) ? 'on' : 'off'} for this chat. Use /challenge on or /challenge off to change it.`, { reply_to_message_id: message.message_id });
+        return;
+      }
+      const enabled = arg === 'on';
+      await this.record('join_challenge_setting_changed', message, {
+        enabled,
+        moderator: actorFromMessage(message),
+        evidence: [`admin turned new-user join challenge ${enabled ? 'on' : 'off'} for this chat`]
+      }, { writeDkg: false });
+      await this.send(chatId, `Join challenge is now ${enabled ? 'on' : 'off'} for this chat.`, { reply_to_message_id: message.message_id });
+      return;
+    }
     if (text.startsWith('/watch')) {
       if (!await this.isTrustedModerator(message)) {
         await this.sendEphemeral(chatId, '⚠️ /watch is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
@@ -1632,6 +1682,49 @@ export class TelegramShieldBot {
     return true;
   }
 
+  async applyJoinChallengeFailureAction(challenge, reason = 'max_attempts') {
+    const action = this.config.joinChallengeAction || 'kick';
+    if (!await this.hasRestrictRights(challenge.chat.id)) return false;
+    if (action === 'ban') {
+      await this.ban(challenge.chat.id, challenge.user.id).catch(() => null);
+      return true;
+    }
+    if (action === 'kick') {
+      await this.ban(challenge.chat.id, challenge.user.id)
+        .then(() => this.call('unbanChatMember', { chat_id: challenge.chat.id, user_id: challenge.user.id, only_if_banned: true }))
+        .catch(() => null);
+      return true;
+    }
+    if (action === 'mute') {
+      const restrictedUntil = Math.floor(Date.now() / 1000) + 24 * 60 * 60;
+      await this.allowTextOnly(challenge.chat.id, challenge.user.id, restrictedUntil).catch(() => null);
+      return true;
+    }
+    return Boolean(reason);
+  }
+
+  async maybeFailJoinChallenge(message, challenge, options = {}) {
+    const maxAttempts = this.config.joinChallengeMaxAttempts || 3;
+    if (challenge.attempts < maxAttempts) return false;
+    const chatId = challenge.chat.id;
+    this.joinChallenges.delete(this.challengeKey(chatId, challenge.user.id));
+    const actionApplied = await this.applyJoinChallengeFailureAction(challenge, 'max_attempts');
+    await this.record('join_challenge_failed_max_attempts', { ...message, chat: challenge.chat, from: challenge.user }, {
+      target: challenge.user,
+      target_key: targetKey(challenge.user),
+      action: this.config.joinChallengeAction || 'kick',
+      action_applied: actionApplied,
+      attempts: challenge.attempts,
+      max_attempts: maxAttempts,
+      verification_channel: options.dm ? 'dm' : 'group',
+      evidence: [`new user failed DKG join challenge after ${challenge.attempts} attempts`]
+    }, { writeDkg: false });
+    if (challenge.messageId && await this.hasDeleteRights(chatId)) await this.deleteMessage(chatId, challenge.messageId).catch(() => null);
+    await this.sendEphemeral(chatId, `${userMention(challenge.user)} did not complete DKG verification after ${challenge.attempts} attempts.`, { parse_mode: 'HTML' }, this.config.successMessageTtlSeconds || 45).catch(() => null);
+    if (options.dm && options.sourceChatId) await this.send(options.sourceChatId, 'Verification failed too many times. Ask a group admin to reset your access.', { private: true }).catch(() => null);
+    return true;
+  }
+
   async handleJoinChallengeMessage(message, challenge, options = {}) {
     const text = String(message.text || '').trim();
     const chatId = message.chat.id;
@@ -1655,6 +1748,7 @@ export class TelegramShieldBot {
           verification_channel: options.dm ? 'dm' : 'group',
           evidence: ['pending join challenge user sent an incorrect DKG asset answer']
         }, { writeDkg: false });
+        if (await this.maybeFailJoinChallenge(message, challenge, options)) return true;
         const invalidText = `${options.dm ? '' : `${userMention(message.from)}, `}that answer did not match this DKG challenge. Open the Knowledge Asset again and answer: ${escapeHtml(challenge.qa?.question || 'the posted question')}`;
         if (options.dm) await this.send(replyChatId, invalidText, { disable_web_page_preview: true, private: true, parse_mode: 'HTML' });
         else if (shouldRemindInGroup) {
@@ -1675,8 +1769,9 @@ export class TelegramShieldBot {
         target_key: targetKey(message.from),
         attempts: challenge.attempts,
         verification_channel: options.dm ? 'dm' : 'group',
-          evidence: ['pending join challenge user sent an invalid Knowledge Asset address first message']
+        evidence: ['pending join challenge user sent an invalid Knowledge Asset address first message']
       }, { writeDkg: false });
+      if (await this.maybeFailJoinChallenge(message, challenge, options)) return true;
       const reminderText = `${options.dm ? '' : `${userMention(message.from)}, `}paste a Knowledge Asset address that starts with did:dkg: to complete verification.`;
       if (options.dm) await this.send(replyChatId, reminderText, { private: true });
       else if (shouldRemindInGroup) {
@@ -1700,6 +1795,7 @@ export class TelegramShieldBot {
         verification_channel: options.dm ? 'dm' : 'group',
         evidence: ['pending join challenge user sent a Knowledge Asset address that did not validate on DKG']
       }, { writeDkg: false });
+      if (await this.maybeFailJoinChallenge(message, challenge, options)) return true;
       const invalidText = `${options.dm ? '' : `${userMention(message.from)}, `}I could not validate that Knowledge Asset address. Try another one from https://dkg.origintrail.io/.`;
       if (options.dm) await this.send(replyChatId, invalidText, { disable_web_page_preview: true, private: true });
       else if (shouldRemindInGroup) {
@@ -1809,7 +1905,7 @@ export class TelegramShieldBot {
       const risk = await this.assess(joinMessage, member, joinMessage.text);
       if (risk.confidence >= (this.config.restrictThreshold ?? this.config.actionThreshold)) {
         await this.applyRiskAction(joinMessage, risk);
-      } else if (this.config.joinChallenge) {
+      } else if (this.chatJoinChallengeEnabled(message.chat.id)) {
         await this.startJoinChallenge(message, member);
       } else {
         await this.applyRiskAction(joinMessage, risk);

@@ -81,6 +81,7 @@ function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = nu
       joinChallengeAssetUrl: '',
       joinChallengeQaBank: [],
       joinChallengeTtlSeconds: 60,
+      joinChallengeMaxAttempts: 3,
       joinChallengeAction: 'kick',
       joinChallengeDeleteOnPass: true,
       joinChallengeDeleteBadAttempts: true,
@@ -709,6 +710,27 @@ test('pending challenge group reminders are sent once while repeated messages ar
   assert.equal(badAttempts.length, 3);
 });
 
+test('join challenge max attempts kicks unresolved users locally', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    configOverrides: { joinChallenge: true, joinChallengeMaxAttempts: 2, joinChallengeAction: 'kick' }
+  });
+  const chat = { id: -100, title: 'demo' };
+  const user = { id: 150, username: 'twostrikes', first_name: 'Two', is_bot: false };
+  await bot.handleNewMembers({ chat, from: { id: 1, username: 'admin' }, new_chat_members: [user] });
+  await bot.handleMessage({ chat, from: user, message_id: 201, text: 'hello?' });
+  await bot.handleMessage({ chat, from: user, message_id: 202, text: 'still not dkg' });
+  assert.equal(bot.joinChallenges.has('-100:150'), false);
+  assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 150));
+  assert.ok(calls.some((call) => call.method === 'unbanChatMember' && call.payload.user_id === 150));
+  const failed = bot.store.all().find((event) => event.event_type === 'join_challenge_failed_max_attempts' && event.user.id === 150);
+  assert.equal(failed.local_only, true);
+  assert.equal(failed.payload.attempts, 2);
+  assert.equal(failed.payload.max_attempts, 2);
+});
+
 test('noisy group replies are scheduled for cleanup but scan replies remain visible', async () => {
   const { bot, calls } = makeBot({
     canBan: true,
@@ -786,6 +808,7 @@ test('telegram command descriptions match the public bot command list', () => {
     { command: 'watch', description: 'Admin: watch a suspicious actor' },
     { command: 'unwatch', description: 'Admin: remove a watched actor' },
     { command: 'watchlist', description: 'Admin: show watches, mutes, and review items' },
+    { command: 'challenge', description: 'Admin: turn new-user join challenge on or off' },
     { command: 'appeal', description: 'Submit an appeal or correction for an event' },
     { command: 'review', description: 'Admin: uphold or overturn an event' },
     { command: 'digest', description: 'Show recent moderation digest' },
@@ -909,13 +932,17 @@ test('/why explains local event decisions', async () => {
     event_type: 'ban_executed',
     timestamp: new Date().toISOString(),
     user: { id: 55, username: 'badactor' },
-    payload: { confidence: 91, local_confidence: 80, dkg_confidence: 20, scam_type: 'phishing', recommended_action: 'ban', evidence: ['scam domain'], dkg_evidence: [{ ual: 'did:dkg:context-graph:tracabot/_shared_memory', eventId: 'prior' }] }
+    payload: { confidence: 91, local_confidence: 80, dkg_confidence: 20, scam_type: 'phishing', recommended_action: 'ban', publication_status: 'context_graph_auto_publish_eligible', lifecycle_stage: 'verified_memory', evidence: ['scam domain'], dkg_evidence: [{ ual: 'did:dkg:context-graph:tracabot/_shared_memory', eventId: 'prior' }] },
+    dkg: { ual: 'did:dkg:context-graph:tracabot/_shared_memory', shareOperation: 'swm-why', subject: 'https://tracabot.org/ontology#event/evt-why', publish: { status: 'published' } }
   });
   await bot.handleCommand({ chat: { id: -100, title: 'demo' }, from: { id: 1, username: 'admin' }, message_id: 32, text: '/why evt-why' });
   const reply = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
   assert.match(reply, /Why evt-why/);
   assert.match(reply, /Confidence: 91%/);
   assert.match(reply, /scam domain/);
+  assert.match(reply, /Share operation: swm-why/);
+  assert.match(reply, /Context Graph publish: published/);
+  assert.match(reply, /Publication status: context_graph_auto_publish_eligible/);
 });
 
 test('/appeal records correction request and /review records admin decision', async () => {
@@ -1012,6 +1039,29 @@ test('/watchlist shows active watches, mutes, and review items', async () => {
 test('/watchlist rejects non-admin requesters', async () => {
   const { bot, calls } = makeBot({ canBan: true, trustedUserIds: [] });
   await bot.handleCommand({ chat: { id: -100, title: 'demo' }, from: { id: 2, username: 'member' }, message_id: 46, text: '/watchlist' });
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('restricted')));
+});
+
+test('/challenge lets admins toggle new-user join challenge per chat', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    analyzer: () => ({ is_scam: false, confidence: 0, scam_type: 'other', evidence: [], recommended_action: 'ignore' })
+  });
+  const chat = { id: -100, title: 'demo' };
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 47, text: '/challenge on' });
+  assert.equal(bot.chatJoinChallengeEnabled(chat.id), true);
+  assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_setting_changed' && event.payload.enabled === true && event.local_only));
+  await bot.handleNewMembers({ chat, from: { id: 1, username: 'admin' }, new_chat_members: [{ id: 9001, username: 'new_user', is_bot: false }] });
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && /quick check before posting/.test(call.payload.text)));
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 48, text: '/challenge off' });
+  assert.equal(bot.chatJoinChallengeEnabled(chat.id), false);
+});
+
+test('/challenge rejects non-admin requesters', async () => {
+  const { bot, calls } = makeBot({ canBan: true, trustedUserIds: [] });
+  await bot.handleCommand({ chat: { id: -100, title: 'demo' }, from: { id: 2, username: 'member' }, message_id: 49, text: '/challenge on' });
+  assert.equal(bot.chatJoinChallengeEnabled(-100), false);
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('restricted')));
 });
 

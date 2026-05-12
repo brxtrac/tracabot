@@ -80,6 +80,7 @@ test('loadConfig parses DKG join challenge settings', () => {
     TRACABOT_JOIN_CHALLENGE_MODE: 'qa',
     TRACABOT_JOIN_CHALLENGE_ASSET_URL: 'https://dkg.origintrail.io/explore?ual=did:dkg:test/1',
     TRACABOT_JOIN_CHALLENGE_QA_BANK: '[{"id":"signal","question":"What is the signal color?","answers":["amber"]}]',
+    TRACABOT_JOIN_CHALLENGE_MAX_ATTEMPTS: '5',
     TRACABOT_JOIN_CHALLENGE_DELETE_ON_PASS: 'false',
     TRACABOT_JOIN_CHALLENGE_DELETE_BAD_ATTEMPTS: 'true',
     TRACABOT_JOIN_CHALLENGE_DKG_VALIDATE: 'false',
@@ -93,6 +94,7 @@ test('loadConfig parses DKG join challenge settings', () => {
   assert.equal(config.joinChallengeAssetUrl, 'https://dkg.origintrail.io/explore?ual=did:dkg:test/1');
   assert.deepEqual(config.joinChallengeQaBank, [{ id: 'signal', question: 'What is the signal color?', answers: ['amber'] }]);
   assert.equal(config.joinChallengeTtlSeconds, 90);
+  assert.equal(config.joinChallengeMaxAttempts, 5);
   assert.equal(config.joinChallengeAction, 'ban');
   assert.equal(config.joinChallengeDeleteOnPass, false);
   assert.equal(config.joinChallengeDeleteBadAttempts, true);
@@ -102,6 +104,7 @@ test('loadConfig parses DKG join challenge settings', () => {
   assert.equal(config.challengeMessageTtlSeconds, 180);
   assert.equal(config.successMessageTtlSeconds, 20);
   assert.throws(() => loadConfig({ TRACABOT_JOIN_CHALLENGE_TTL_SECONDS: '5' }), /TRACABOT_JOIN_CHALLENGE_TTL_SECONDS/);
+  assert.throws(() => loadConfig({ TRACABOT_JOIN_CHALLENGE_MAX_ATTEMPTS: '0' }), /TRACABOT_JOIN_CHALLENGE_MAX_ATTEMPTS/);
   assert.throws(() => loadConfig({ TRACABOT_JOIN_CHALLENGE_QA_BANK: 'not json' }), /TRACABOT_JOIN_CHALLENGE_QA_BANK/);
   assert.throws(() => loadConfig({ TRACABOT_BOT_MESSAGE_TTL_SECONDS: '1' }), /TRACABOT_BOT_MESSAGE_TTL_SECONDS/);
 });

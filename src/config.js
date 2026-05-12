@@ -82,6 +82,7 @@ export function loadConfig(env = process.env) {
   const conversationRateLimitSeconds = Number(env.TRACABOT_CONVERSATION_RATE_LIMIT_SECONDS || 60);
   const conversationMaxChars = Number(env.TRACABOT_CONVERSATION_MAX_CHARS || 700);
   const joinChallengeTtlSeconds = Number(env.TRACABOT_JOIN_CHALLENGE_TTL_SECONDS || 60);
+  const joinChallengeMaxAttempts = Number(env.TRACABOT_JOIN_CHALLENGE_MAX_ATTEMPTS || 3);
   const botMessageTtlSeconds = Number(env.TRACABOT_BOT_MESSAGE_TTL_SECONDS || 60);
   const challengeMessageTtlSeconds = Number(env.TRACABOT_CHALLENGE_MESSAGE_TTL_SECONDS || 120);
   const successMessageTtlSeconds = Number(env.TRACABOT_SUCCESS_MESSAGE_TTL_SECONDS || 45);
@@ -105,6 +106,9 @@ export function loadConfig(env = process.env) {
   }
   if (!Number.isFinite(joinChallengeTtlSeconds) || joinChallengeTtlSeconds < 15 || joinChallengeTtlSeconds > 900) {
     throw new Error('TRACABOT_JOIN_CHALLENGE_TTL_SECONDS must be a number from 15 to 900');
+  }
+  if (!Number.isFinite(joinChallengeMaxAttempts) || joinChallengeMaxAttempts < 1 || joinChallengeMaxAttempts > 20) {
+    throw new Error('TRACABOT_JOIN_CHALLENGE_MAX_ATTEMPTS must be a number from 1 to 20');
   }
   if (!Number.isFinite(botMessageTtlSeconds) || botMessageTtlSeconds < 5 || botMessageTtlSeconds > 86400) {
     throw new Error('TRACABOT_BOT_MESSAGE_TTL_SECONDS must be a number from 5 to 86400');
@@ -156,6 +160,7 @@ export function loadConfig(env = process.env) {
     joinChallengeAssetUrl: env.TRACABOT_JOIN_CHALLENGE_ASSET_URL || '',
     joinChallengeQaBank,
     joinChallengeTtlSeconds,
+    joinChallengeMaxAttempts,
     joinChallengeAction: /^(kick|ban|mute)$/i.test(env.TRACABOT_JOIN_CHALLENGE_ACTION || '') ? env.TRACABOT_JOIN_CHALLENGE_ACTION.toLowerCase() : 'kick',
     joinChallengeDeleteOnPass: parseBoolean(env.TRACABOT_JOIN_CHALLENGE_DELETE_ON_PASS, true),
     joinChallengeDeleteBadAttempts: parseBoolean(env.TRACABOT_JOIN_CHALLENGE_DELETE_BAD_ATTEMPTS, true),
