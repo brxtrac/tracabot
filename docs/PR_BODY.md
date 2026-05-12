@@ -4,27 +4,29 @@ Submitted for OriginTrail DKG v10 Bounty Program Round 1 (`cfi-dkgv10-r1`): Work
 
 ## Summary
 
-tracabot is a live OpenClaw-compatible Telegram Shieldy-style anti-scam agent. It detects phishing, fake airdrops, investment testimonial scams, support/admin impersonation, join-then-rename impersonators, suspicious moderation events, and low-risk joins that must verify with a DKG Knowledge Asset UAL challenge, then writes structured scam knowledge to DKG v10 Shared Memory in the `tracabot` Context Graph.
+tracabot is a live OpenClaw-compatible Telegram Shieldy-style anti-scam agent. It detects phishing, fake airdrops, investment testimonial scams, support/admin impersonation, join-then-rename impersonators, off-platform DM impersonators, suspicious moderation events, and low-risk joins that must verify with a DKG Knowledge Asset challenge, then writes structured scam knowledge to DKG v10 Shared Memory in the `tracabot` Context Graph.
 
 It now also exposes a concrete OpenClaw skill surface through `skills/tracabot/skill.json` and `bin/tracabot-skill.js`, allowing OpenClaw agents to call scan, explain, watchlist, digest, campaign, appeal, and review tools directly as JSON.
 
 TRACaBot also supports bounded conversational safety replies in Telegram. It keeps its own standalone Telegram token while optionally inheriting local OpenClaw OAuth/model/gateway configuration for LLM-drafted answers to scam-safety questions. If OpenClaw chat access is unavailable, it falls back to deterministic evidence templates.
 
-The differentiator is the shared persistent memory loop: one community's accepted report, fraud finding, or ban becomes queryable DKG intelligence for every other community running tracabot against the same Context Graph. A bad actor who tests a scam in one channel can be flagged elsewhere by Telegram user ID, username/display-name alias, wallet, or scam pattern before repeating the attack.
+The differentiator is the shared persistent memory loop: one community's accepted report, DM scam report, fraud finding, or ban becomes queryable DKG intelligence for every other community running tracabot against the same Context Graph. A bad actor who tests a scam in one channel or in private DMs can be flagged elsewhere by Telegram user ID, username/display-name alias, reported alias, wallet, domain, or scam pattern before repeating the attack.
 
 Telegram commands are registered on startup:
 
 - `/scan`: check a user, wallet, or replied message for scam risk.
 - `/report`: report a suspicious user, wallet, or message to DKG.
+- `/dmreport`: report off-platform DM impersonation scams to DKG Shared Memory when accepted.
 - `/ban`: ban a replied user and publish ban evidence.
 - `/stats`: show recent fraud checks and detections, including `/stats campaigns` for repeated scam waves.
-- `/why`: explain a tracabot event decision using local and DKG evidence.
+- `/why`: explain a tracabot event decision using local evidence, DKG source refs, Shared Memory write metadata, and publish status.
 - `/watch` and `/unwatch`: admin-only scrutiny controls that accept replies, SangMata rename alerts, numeric Telegram IDs, or usernames, then boost scoring without banning by themselves.
 - `/watchlist`: admin-only local queue of active watches, temporary mutes, and pending review items.
+- `/challenge on|off|status`: admin-only per-chat join challenge toggle.
 - `/appeal`: submit a correction or appeal to DKG Shared Memory.
 - `/review`: admin-only upheld/overturned review decision written to DKG.
 - `/digest`: summarize recent actions, reports, watches, appeals, reviews, and campaign signals.
-- Join challenge: low-risk new members verify by DMing a full `did:dkg:` Knowledge Asset UAL to the live bot; challenge state remains local-only and does not pollute DKG.
+- Join challenge: low-risk new members verify with a DKG Knowledge Asset UAL or configured Knowledge Asset Q&A; challenge state, per-chat overrides, and failed attempts remain local-only and do not pollute DKG.
 
 OpenClaw skill tools are also available: `scan_target`, `explain_event`, `get_watchlist`, `get_digest`, `query_campaigns`, `submit_appeal`, and `review_event`.
 

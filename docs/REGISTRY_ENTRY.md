@@ -5,14 +5,14 @@
 - Name: `tracabot`
 - Version: `0.1.0`
 - Repository: `https://github.com/brxtrac/tracabot`
-- Commit: `6741e649c5be43c05da09585846af4fefce4b76a`
+- Commit: `435d5465835917a926c03d0260fbbb941afb68e7`
 - License: MIT
 - Category: OpenClaw agent integration, Telegram safety, DKG v10 Shared Memory
 - Tags: `openclaw`, `dkg-v10`, `shared-memory`, `telegram`, `anti-scam`, `context-graph`, `llm-wiki`, `autoresearch`
 
 ## Summary
 
-TRACaBot is a live OpenClaw-compatible Telegram anti-scam agent. It detects phishing, fake airdrops, investment scams, admin/support impersonation, suspicious rename behavior, scam domains, scam wallets, repeated campaign patterns, and low-risk joins that must prove DKG familiarity with a Knowledge Asset UAL challenge. Evidence-backed reports, findings, restrictions, reviews, appeals, campaigns, and bans are written to DKG v10 Shared Memory under the `tracabot` Context Graph. High-confidence accepted reports, fraud findings, and executed bans are promoted through targeted Context Graph publication.
+TRACaBot is a live OpenClaw-compatible Telegram anti-scam agent. It detects phishing, fake airdrops, investment scams, admin/support impersonation, suspicious rename behavior, scam domains, scam wallets, repeated campaign patterns, off-platform DM impersonators, and low-risk joins that must prove DKG familiarity with a Knowledge Asset challenge. Evidence-backed reports, findings, restrictions, reviews, appeals, campaigns, DM scam reports, and bans are written to DKG v10 Shared Memory under the `tracabot` Context Graph. High-confidence accepted reports, fraud findings, and executed bans are promoted through targeted Context Graph publication.
 
 ## Interfaces
 
@@ -31,8 +31,8 @@ TRACaBot is a live OpenClaw-compatible Telegram anti-scam agent. It detects phis
 
 ## Memory Policy
 
-- Local working memory: JSONL audit log, watchlist state, digest state, weak reports, join-challenge state, and monitoring-only watch/unwatch actions.
-- Shared Memory: accepted reports, fraud findings, restrictions, bans, campaigns, appeals, and reviews with structured evidence.
+- Local working memory: JSONL audit log, watchlist state, digest state, weak reports, join-challenge state, challenge configuration overrides, and monitoring-only watch/unwatch actions.
+- Shared Memory: accepted reports, DM scam reports, fraud findings, restrictions, bans, campaigns, appeals, and reviews with structured evidence.
 - Context Graph publication: high-confidence accepted reports, high-confidence findings, and executed bans.
 
 The repository did not confirm a separate public OpenClaw adapter method dedicated to DKG v10 Working Memory. Until that API is available, operational drafts stay local and collaborative evidence uses the supported Shared Memory adapter calls.
