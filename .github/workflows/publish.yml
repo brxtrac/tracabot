@@ -21,6 +21,11 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm audit --omit=dev
-      - run: npm publish --provenance --access public
+      - name: Publish with npm token
+        if: ${{ secrets.NPM_TOKEN != '' }}
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish with trusted publishing
+        if: ${{ secrets.NPM_TOKEN == '' }}
+        run: npm publish --provenance --access public
