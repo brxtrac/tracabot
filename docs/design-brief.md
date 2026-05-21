@@ -1,5 +1,7 @@
 # Design Brief: tracabot
 
+Legacy draft. Use `docs/DESIGN_BRIEF.md` as the canonical bounty design brief for review, testing, and registry submission.
+
 Submitted for: OriginTrail DKG v10 Bounty Program Round 1  
 Author: brxtrac  
 Repository: https://github.com/brxtrac/tracabot  

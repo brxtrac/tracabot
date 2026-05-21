@@ -1,5 +1,6 @@
 # TRACaBot Demo Video Script (5-8 Minutes)
 
+Legacy draft. Use `docs/TESTING.md`, `docs/DEMO.md`, and `docs/DESIGN_BRIEF.md` for current testing and bounty review guidance.
 
 
 **Goal**: Prove it's a *working*, production-grade integration with real DKG v10 logging. Show end-to-end: detection → action → immutable log → queryable memory. Judges should see "this protects communities *today* and builds shared knowledge."

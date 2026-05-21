@@ -4,6 +4,20 @@ TRACaBot is an OpenClaw + Telegram + OriginTrail DKG v10 intelligent anti-scam b
 
 The default Context Graph is `tracabot`. Every community running TRACaBot against that Context Graph contributes to the same DKG v10 Shared Memory layer. TRACaBot writes events with provenance, local/DKG confidence, stable Telegram IDs, usernames/display-name aliases, reporter metadata, scam type, wallet/pattern indicators, and moderation outcomes. High-confidence fraud findings, accepted high-confidence reports, and executed bans are automatically published from Shared Memory into the Context Graph so other communities can query them immediately.
 
+## Quick Start For Testers
+
+```bash
+git clone https://github.com/brxtrac/tracabot.git
+cd tracabot
+npm install
+cp .env.example .env
+npm test
+npm run demo
+npm run skill -- get_digest '{}'
+```
+
+For full human and agent testing paths, see `docs/TESTING.md`. The canonical bounty design brief is `docs/DESIGN_BRIEF.md`; older lowercase docs are legacy drafts kept for historical context.
+
 ## Why It Exists
 
 Telegram scam moderation usually stays trapped inside one chat. TRACaBot turns each meaningful scan, report, and moderation action into structured fraud knowledge that can be queried across communities. If a fraudster is banned or reported in one channel, another TRACaBot instance can flag the same Telegram user ID, reused username/display-name alias, wallet, or scam pattern when that actor appears elsewhere.
