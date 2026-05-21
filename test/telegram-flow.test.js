@@ -1180,6 +1180,8 @@ test('/watch boosts scrutiny until /unwatch closes it', async () => {
     analyzer: () => ({ is_scam: false, confidence: 50, scam_type: 'other', evidence: ['thin signal'], recommended_action: 'ignore' }),
     dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] }
   });
+  const scheduled = [];
+  bot.scheduleDelete = (chatId, messageId, ttlSeconds) => scheduled.push({ chatId, messageId, ttlSeconds });
   const chat = { id: -100, title: 'demo' };
   await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 35, text: '/watch suspicious outreach', reply_to_message: { chat, from: { id: 77, username: 'maybe_scam' }, text: 'dm me for support' } });
   const risk = await bot.assess({ chat, from: { id: 77, username: 'maybe_scam' }, text: 'hello' }, { id: 77, username: 'maybe_scam' }, 'hello');
@@ -1192,6 +1194,7 @@ test('/watch boosts scrutiny until /unwatch closes it', async () => {
   const riskAfter = await bot.assess({ chat, from: { id: 77, username: 'maybe_scam' }, text: 'hello' }, { id: 77, username: 'maybe_scam' }, 'hello');
   assert.equal(riskAfter.confidence, 50);
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Removed watch')));
+  assert.equal(scheduled.length, 0);
 });
 
 test('/watch falls back to clickable username text when only @username is known', async () => {

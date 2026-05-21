@@ -346,12 +346,16 @@ export class TelegramShieldBot {
   async sendEphemeral(chatId, text, extra = {}, ttlSeconds = this.config.botMessageTtlSeconds || 60) {
     const sent = await this.send(chatId, text, extra);
     const isPrivate = extra.private === true || Number(chatId) > 0;
-    if (!isPrivate && await this.hasDeleteRights(chatId)) this.scheduleDelete(chatId, sent?.message_id, ttlSeconds);
+    if (!isPrivate) this.scheduleDelete(chatId, sent?.message_id, ttlSeconds);
     return sent;
   }
 
   async sendCommandReply(chatId, text, extra = {}, ttlSeconds = this.config.botMessageTtlSeconds || 60) {
     return this.sendEphemeral(chatId, text, extra, ttlSeconds);
+  }
+
+  async sendPersistentCommandReply(chatId, text, extra = {}) {
+    return this.send(chatId, text, extra);
   }
 
   async ban(chatId, userId) {
@@ -1639,7 +1643,7 @@ export class TelegramShieldBot {
         moderator: actorFromMessage(message),
         evidence
       }, { writeDkg: false });
-      await this.sendCommandReply(chatId, `👀 Watching ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}. Event: ${event.id}. Reason: ${escapeHtml(reason)}. This increases scrutiny only; it will not ban by itself.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
+      await this.sendPersistentCommandReply(chatId, `👀 Watching ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}. Event: ${event.id}. Reason: ${escapeHtml(reason)}. This increases scrutiny only; it will not ban by itself.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
       return;
     }
     if (text.startsWith('/unwatch')) {
@@ -1657,7 +1661,7 @@ export class TelegramShieldBot {
         moderator: actorFromMessage(message),
         evidence
       }, { writeDkg: false });
-      await this.sendCommandReply(chatId, `✅ Removed watch for ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}. Event: ${event.id}. Reason: ${escapeHtml(reason)}.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
+      await this.sendPersistentCommandReply(chatId, `✅ Removed watch for ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}. Event: ${event.id}. Reason: ${escapeHtml(reason)}.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
       return;
     }
     if (text.startsWith('/appeal')) {
