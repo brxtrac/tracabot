@@ -18,6 +18,18 @@ function makeAdapterClient({ publishError = null } = {}) {
         triplesWritten: quads.length
       };
     },
+    async createAssertion(contextGraphId, name) {
+      calls.push(['createAssertion', contextGraphId, name]);
+      return { assertionUri: `did:dkg:context-graph:${contextGraphId}/_wm/${name}` };
+    },
+    async writeAssertion(contextGraphId, name, quads) {
+      calls.push(['writeAssertion', contextGraphId, name, quads]);
+      return { triplesWritten: quads.length };
+    },
+    async promoteAssertion(contextGraphId, name, opts) {
+      calls.push(['promoteAssertion', contextGraphId, name, opts]);
+      return { shareOperationId: 'swm-test', graph: `did:dkg:context-graph:${contextGraphId}/_shared_memory` };
+    },
     async publishSharedMemory(contextGraphId, opts) {
       calls.push(['publishSharedMemory', contextGraphId, opts]);
       if (publishError) throw publishError;
@@ -53,6 +65,20 @@ function makeFlakyShareAdapterClient({ failures = [], success = {} } = {}) {
         triplesWritten: quads.length,
         ...success
       };
+    },
+    async createAssertion(contextGraphId, name) {
+      calls.push(['createAssertion', contextGraphId, name]);
+      const failure = failures.shift();
+      if (failure) throw failure;
+      return { assertionUri: `did:dkg:context-graph:${contextGraphId}/_wm/${name}` };
+    },
+    async writeAssertion(contextGraphId, name, quads) {
+      calls.push(['writeAssertion', contextGraphId, name, quads]);
+      return { triplesWritten: quads.length };
+    },
+    async promoteAssertion(contextGraphId, name, opts) {
+      calls.push(['promoteAssertion', contextGraphId, name, opts]);
+      return { shareOperationId: 'swm-retry-test', graph: `did:dkg:context-graph:${contextGraphId}/_shared_memory` };
     },
     async publishSharedMemory(contextGraphId, opts) {
       calls.push(['publishSharedMemory', contextGraphId, opts]);
@@ -352,6 +378,38 @@ test('writes unsafe chat event publication and review metadata', async () => {
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#detectionSignal') && /screenshot/.test(triple.object)));
 });
 
+test('writes channel observations to shared memory without verified publish', async () => {
+  const adapterClient = makeAdapterClient();
+  const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient });
+  const result = await dkg.writeEvent({
+    id: 'evt-channel-observation',
+    event_type: 'channel_observation',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    chat: { id: '-100123' },
+    user: { id: 'user', username: 'promoter' },
+    payload: {
+      confidence: 92,
+      local_confidence: 92,
+      scam_type: 'investment_scam',
+      observation_type: 'high_confidence_channel_message',
+      message_id: 99,
+      message_text: 'join alpha signals at https://t.me/fake_alpha',
+      text_fingerprint: 'join alpha signals',
+      domains: ['t.me'],
+      patterns: ['investment-partnership-lure'],
+      lifecycle_stage: 'shared_memory',
+      publication_status: 'shared_memory',
+      evidence: ['Investment-profit testimonial lure']
+    }
+  });
+  assert.equal(adapterClient.calls.some(([method]) => method === 'publishSharedMemory'), false);
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#lifecycleStage') && triple.object === '"shared_memory"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#observationType') && triple.object === '"high_confidence_channel_message"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#messageText') && /alpha signals/.test(triple.object)));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#textFingerprint') && triple.object === '"join alpha signals"'));
+});
+
 test('auto-publishes accepted high-confidence reports to the context graph', async () => {
   const adapterClient = makeAdapterClient();
   const dkg = new DkgClient({ contextGraph: 'tracabot' }, {
@@ -491,7 +549,7 @@ test('does not publish campaign summaries without two evidence roots', async () 
   assert.equal(adapterClient.calls.some(([method]) => method === 'publishSharedMemory'), false);
 });
 
-test('retries transient DKG shared-memory write failures', async () => {
+test('retries transient DKG assertion lifecycle failures', async () => {
   const adapterClient = makeFlakyShareAdapterClient({ failures: [new Error('fetch failed')] });
   const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient });
   const result = await dkg.writeEvent({
@@ -509,10 +567,11 @@ test('retries transient DKG shared-memory write failures', async () => {
     }
   });
   assert.equal(result.shareOperation, 'swm-retry-test');
-  assert.equal(adapterClient.calls.filter(([method]) => method === 'share').length, 2);
+  assert.equal(adapterClient.calls.filter(([method]) => method === 'createAssertion').length, 2);
+  assert.equal(adapterClient.calls.filter(([method]) => method === 'promoteAssertion').length, 1);
 });
 
-test('does not retry non-transient DKG shared-memory write failures', async () => {
+test('does not retry non-transient DKG assertion lifecycle failures', async () => {
   const adapterClient = makeFlakyShareAdapterClient({ failures: [new Error('invalid RDF payload')] });
   const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient });
   await assert.rejects(() => dkg.writeEvent({
@@ -529,7 +588,8 @@ test('does not retry non-transient DKG shared-memory write failures', async () =
       evidence: ['non-transient error should not retry']
     }
   }), /invalid RDF payload/);
-  assert.equal(adapterClient.calls.filter(([method]) => method === 'share').length, 1);
+  assert.equal(adapterClient.calls.filter(([method]) => method === 'createAssertion').length, 1);
+  assert.equal(adapterClient.calls.filter(([method]) => method === 'promoteAssertion').length, 0);
 });
 
 test('keeps shared-memory write result when automatic context graph publish fails', async () => {

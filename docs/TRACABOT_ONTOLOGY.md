@@ -21,6 +21,8 @@ Events move through this trust path:
 - `tracabot:Appeal`
 - `tracabot:ReviewDecision`
 - `tracabot:FraudCampaign`
+- `tracabot:ChannelObservation`
+- `tracabot:ConversationArtifact`
 - `tracabot:EvidenceItem`
 - `tracabot:ScamDomain`
 - `tracabot:ScamPattern`
@@ -72,6 +74,38 @@ Verified Memory should be reserved for events with one of these conditions:
 ## Scaling Guidance
 
 Each new community integration should produce the same event shape. Telegram-specific fields may be empty for non-Telegram sources, but lifecycle, evidence, confidence, community scope, and publication policy should remain consistent.
+
+## Channel Observations
+
+`channel_observation` is DKG v10 Shared Memory only. It captures high-confidence public channel abuse for pattern analysis, not verified fraud by itself. It may include bounded `tracabot:messageText` only when the public message is highly suspicious: scam channel promotion, outside token/coin promotion, fake airdrop, wallet/domain lure, investment-profit spam, or admin/support impersonation with a DM request. Ordinary discussion about scam coins, moderation policy, or scam prevention should not be shared as raw DKG text.
+
+Additional fields:
+
+- `tracabot:observationType`
+- `tracabot:messageId`
+- `tracabot:replyToMessageId`
+- `tracabot:textFingerprint`
+
+`channel_observation` events must use `tracabot:lifecycleStage = "shared_memory"` and `tracabot:publicationStatus = "shared_memory"`; they are not publish-eligible until a later admin-reviewed or high-confidence enforcement event cites them as evidence.
+
+## Conversation Artifacts
+
+`conversation_artifact` captures sorted scam/fraud/phishing learning material from conversations without granting enforcement authority. It is used for safety questions, weak-but-informative reports, tactic candidates, OpenClaw-sorted observations, and false-positive corrections. These artifacts increase DKG working-memory coverage while preserving the existing rule that bans/restrictions require credible findings, accepted reports, admin review, or high-confidence DKG evidence.
+
+Additional fields:
+
+- `tracabot:artifactKind`
+- `tracabot:artifactQuality`
+- `tracabot:conversationRole`
+- `tracabot:redactionLevel`
+- `tracabot:normalizedText`
+- `tracabot:sourceEventId`
+- `tracabot:teachesTactic`
+- `tracabot:learningValue`
+- `tracabot:operatorNote`
+- `tracabot:falsePositiveReason`
+
+Conversation artifacts are DKG v10 Shared Memory only once committed. They can inform replies, warnings, and explanations, but they do not raise `riskScore` for autonomous enforcement by themselves.
 
 ## Campaign Summaries
 

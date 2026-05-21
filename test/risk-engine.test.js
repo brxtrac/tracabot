@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { canAutonomouslyEscalate, combineRisk, displayName, formatDkgReference, formatRiskAssessment, formatScanReply, formatStatsReply, formatStatsSourcesReply, isObviousLocalScam } from '../src/risk-engine.js';
 
-test('combines DKG evidence with local analysis and triggers ban threshold', () => {
+test('combines DKG evidence with local analysis and triggers admin review threshold', () => {
   const risk = combineRisk({
     threshold: 85,
     analysis: {
@@ -22,7 +22,7 @@ test('combines DKG evidence with local analysis and triggers ban threshold', () 
     }
   });
   assert.equal(risk.confidence, 90);
-  assert.equal(risk.recommended_action, 'ban');
+  assert.equal(risk.recommended_action, 'admin_review');
   assert.equal(risk.community_verified_flag, 'auto-publish-high-confidence');
   assert.match(formatRiskAssessment({ target: { username: 'badactor' }, risk }), /HIGH RISK/);
   assert.match(risk.evidence.join('\n'), /DKG evidence: UAL did:dkg:context-graph:tracabot\/_shared_memory event known-scam/);

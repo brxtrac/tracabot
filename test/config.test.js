@@ -81,6 +81,8 @@ test('loadConfig parses DKG join challenge settings', () => {
     TRACABOT_JOIN_CHALLENGE_ASSET_URL: 'https://dkg.origintrail.io/explore?ual=did:dkg:test/1',
     TRACABOT_JOIN_CHALLENGE_QA_BANK: '[{"id":"signal","question":"What is the signal color?","answers":["amber"]}]',
     TRACABOT_JOIN_CHALLENGE_MAX_ATTEMPTS: '5',
+    TRACABOT_JOIN_CHALLENGE_REPEAT_FAILURE_THRESHOLD: '3',
+    TRACABOT_JOIN_CHALLENGE_REPEAT_BAD_ATTEMPT_THRESHOLD: '4',
     TRACABOT_JOIN_CHALLENGE_DELETE_ON_PASS: 'false',
     TRACABOT_JOIN_CHALLENGE_DELETE_BAD_ATTEMPTS: 'true',
     TRACABOT_JOIN_CHALLENGE_DKG_VALIDATE: 'false',
@@ -95,6 +97,8 @@ test('loadConfig parses DKG join challenge settings', () => {
   assert.deepEqual(config.joinChallengeQaBank, [{ id: 'signal', question: 'What is the signal color?', answers: ['amber'] }]);
   assert.equal(config.joinChallengeTtlSeconds, 90);
   assert.equal(config.joinChallengeMaxAttempts, 5);
+  assert.equal(config.joinChallengeRepeatFailureThreshold, 3);
+  assert.equal(config.joinChallengeRepeatBadAttemptThreshold, 4);
   assert.equal(config.joinChallengeAction, 'ban');
   assert.equal(config.joinChallengeDeleteOnPass, false);
   assert.equal(config.joinChallengeDeleteBadAttempts, true);
@@ -105,10 +109,42 @@ test('loadConfig parses DKG join challenge settings', () => {
   assert.equal(config.successMessageTtlSeconds, 20);
   assert.throws(() => loadConfig({ TRACABOT_JOIN_CHALLENGE_TTL_SECONDS: '5' }), /TRACABOT_JOIN_CHALLENGE_TTL_SECONDS/);
   assert.throws(() => loadConfig({ TRACABOT_JOIN_CHALLENGE_MAX_ATTEMPTS: '0' }), /TRACABOT_JOIN_CHALLENGE_MAX_ATTEMPTS/);
+  assert.throws(() => loadConfig({ TRACABOT_JOIN_CHALLENGE_REPEAT_FAILURE_THRESHOLD: '1' }), /TRACABOT_JOIN_CHALLENGE_REPEAT_FAILURE_THRESHOLD/);
+  assert.throws(() => loadConfig({ TRACABOT_JOIN_CHALLENGE_REPEAT_BAD_ATTEMPT_THRESHOLD: '0' }), /TRACABOT_JOIN_CHALLENGE_REPEAT_BAD_ATTEMPT_THRESHOLD/);
   assert.throws(() => loadConfig({ TRACABOT_JOIN_CHALLENGE_QA_BANK: 'not json' }), /TRACABOT_JOIN_CHALLENGE_QA_BANK/);
   assert.throws(() => loadConfig({ TRACABOT_BOT_MESSAGE_TTL_SECONDS: '1' }), /TRACABOT_BOT_MESSAGE_TTL_SECONDS/);
 });
 
 test('loadConfig rejects unsupported DKG modes', () => {
   assert.throws(() => loadConfig({ TRACABOT_DKG_MODE: 'shell' }), /openclaw-adapter/);
+});
+
+test('loadConfig parses channel shared-memory policy', () => {
+  const config = loadConfig({
+    TRACABOT_CHANNEL_MEMORY: 'true',
+    TRACABOT_CHANNEL_MEMORY_MIN_CONFIDENCE: '85',
+    TRACABOT_CHANNEL_MEMORY_MAX_TEXT_CHARS: '900'
+  });
+  assert.equal(config.channelMemory, true);
+  assert.equal(config.channelMemoryMinConfidence, 85);
+  assert.equal(config.channelMemoryMaxTextChars, 900);
+  assert.throws(() => loadConfig({ TRACABOT_CHANNEL_MEMORY_MIN_CONFIDENCE: '40' }), /TRACABOT_CHANNEL_MEMORY_MIN_CONFIDENCE/);
+  assert.throws(() => loadConfig({ TRACABOT_CHANNEL_MEMORY_MAX_TEXT_CHARS: '80' }), /TRACABOT_CHANNEL_MEMORY_MAX_TEXT_CHARS/);
+});
+
+test('loadConfig parses conversation artifact working-memory policy', () => {
+  const config = loadConfig({
+    TRACABOT_WM_ARTIFACTS: 'true',
+    TRACABOT_WM_ARTIFACT_SHARE_LOW_CONFIDENCE: 'true',
+    TRACABOT_WM_ARTIFACT_REDACT: 'false',
+    TRACABOT_WM_ARTIFACT_MIN_CONFIDENCE: '35',
+    TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS: '600'
+  });
+  assert.equal(config.wmArtifacts, true);
+  assert.equal(config.wmArtifactShareLowConfidence, true);
+  assert.equal(config.wmArtifactRedact, false);
+  assert.equal(config.wmArtifactMinConfidence, 35);
+  assert.equal(config.wmArtifactMaxTextChars, 600);
+  assert.throws(() => loadConfig({ TRACABOT_WM_ARTIFACT_MIN_CONFIDENCE: '120' }), /TRACABOT_WM_ARTIFACT_MIN_CONFIDENCE/);
+  assert.throws(() => loadConfig({ TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS: '80' }), /TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS/);
 });

@@ -10,3 +10,4 @@ data/
 coverage/
 .DS_Store
 .npmrc
+.aider*

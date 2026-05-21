@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const NS = 'https://tracabot.org/ontology#';
@@ -104,6 +104,7 @@ function shouldAutoPublishEvent(event = {}) {
   if (event.event_type === 'fraud_campaign') return confidence >= 85 && boundedList(event.payload?.evidence_root_ids || event.payload?.related_event_ids || []).length >= 2;
   if (event.event_type === 'report_submitted') return confidence >= 80 && localConfidence >= 60 && event.payload?.report_decision === 'accepted';
   if (event.event_type === 'unsafe_chat_event') return verifiedByAdmin || (confidence >= 95 && localConfidence >= 80);
+  if (event.event_type === 'channel_observation') return false;
   return false;
 }
 
@@ -116,6 +117,10 @@ function lifecycleStage(event = {}) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function assertionNameForEvent(event = {}) {
+  return `tracabot-event-${String(event.id || 'unknown').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'event'}`;
 }
 
 function isRetryableDkgError(error) {
@@ -140,6 +145,21 @@ async function loadOpenClawAdapter(config = {}) {
     }
   }
   throw new Error(`OpenClaw DKG adapter is not available. Install ${ADAPTER_PACKAGE} or set OPENCLAW_DKG_ADAPTER_PATH. ${errors.join(' | ')}`);
+}
+
+function readPackageVersion(path = '') {
+  try {
+    if (!path || !existsSync(path)) return '';
+    return JSON.parse(readFileSync(path, 'utf8')).version || '';
+  } catch {
+    return '';
+  }
+}
+
+function adapterPackagePath(candidate = '') {
+  if (!candidate.startsWith('/')) return '';
+  const marker = '/dist/index.js';
+  return candidate.endsWith(marker) ? `${candidate.slice(0, -marker.length)}/package.json` : '';
 }
 
 function eventTriples(event) {
@@ -172,6 +192,9 @@ function eventTriples(event) {
     { subject, predicate: `${NS}reviewDecision`, object: literal(event.payload?.review_decision || '') },
     { subject, predicate: `${NS}adminVerified`, object: literal(event.payload?.admin_verified ? 'true' : '') },
     { subject, predicate: `${NS}publicationStatus`, object: literal(event.payload?.publication_status || status) },
+    { subject, predicate: `${NS}commitReceiptId`, object: literal(event.payload?.commit_receipt_id || '') },
+    { subject, predicate: `${NS}commitPolicy`, object: literal(event.payload?.commit_policy || '') },
+    { subject, predicate: `${NS}commitAuthority`, object: literal(event.payload?.commit_authority || '') },
     { subject, predicate: `${NS}targetEventId`, object: literal(event.payload?.target_event_id || '') },
     { subject, predicate: `${NS}restrictedUntil`, object: literal(event.payload?.restricted_until || '') },
     { subject, predicate: `${NS}actionDurationSeconds`, object: literal(event.payload?.action_duration_seconds || '') },
@@ -186,6 +209,10 @@ function eventTriples(event) {
     { subject, predicate: `${NS}sangmataNewName`, object: literal(event.payload?.target?.sangmata?.newName || '') },
     { subject, predicate: `${NS}source`, object: literal(event.payload?.source || '') },
     { subject, predicate: `${NS}messageText`, object: literal(String(event.payload?.message_text || '').slice(0, MAX_EVIDENCE_LENGTH)) },
+    { subject, predicate: `${NS}observationType`, object: literal(event.payload?.observation_type || '') },
+    { subject, predicate: `${NS}messageId`, object: literal(event.payload?.message_id || '') },
+    { subject, predicate: `${NS}replyToMessageId`, object: literal(event.payload?.reply_to_message_id || '') },
+    { subject, predicate: `${NS}textFingerprint`, object: literal(event.payload?.text_fingerprint || '') },
     { subject, predicate: `${NS}testMode`, object: literal(event.payload?.test_mode ? 'true' : '') },
     { subject, predicate: `${NS}confidence`, object: literal(event.payload?.confidence ?? '') },
     { subject, predicate: `${NS}localConfidence`, object: literal(event.payload?.local_confidence ?? '') },
@@ -194,7 +221,7 @@ function eventTriples(event) {
     { subject, predicate: `${NS}evidence`, object: literal(JSON.stringify(evidence)) },
     { subject, predicate: `${NS}status`, object: literal(event.payload?.publication_status || status) }
   ];
-  if (['fraud_finding', 'ban_executed', 'report_submitted', 'dm_scam_report', 'unsafe_chat_event', 'fraud_campaign'].includes(event.event_type)) {
+  if (['fraud_finding', 'ban_executed', 'report_submitted', 'dm_scam_report', 'unsafe_chat_event', 'fraud_campaign', 'channel_observation', 'conversation_artifact'].includes(event.event_type)) {
     triples.push({ subject, predicate: 'rdf:type', object: 'http://dkg.io/ontology#KnowledgeAsset' });
   }
   if (event.event_type === 'fraud_campaign') {
@@ -221,6 +248,20 @@ function eventTriples(event) {
   for (const signal of boundedList(event.payload?.signals || [], MAX_EVIDENCE_ITEMS, MAX_EVIDENCE_LENGTH)) {
     triples.push({ subject, predicate: `${NS}detectionSignal`, object: literal(signal) });
   }
+  for (const tactic of boundedList(event.payload?.teaches_tactics || [])) {
+    triples.push({ subject, predicate: `${NS}teachesTactic`, object: literal(tactic) });
+  }
+  for (const ref of boundedList(event.payload?.source_event_ids || [])) {
+    triples.push({ subject, predicate: `${NS}sourceEventId`, object: literal(ref) });
+  }
+  if (event.payload?.artifact_kind) triples.push({ subject, predicate: `${NS}artifactKind`, object: literal(event.payload.artifact_kind) });
+  if (event.payload?.artifact_quality) triples.push({ subject, predicate: `${NS}artifactQuality`, object: literal(event.payload.artifact_quality) });
+  if (event.payload?.conversation_role) triples.push({ subject, predicate: `${NS}conversationRole`, object: literal(event.payload.conversation_role) });
+  if (event.payload?.redaction_level) triples.push({ subject, predicate: `${NS}redactionLevel`, object: literal(event.payload.redaction_level) });
+  if (event.payload?.normalized_text) triples.push({ subject, predicate: `${NS}normalizedText`, object: literal(String(event.payload.normalized_text).slice(0, MAX_EVIDENCE_LENGTH)) });
+  if (event.payload?.learning_value) triples.push({ subject, predicate: `${NS}learningValue`, object: literal(event.payload.learning_value) });
+  if (event.payload?.operator_note) triples.push({ subject, predicate: `${NS}operatorNote`, object: literal(String(event.payload.operator_note).slice(0, MAX_EVIDENCE_LENGTH)) });
+  if (event.payload?.false_positive_reason) triples.push({ subject, predicate: `${NS}falsePositiveReason`, object: literal(String(event.payload.false_positive_reason).slice(0, MAX_EVIDENCE_LENGTH)) });
   for (const url of boundedList(event.payload?.urls || [], MAX_EVIDENCE_ITEMS, MAX_EVIDENCE_LENGTH)) {
     triples.push({ subject, predicate: `${NS}suspiciousUrl`, object: literal(url) });
   }
@@ -280,6 +321,48 @@ export class DkgClient {
     return this.adapterClient;
   }
 
+  async runtimeStatus() {
+    const status = {
+      mode: 'openclaw-dkg-adapter',
+      contextGraph: this.config.contextGraph,
+      dkgNodeUrlConfigured: Boolean(this.config.dkgNodeUrl),
+      adapterPackage: ADAPTER_PACKAGE,
+      adapterVersion: '',
+      adapterPath: '',
+      dkgReleaseVersion: readPackageVersion('/root/.dkg/releases/current/node_modules/@origintrail-official/dkg/package.json'),
+      capabilities: {
+        workingMemoryAssertions: false,
+        sharedWorkingMemory: false,
+        verifiedMemoryPublish: false,
+        query: false
+      },
+      ok: false,
+      error: ''
+    };
+    for (const candidate of [this.config.openClawDkgAdapterPath, ...ADAPTER_PATHS].filter(Boolean)) {
+      const packagePath = adapterPackagePath(candidate);
+      const version = readPackageVersion(packagePath);
+      if (version) {
+        status.adapterPath = candidate;
+        status.adapterVersion = version;
+        break;
+      }
+    }
+    try {
+      const client = await this.client();
+      status.capabilities = {
+        workingMemoryAssertions: typeof client.createAssertion === 'function' && typeof client.writeAssertion === 'function' && typeof client.promoteAssertion === 'function',
+        sharedWorkingMemory: typeof client.share === 'function',
+        verifiedMemoryPublish: typeof client.publishSharedMemory === 'function',
+        query: typeof client.query === 'function'
+      };
+      status.ok = status.capabilities.query && (status.capabilities.workingMemoryAssertions || status.capabilities.sharedWorkingMemory);
+    } catch (error) {
+      status.error = error instanceof Error ? error.message : String(error);
+    }
+    return status;
+  }
+
   async ensureContextGraph() {
     if (this.contextReady) return;
     try {
@@ -291,6 +374,10 @@ export class DkgClient {
       );
     } catch (error) {
       const output = error instanceof Error ? error.message : String(error);
+      if (/timeout|timed?\s*out|aborted due to timeout/i.test(output)) {
+        this.contextReady = true;
+        return;
+      }
       if (!/exists|already|duplicate/i.test(output)) throw error;
     }
     this.contextReady = true;
@@ -300,9 +387,9 @@ export class DkgClient {
     await this.ensureContextGraph();
     const triples = eventTriples(event);
     const client = await this.client();
-    const write = await this.shareWithRetry(client, triples);
-    const output = JSON.stringify(write);
     const subject = `${NS}event/${event.id}`;
+    const write = await this.writeThroughMemoryLifecycle(client, event, triples, subject);
+    const output = JSON.stringify(write);
     const result = {
       mode: 'openclaw-dkg-adapter',
       output,
@@ -321,6 +408,40 @@ export class DkgClient {
       result.publish_error = error instanceof Error ? error.message : String(error);
     }
     return result;
+  }
+
+  async writeThroughMemoryLifecycle(client, event, triples, subject) {
+    if (typeof client.createAssertion !== 'function' || typeof client.writeAssertion !== 'function' || typeof client.promoteAssertion !== 'function') {
+      return this.shareWithRetry(client, triples);
+    }
+    const name = assertionNameForEvent(event);
+    return this.assertionWithRetry(client, name, triples, subject);
+  }
+
+  async assertionWithRetry(client, name, triples, subject) {
+    const attempts = [0, ...SHARE_RETRY_DELAYS_MS];
+    let lastError;
+    for (let index = 0; index < attempts.length; index += 1) {
+      if (attempts[index] > 0) await sleep(attempts[index]);
+      try {
+        const created = await client.createAssertion(this.config.contextGraph, name);
+        const written = await client.writeAssertion(this.config.contextGraph, name, triples);
+        const promoted = await client.promoteAssertion(this.config.contextGraph, name, { entities: [subject] });
+        return {
+          assertionName: name,
+          assertionUri: created?.assertionUri || promoted?.assertionUri || '',
+          shareOperationId: promoted?.shareOperationId || promoted?.workspaceOperationId || written?.shareOperationId || '',
+          graph: promoted?.graph || `did:dkg:context-graph:${this.config.contextGraph}/_shared_memory`,
+          triplesWritten: written?.triplesWritten ?? triples.length,
+          workingMemory: created,
+          sharedMemory: promoted
+        };
+      } catch (error) {
+        lastError = error;
+        if (!isRetryableDkgError(error) || index === attempts.length - 1) throw error;
+      }
+    }
+    throw lastError;
   }
 
   async shareWithRetry(client, triples) {
@@ -454,6 +575,9 @@ export class DkgClient {
     const credibleWalletEvidence = walletEvidence.filter((binding) => isProductionBindingForContext(binding, this.config.contextGraph) && isCredibleRiskBinding(binding));
     const crediblePatternEvidence = patternEvidence.filter((binding) => isProductionBindingForContext(binding, this.config.contextGraph) && isCredibleRiskBinding(binding));
     const credibleDomainEvidence = domainEvidence.filter((binding) => isProductionBindingForContext(binding, this.config.contextGraph) && isCredibleRiskBinding(binding));
+    const artifactEvidence = [...walletEvidence, ...domainEvidence, ...patternEvidence]
+      .filter((binding) => isProductionBindingForContext(binding, this.config.contextGraph) && cleanValue(binding.eventType || '') === 'conversation_artifact')
+      .slice(0, 5);
     const riskScore = Math.min(100, actorIntel.reportsAcrossCommunities * 25 + credibleWalletEvidence.length * 25 + credibleDomainEvidence.length * 20 + crediblePatternEvidence.length * 10);
     return {
       riskScore,
@@ -461,7 +585,8 @@ export class DkgClient {
       wallets,
       domains,
       patterns,
-      evidence: [...actorIntel.evidence, ...credibleWalletEvidence, ...credibleDomainEvidence, ...crediblePatternEvidence]
+      evidence: [...actorIntel.evidence, ...credibleWalletEvidence, ...credibleDomainEvidence, ...crediblePatternEvidence],
+      artifactEvidence
     };
   }
 

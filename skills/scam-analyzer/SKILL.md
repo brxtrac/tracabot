@@ -3,7 +3,7 @@ name: tracabot_scam_analyzer
 description: Local Telegram fraud heuristic analyzer used before DKG-backed moderation decisions.
 user-invocable: false
 tags: [telegram, scam-detection, fraud, heuristics]
-version: 0.1.0
+version: 0.1.1
 author: brxtrac
 ---
 

@@ -1,6 +1,6 @@
 {
   "name": "tracabot",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OpenClaw skill tools for DKG-powered Telegram fraud intelligence, review, and operator triage.",
   "contextGraph": "tracabot",
   "entrypoint": "node ./bin/tracabot-skill.js",
@@ -34,6 +34,11 @@
       "name": "monitor_chat_event",
       "description": "Classify an unsafe, scam, spam, phishing, or scam-advertisement chat event and write it to DKG v10 Shared Memory. It is only eligible for verified Context Graph publication when adminVerified is true or confidence is very high.",
       "inputSchema": { "type": "object", "required": ["text"], "properties": { "telegramUserId": { "type": "string" }, "username": { "type": "string" }, "text": { "type": "string" }, "chatId": { "type": "string" }, "label": { "type": "string" }, "adminVerified": { "type": "boolean" } } }
+    },
+    {
+      "name": "sort_conversation_artifact",
+      "description": "OpenClaw sorter for scam, spam, phishing, warning, weak-report, or false-positive conversation artifacts. Writes high-quality artifacts to DKG v10 Shared Memory without granting enforcement authority.",
+      "inputSchema": { "type": "object", "required": ["text"], "properties": { "telegramUserId": { "type": "string" }, "username": { "type": "string" }, "text": { "type": "string" }, "chatId": { "type": "string" }, "label": { "type": "string" }, "artifactKind": { "type": "string" }, "conversationRole": { "type": "string" }, "adminVerified": { "type": "boolean" }, "shareLowConfidence": { "type": "boolean" }, "operatorNote": { "type": "string" }, "sourceEventIds": { "type": "array", "items": { "type": "string" } } } }
     },
     {
       "name": "submit_appeal",

@@ -54,8 +54,12 @@ export function combineRisk({ analysis, dkgIntel, threshold = 85 }) {
     const event = item.eventId ? ` event ${item.eventId}` : '';
     evidence.push(`DKG evidence: ${ref}${event}`);
   }
+  for (const item of (dkgIntel?.artifactEvidence || []).slice(0, 2)) {
+    const event = item.eventId ? ` event ${item.eventId}` : '';
+    evidence.push(`DKG working-memory artifact:${event}`);
+  }
 
-  const dkgBacked = hasDkgEvidence(dkgIntel) || Boolean(dkgIntel?.domains?.length || dkgIntel?.wallets?.length || dkgIntel?.patterns?.length);
+  const dkgBacked = hasDkgEvidence(dkgIntel);
   const strongLocalPattern = hasStrongLocalPattern(analysis);
   const localConfidence = analysis.confidence || 0;
   const cappedLocalConfidence = !dkgBacked && !strongLocalPattern && localConfidence >= 60 ? Math.min(localConfidence, 59) : localConfidence;
@@ -69,8 +73,9 @@ export function combineRisk({ analysis, dkgIntel, threshold = 85 }) {
     dkg_confidence: dkgScore,
     scam_type: analysis.scam_type || 'unknown',
     evidence,
-    recommended_action: highConfidence ? 'ban' : analysis.recommended_action,
+    recommended_action: highConfidence ? 'admin_review' : analysis.recommended_action,
     dkg_evidence: dkgEvidence,
+    dkg_artifact_evidence: dkgIntel?.artifactEvidence || [],
     wallets: dkgIntel?.wallets || [],
     domains: dkgIntel?.domains || [],
     patterns: dkgIntel?.patterns || [],
@@ -97,7 +102,7 @@ export function formatRiskAssessment({ target, risk }) {
   const name = displayName(target);
   const verdict = risk.confidence >= 85 ? 'HIGH RISK' : risk.confidence >= 60 ? 'REVIEW' : 'LOW RISK';
   const evidence = publicEvidence(risk).join('; ') || 'No strong public scam signal found.';
-  return `TRACaBot risk for ${name}: ${verdict} (${risk.confidence}%). Type: ${risk.scam_type}. Public signals: ${evidence}. Recommendation: ${risk.recommended_action}.`;
+  return `TRACaBot check for ${name}: ${verdict} (${risk.confidence}%). Type: ${risk.scam_type}. Public signals: ${evidence}. Ask an admin to review. Users can reply with /appeal and an optional reason.`;
 }
 
 export function formatDkgReference(event) {

@@ -83,9 +83,15 @@ export function loadConfig(env = process.env) {
   const conversationMaxChars = Number(env.TRACABOT_CONVERSATION_MAX_CHARS || 700);
   const joinChallengeTtlSeconds = Number(env.TRACABOT_JOIN_CHALLENGE_TTL_SECONDS || 60);
   const joinChallengeMaxAttempts = Number(env.TRACABOT_JOIN_CHALLENGE_MAX_ATTEMPTS || 3);
+  const joinChallengeRepeatFailureThreshold = Number(env.TRACABOT_JOIN_CHALLENGE_REPEAT_FAILURE_THRESHOLD || 2);
+  const joinChallengeRepeatBadAttemptThreshold = Number(env.TRACABOT_JOIN_CHALLENGE_REPEAT_BAD_ATTEMPT_THRESHOLD || 3);
   const botMessageTtlSeconds = Number(env.TRACABOT_BOT_MESSAGE_TTL_SECONDS || 60);
   const challengeMessageTtlSeconds = Number(env.TRACABOT_CHALLENGE_MESSAGE_TTL_SECONDS || 120);
   const successMessageTtlSeconds = Number(env.TRACABOT_SUCCESS_MESSAGE_TTL_SECONDS || 45);
+  const channelMemoryMinConfidence = Number(env.TRACABOT_CHANNEL_MEMORY_MIN_CONFIDENCE || 80);
+  const channelMemoryMaxTextChars = Number(env.TRACABOT_CHANNEL_MEMORY_MAX_TEXT_CHARS || 1000);
+  const wmArtifactMinConfidence = Number(env.TRACABOT_WM_ARTIFACT_MIN_CONFIDENCE || 40);
+  const wmArtifactMaxTextChars = Number(env.TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS || 700);
   const joinChallengeMode = /^(qa|ual)$/i.test(env.TRACABOT_JOIN_CHALLENGE_MODE || '') ? env.TRACABOT_JOIN_CHALLENGE_MODE.toLowerCase() : 'qa';
   const joinChallengeQaBank = parseChallengeBank(env.TRACABOT_JOIN_CHALLENGE_QA_BANK || '');
   const dkgMode = env.TRACABOT_DKG_MODE || 'openclaw-adapter';
@@ -110,6 +116,12 @@ export function loadConfig(env = process.env) {
   if (!Number.isFinite(joinChallengeMaxAttempts) || joinChallengeMaxAttempts < 1 || joinChallengeMaxAttempts > 20) {
     throw new Error('TRACABOT_JOIN_CHALLENGE_MAX_ATTEMPTS must be a number from 1 to 20');
   }
+  if (!Number.isFinite(joinChallengeRepeatFailureThreshold) || joinChallengeRepeatFailureThreshold < 2 || joinChallengeRepeatFailureThreshold > 20) {
+    throw new Error('TRACABOT_JOIN_CHALLENGE_REPEAT_FAILURE_THRESHOLD must be a number from 2 to 20');
+  }
+  if (!Number.isFinite(joinChallengeRepeatBadAttemptThreshold) || joinChallengeRepeatBadAttemptThreshold < 1 || joinChallengeRepeatBadAttemptThreshold > 20) {
+    throw new Error('TRACABOT_JOIN_CHALLENGE_REPEAT_BAD_ATTEMPT_THRESHOLD must be a number from 1 to 20');
+  }
   if (!Number.isFinite(botMessageTtlSeconds) || botMessageTtlSeconds < 5 || botMessageTtlSeconds > 86400) {
     throw new Error('TRACABOT_BOT_MESSAGE_TTL_SECONDS must be a number from 5 to 86400');
   }
@@ -118,6 +130,18 @@ export function loadConfig(env = process.env) {
   }
   if (!Number.isFinite(successMessageTtlSeconds) || successMessageTtlSeconds < 5 || successMessageTtlSeconds > 86400) {
     throw new Error('TRACABOT_SUCCESS_MESSAGE_TTL_SECONDS must be a number from 5 to 86400');
+  }
+  if (!Number.isFinite(channelMemoryMinConfidence) || channelMemoryMinConfidence < 60 || channelMemoryMinConfidence > 100) {
+    throw new Error('TRACABOT_CHANNEL_MEMORY_MIN_CONFIDENCE must be a number from 60 to 100');
+  }
+  if (!Number.isFinite(channelMemoryMaxTextChars) || channelMemoryMaxTextChars < 160 || channelMemoryMaxTextChars > 2000) {
+    throw new Error('TRACABOT_CHANNEL_MEMORY_MAX_TEXT_CHARS must be a number from 160 to 2000');
+  }
+  if (!Number.isFinite(wmArtifactMinConfidence) || wmArtifactMinConfidence < 0 || wmArtifactMinConfidence > 100) {
+    throw new Error('TRACABOT_WM_ARTIFACT_MIN_CONFIDENCE must be a number from 0 to 100');
+  }
+  if (!Number.isFinite(wmArtifactMaxTextChars) || wmArtifactMaxTextChars < 160 || wmArtifactMaxTextChars > 2000) {
+    throw new Error('TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS must be a number from 160 to 2000');
   }
   return {
     telegramToken: env.TELEGRAM_BOT_TOKEN || '',
@@ -161,6 +185,8 @@ export function loadConfig(env = process.env) {
     joinChallengeQaBank,
     joinChallengeTtlSeconds,
     joinChallengeMaxAttempts,
+    joinChallengeRepeatFailureThreshold,
+    joinChallengeRepeatBadAttemptThreshold,
     joinChallengeAction: /^(kick|ban|mute)$/i.test(env.TRACABOT_JOIN_CHALLENGE_ACTION || '') ? env.TRACABOT_JOIN_CHALLENGE_ACTION.toLowerCase() : 'kick',
     joinChallengeDeleteOnPass: parseBoolean(env.TRACABOT_JOIN_CHALLENGE_DELETE_ON_PASS, true),
     joinChallengeDeleteBadAttempts: parseBoolean(env.TRACABOT_JOIN_CHALLENGE_DELETE_BAD_ATTEMPTS, true),
@@ -168,6 +194,14 @@ export function loadConfig(env = process.env) {
     autoDeleteBotMessages: parseBoolean(env.TRACABOT_AUTO_DELETE_BOT_MESSAGES, true),
     botMessageTtlSeconds,
     challengeMessageTtlSeconds,
-    successMessageTtlSeconds
+    successMessageTtlSeconds,
+    channelMemory: parseBoolean(env.TRACABOT_CHANNEL_MEMORY, true),
+    channelMemoryMinConfidence,
+    channelMemoryMaxTextChars,
+    wmArtifacts: parseBoolean(env.TRACABOT_WM_ARTIFACTS, true),
+    wmArtifactShareLowConfidence: parseBoolean(env.TRACABOT_WM_ARTIFACT_SHARE_LOW_CONFIDENCE, false),
+    wmArtifactRedact: parseBoolean(env.TRACABOT_WM_ARTIFACT_REDACT, true),
+    wmArtifactMinConfidence,
+    wmArtifactMaxTextChars
   };
 }

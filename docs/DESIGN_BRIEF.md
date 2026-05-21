@@ -42,6 +42,24 @@ The repository did not find a confirmed public Working Memory-specific method ex
 - Integration: `skills/tracabot/skill.json` exposes OpenClaw-callable tools.
 - Curator authority: the configured TRACaBot/OpenClaw runtime holds authority for `createContextGraph`, `share`, `query`, and targeted `publishSharedMemory` operations.
 
+## Bounty Scope Compliance
+
+TRACaBot is intended for OriginTrail DKG v10 Bounty Program Round 1, Section 5. It is in scope because it does both required things:
+
+- It reads from and writes to DKG v10 Shared Memory on a v10 node through the official OpenClaw DKG adapter setup. The adapter is used as the HTTP client boundary to the local authenticated node API; TRACaBot does not patch the DKG node, load code into the daemon, or import internal v10 packages such as `@origintrail-official/dkg-core`, `-storage`, `-chain`, `-publisher`, `-query`, or `-agent`.
+- It connects Shared Memory to an OpenClaw-compatible agent workflow that advances LLM-Wiki/autoresearch: Telegram communities and OpenClaw agents produce structured, provenance-rich fraud knowledge that can be queried, reviewed, corrected, clustered, and later promoted.
+
+It also matches the priority integration target in Section 5: OpenClaw. TRACaBot exposes an OpenClaw skill manifest and JSON bridge, and its DKG runtime boundary follows the official DKG/OpenClaw adapter setup.
+
+Round 1 out-of-scope exceptions are addressed as follows:
+
+- Not Verified-Memory-only: the primary product loop is Shared Memory read/write; Verified Memory publish is a downstream high-confidence path.
+- No endorsement/voting UI: appeals and reviews are agent/admin commands, not UI voting buttons.
+- No publisher-side Conviction or staking UX.
+- No DKG v9 dependency.
+- No Curator bypass: `SHARE` and `PUBLISH` use the configured runtime's DKG authority against the local node.
+- No internal node imports, node source patching, or daemon plugin loading.
+
 ## OpenClaw Integration
 
 TRACaBot uses OpenClaw in two ways:
@@ -66,7 +84,7 @@ This advances the LLM-Wiki/autoresearch direction by turning moderation events i
 ## Promotion Path
 
 1. Local observation: messages, watchlist entries, weak reports, and digest state remain local working memory.
-2. Evidence-backed Shared Memory: unsafe chat observations, accepted reports, fraud findings, restrictions, campaigns, appeals, and reviews are shared through DKG v10.
+2. Evidence-backed Shared Memory: unsafe chat observations, accepted reports, fraud findings, restrictions, campaigns, appeals, and reviews are shared through DKG v10. `channel_observation` shares bounded raw text only for high-confidence public channel abuse, not ordinary scam discussion.
 3. Context Graph publication: high-confidence accepted reports, high-confidence findings, bans, admin-verified reviews, and very-high-confidence unsafe chat events are promoted with targeted `publishSharedMemory` calls.
 4. Verified Memory readiness: upheld bans, repeated campaigns, and reviewed evidence can later be promoted into Verified Memory or consumed by context oracles. Overturned reviews and appeals provide negative/correction signals for the same trust gradient.
 

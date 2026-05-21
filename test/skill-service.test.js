@@ -64,6 +64,32 @@ test('skill service monitors unsafe chat events through DKG working memory', asy
   assert.equal(dkgWrites[0].payload.publication_status, 'shared_memory');
 });
 
+test('skill service sorts high-quality conversation artifacts into DKG memory', async () => {
+  const { service, dkgWrites } = makeService();
+  const result = await service.sortConversationArtifact({ telegramUserId: '8388593201', username: 'fake_support', text: 'fake support DM says verify wallet now token=supersecret 0x0000000000000000000000000000000000000001', artifactKind: 'tactic_candidate' });
+  assert.equal(result.tool, 'sort_conversation_artifact');
+  assert.equal(result.writesDkg, true);
+  assert.equal(dkgWrites[0].event_type, 'conversation_artifact');
+  assert.equal(dkgWrites[0].payload.artifact_kind, 'tactic_candidate');
+  assert.equal(dkgWrites[0].payload.publication_status, 'shared_memory');
+  assert.doesNotMatch(dkgWrites[0].payload.message_text, /supersecret|0x0000000000000000000000000000000000000001/);
+  assert.match(dkgWrites[0].payload.message_text, /token=\[redacted\]|0x000000\.\.\.000001/);
+  assert.match(dkgWrites[0].payload.commit_receipt_id, /^commit:/);
+  assert.equal(dkgWrites[0].payload.commit_policy, 'artifact_quality_threshold');
+});
+
+test('skill service keeps low-quality conversation artifacts as draft only', async () => {
+  const { service, dkgWrites } = makeService();
+  const result = await service.sortConversationArtifact({ telegramUserId: '8388593201', username: 'member', text: 'normal governance chat about memory flow', artifactKind: 'benign_conversation_flow' });
+  assert.equal(result.tool, 'sort_conversation_artifact');
+  assert.equal(result.writesDkg, false);
+  assert.equal(dkgWrites.length, 0);
+  const event = service.store.all().find((item) => item.event_type === 'conversation_artifact');
+  assert.equal(event.payload.publication_status, 'working_memory');
+  assert.equal(event.payload.lifecycle_stage, 'working_memory_draft');
+  assert.equal(event.payload.commit_policy, 'draft_only');
+});
+
 test('skill service query_campaigns returns campaign roots and indicators', () => {
   const { service } = makeService();
   service.store.append({

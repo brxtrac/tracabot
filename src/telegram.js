@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { canAutonomouslyEscalate, combineRisk, formatBanReply, formatDkgReference, formatReportReply, formatRiskAssessment, formatScanReply, formatStatsReply, formatStatsSourcesReply, isObviousLocalScam } from './risk-engine.js';
-import { extractWallets } from './dkg-client.js';
+import { extractDomains, extractPatterns, extractWallets } from './dkg-client.js';
 import { buildSafetyPrompt, fallbackSafetyReply, isSafetyQuestion, sanitizeSafetyReply, shouldConversationallyReply } from './conversation.js';
 import { redactedOpenClawStatus } from './openclaw-config.js';
 
@@ -33,6 +33,10 @@ const DM_REPORT_RE = /\b(?:dm|direct message|private message|inbox|pm)\b/i;
 const REPORT_INTENT_RE = /\b(?:report|warn|alert|heads?\s*up|ongoing|impersonator|impersonating|pretending|fake)\b/i;
 const ROLE_RE = /\b(?:cto|ceo|cfo|coo|founder|co-?founder|admin|moderator|mod|support|team|core team|vc|investor|partner|ambassador|lead|manager|director|official|developer|devrel)\b/i;
 const DM_SCAM_REQUEST_RE = /\b(?:connect|verify|validate|sync|link|unlock|restore|claim|airdrop|giveaway|seed phrase|private key|recovery phrase|wallet|funds?|send|deposit|investment|support)\b/i;
+const PUBLIC_CHAT_TYPES = new Set(['group', 'supergroup', 'channel']);
+const ADMIN_DM_LURE_RE = /\b(?:admin|support|moderator|mod|official|team)\b[\s\S]{0,120}\b(?:dm|pm|message|inbox|contact|reach out)\b|\b(?:dm|pm|message|inbox|contact|reach out)\b[\s\S]{0,120}\b(?:admin|support|moderator|mod|official|team)\b/i;
+const SCAM_PROMO_RE = /\b(?:join|follow|subscribe|signal|signals|pump|alpha|trading|profit|earn|airdrop|giveaway|presale|launch|gem|coin|token|listing)\b/i;
+const BENIGN_FLOW_RE = /\b(?:working memory|shared memory|governance|commit|receipt|draft|promot(?:e|ed|ion)|publish|verified knowledge|synthid|deepmind|watermark|model|agent|policy|review|threshold)\b/i;
 
 function boundedText(value = '', max = MAX_TEXT_CHARS) {
   return String(value || '').slice(0, max);
@@ -183,6 +187,17 @@ function textFingerprint(text = '') {
   return words.slice(0, 16).join(' ');
 }
 
+function hasBoundedRawMessageEvidence(message = {}, risk = {}, text = '') {
+  if (!PUBLIC_CHAT_TYPES.has(message.chat?.type || '')) return false;
+  if (Number(risk.local_confidence || risk.confidence || 0) < 80) return false;
+  if (ADMIN_DM_LURE_RE.test(text)) return true;
+  if ((risk.patterns || []).some((pattern) => ['fake-airdrop', 'wallet-drain', 'impersonation', 'investment-partnership-lure', 'urgency-pressure'].includes(pattern))) return true;
+  if ((risk.domains || []).length && SCAM_PROMO_RE.test(text)) return true;
+  if (/\bt\.me\//i.test(text) && SCAM_PROMO_RE.test(text)) return true;
+  if (/Investment-profit testimonial lure|Suspicious request to move help\/support into DMs|Identity impersonation indicators|Username resembles configured admin|changed identity after joining/i.test((risk.evidence || []).join('\n'))) return true;
+  return false;
+}
+
 function conversationKey(message = {}, target = {}) {
   const chat = message.chat?.id || 'chat';
   const actor = targetKey(target) || actorKey(actorFromMessage(message)) || 'target';
@@ -231,6 +246,21 @@ function normalizeChallengeAnswer(value = '') {
     .replace(/\s+/g, ' ');
 }
 
+function normalizeAliasSignal(value = '') {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFKC')
+    .replace(/^@/, '')
+    .replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+function challengeAliasSignals(user = {}) {
+  const displayName = [user.first_name, user.last_name].filter(Boolean).join(' ');
+  return [...new Set([user.username, user.first_name, user.last_name, displayName]
+    .map(normalizeAliasSignal)
+    .filter((value) => value.length >= 3))];
+}
+
 function userMention(user = {}) {
   if (user.kind === 'wallet') return escapeHtml(user.label || user.id || 'wallet');
   const username = String(user.username || '').replace(/^@/, '');
@@ -259,8 +289,8 @@ function sangmataTargetFromText(text = '') {
 function hasEvidenceForDkg(eventType = '', payload = {}) {
   if (['risk_check', 'risk_query', 'scam_detection'].includes(eventType)) return false;
   if (['watch_started', 'watch_ended', 'reporter_reputation_update'].includes(eventType)) return false;
-  if (eventType.startsWith('join_challenge_')) return false;
-  if (['ban_executed', 'restrict_executed', 'fraud_finding', 'report_submitted', 'dm_scam_report', 'fraud_campaign', 'appeal_submitted', 'review_upheld', 'review_overturned'].includes(eventType)) return true;
+  if (eventType.startsWith('join_challenge_') && eventType !== 'join_challenge_repeat_failure') return false;
+  if (['ban_executed', 'restrict_executed', 'fraud_finding', 'report_submitted', 'dm_scam_report', 'fraud_campaign', 'join_challenge_repeat_failure', 'channel_observation', 'conversation_artifact', 'appeal_submitted', 'review_upheld', 'review_overturned'].includes(eventType)) return true;
   if (['risk_review_needed', 'risk_action_suppressed', 'report_review_needed'].includes(eventType)) {
     return Number(payload.confidence || 0) >= 60 || Boolean(payload.dkg_evidence?.length || payload.wallets?.length || payload.domains?.length || payload.patterns?.length);
   }
@@ -318,6 +348,10 @@ export class TelegramShieldBot {
     const isPrivate = extra.private === true || Number(chatId) > 0;
     if (!isPrivate && await this.hasDeleteRights(chatId)) this.scheduleDelete(chatId, sent?.message_id, ttlSeconds);
     return sent;
+  }
+
+  async sendCommandReply(chatId, text, extra = {}, ttlSeconds = this.config.botMessageTtlSeconds || 60) {
+    return this.sendEphemeral(chatId, text, extra, ttlSeconds);
   }
 
   async ban(chatId, userId) {
@@ -607,6 +641,16 @@ export class TelegramShieldBot {
     return this.isConfiguredAdmin(user) || await this.isTelegramChatAdmin(message.chat.id, user.id);
   }
 
+  isPrivateOwnerMessage(message) {
+    return message.chat?.type === 'private' && this.isConfiguredAdmin(actorFromMessage(message));
+  }
+
+  async rejectNonOwnerPrivateReport(message) {
+    if (message.chat?.type !== 'private' || this.isPrivateOwnerMessage(message)) return false;
+    await this.send(message.chat.id, '⚠️ Private reports are restricted to bot owner. Use /report in the group, or ask group admins to review.', { reply_to_message_id: message.message_id, private: true });
+    return true;
+  }
+
   commandText(message, command) {
     return boundedText(message.text || '').replace(new RegExp(`^/${command}(?:@\\w+)?\\s*`, 'i'), '').trim();
   }
@@ -651,10 +695,10 @@ export class TelegramShieldBot {
     const backed = canAutonomouslyEscalate(risk);
     const text = [
       backed
-        ? '🚨 Admin heads-up: confirmed fraud signal, but I do not have ban rights here.'
-        : '⚠️ Admin review note: local risk signal only; I do not have enough confirmed evidence for action.',
+        ? 'TRACaBot is learning fraud patterns and flagged this for admin review.'
+        : 'TRACaBot is learning fraud patterns and needs an admin review.',
       formatRiskAssessment({ target: actorFromMessage(message), risk }),
-      'Evidence was saved privately for admin review; internal DKG receipts are not posted in group chat.',
+      'If this is wrong, reply with /appeal and an optional reason.',
       message.text ? `Context: ${boundedText(message.text, MAX_CONTEXT_CHARS)}` : ''
     ].filter(Boolean).join('\n');
     await this.send(message.chat.id, text, { reply_to_message_id: message.message_id });
@@ -683,8 +727,8 @@ export class TelegramShieldBot {
       '/unwatch - admin-only; reply to a user or SangMata alert. Also works as /unwatch <telegram-id> or /unwatch @user.',
       '/watchlist - admin-only; show active watches, temp mutes, and review items. Use /watchlist muted or /watchlist review.',
       '/challenge on|off|status - admin-only; turn the new-user join challenge on or off for this chat.',
-      '/appeal <event-id> reason - submit a correction or appeal to DKG. Use /why <event-id> first if unsure.',
-      '/review <event-id> uphold reason - admin-only; keep the decision. Use overturn to reverse it.',
+      '/appeal [reason] - submit a correction. I infer the latest event from your user, @mention, or replied message.',
+      '/review [@user|event-id] uphold|overturn reason - admin-only. Also works by replying to a user message.',
       '/stats campaigns - show repeated domains, wallets, patterns, or text fingerprints.',
       '/digest - summarize recent actions, reports, watches, appeals, and campaigns.',
       '/status - admin-only; show DKG, Telegram permission, and conversational mode status.',
@@ -700,20 +744,25 @@ export class TelegramShieldBot {
 
   async formatStatus(message) {
     const chatId = message.chat.id;
-    const [dkgOk, canBan, canDelete] = await Promise.all([
+    const [dkgOk, dkgRuntime, canBan, canDelete] = await Promise.all([
       this.dkgReachable(),
+      this.dkg.runtimeStatus(),
       this.hasBanRights(chatId),
       this.hasDeleteRights(chatId)
     ]);
     const openclaw = redactedOpenClawStatus(this.config);
+    const caps = dkgRuntime.capabilities || {};
     return [
       'TRACaBot status',
       `DKG: ${dkgOk ? 'reachable' : 'unreachable'}`,
+      `DKG release: ${dkgRuntime.dkgReleaseVersion || 'unknown'}; adapter: ${dkgRuntime.adapterVersion || 'unknown'}`,
+      `DKG memory: WM assertions=${caps.workingMemoryAssertions ? 'yes' : 'no'}, SWM=${caps.sharedWorkingMemory ? 'yes' : 'no'}, VM publish=${caps.verifiedMemoryPublish ? 'yes' : 'no'}, query=${caps.query ? 'yes' : 'no'}`,
       `Telegram rights: delete=${canDelete ? 'yes' : 'no'}, restrict/ban=${canBan ? 'yes' : 'no'}`,
       `Autonomous thresholds: warn ${this.config.warnThreshold}%, restrict ${this.config.restrictThreshold}%, ban ${this.config.banThreshold}%`,
       `Join challenge: ${this.chatJoinChallengeEnabled(chatId) ? `on; Knowledge Asset address; ttl ${this.config.joinChallengeTtlSeconds || 60}s; max attempts ${this.config.joinChallengeMaxAttempts || 3}; timeout ${this.config.joinChallengeAction || 'kick'}` : 'off'}`,
       `Conversation: ${this.config.conversational === false ? 'off' : 'on'}; provider=${this.config.llmProvider || 'auto'}; proactive >= ${this.config.proactiveReplyThreshold}%`,
       `OpenClaw LLM: ${openclaw.available ? 'configured' : 'not discovered'}`,
+      `Learning artifacts: ${this.config.wmArtifacts === false ? 'off' : 'on'}; min quality ${this.config.wmArtifactMinConfidence}; redact=${this.config.wmArtifactRedact === false ? 'no' : 'yes'}`,
       'Secrets and internal endpoints are not displayed in group chat.'
     ].join('\n');
   }
@@ -755,6 +804,26 @@ export class TelegramShieldBot {
     return this.store.all().find((event) => event.id === eventId || event.payload?.report_event_id === eventId || event.payload?.target_event_id === eventId) || null;
   }
 
+  findAppealableEvent(message, target = {}) {
+    const targetId = target.id ? String(target.id) : '';
+    const targetUsername = target.username ? String(target.username).replace(/^@/, '').toLowerCase() : '';
+    const replyUser = actorFromMessage(message.reply_to_message || {});
+    const replyId = replyUser.id ? String(replyUser.id) : '';
+    const replyUsername = replyUser.username ? String(replyUser.username).replace(/^@/, '').toLowerCase() : '';
+    const actor = actorFromMessage(message);
+    const actorId = actor.id ? String(actor.id) : '';
+    const actorUsername = actor.username ? String(actor.username).replace(/^@/, '').toLowerCase() : '';
+    const candidates = [[targetId, targetUsername], [replyId, replyUsername], [actorId, actorUsername]];
+    const reviewTypes = new Set(['risk_review_needed', 'risk_action_suppressed', 'report_review_needed', 'fraud_finding', 'ban_executed', 'restrict_executed']);
+    return [...this.store.all()].reverse().find((event) => {
+      if (!reviewTypes.has(event.event_type)) return false;
+      const user = event.user || event.payload?.target || {};
+      const userId = user.id ? String(user.id) : '';
+      const username = user.username ? String(user.username).replace(/^@/, '').toLowerCase() : '';
+      return candidates.some(([id, name]) => (id && userId === id) || (name && username === name));
+    }) || null;
+  }
+
   activeWatchFor(target = {}) {
     const key = targetKey(target);
     if (!key) return null;
@@ -794,6 +863,23 @@ export class TelegramShieldBot {
       .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
   }
 
+  falsePositiveReviewFor(target = {}) {
+    const key = targetKey(target);
+    const id = target.id ? String(target.id) : '';
+    const username = target.username ? String(target.username).replace(/^@/, '').toLowerCase() : '';
+    if (!key && !id && !username) return null;
+    return this.store.all().find((event) => {
+      if (event.event_type !== 'review_overturned') return false;
+      const reviewed = event.payload?.reviewed_target || {};
+      const reviewedKey = event.payload?.reviewed_target_key || targetKey(reviewed);
+      if (key && reviewedKey === key) return true;
+      if (id && reviewed.id && String(reviewed.id) === id) return true;
+      if (username && reviewed.username && String(reviewed.username).replace(/^@/, '').toLowerCase() === username) return true;
+      const original = this.findEvent(event.payload?.target_event_id || '');
+      return Boolean(original && targetKey(original.user || {}) === key);
+    }) || null;
+  }
+
   formatWatchItem(event, index) {
     const target = event.payload?.target || event.user || {};
     const reason = event.payload?.reason || event.payload?.evidence?.[0] || event.payload?.report_reason || 'watching';
@@ -829,6 +915,12 @@ export class TelegramShieldBot {
     if (!filter || filter === 'all' || filter === 'review') addSection('Needs review', reviews, this.formatReviewItem);
     if (sections.length === 2) sections.push('', 'Nothing matching that filter. Try /watchlist all, /watchlist muted, or /watchlist review.');
     return sections.join('\n');
+  }
+
+  formatPendingReviews() {
+    const reviews = this.pendingReviewItems();
+    if (!reviews.length) return 'No pending review items.';
+    return ['Latest pending review items', ...reviews.slice(0, 8).map((event, index) => this.formatReviewItem(event, index + 1))].join('\n\n');
   }
 
   formatWhy(eventId = '') {
@@ -908,6 +1000,64 @@ export class TelegramShieldBot {
       .sort((a, b) => b.events.length - a.events.length || a.key.localeCompare(b.key));
   }
 
+  challengeFailureSummary(windowMs = 24 * 60 * 60 * 1000) {
+    const failureTypes = new Set(['join_challenge_bad_attempt', 'join_challenge_failed_max_attempts', 'join_challenge_expired']);
+    const buckets = new Map();
+    const add = (key, event) => {
+      if (!key) return;
+      buckets.set(key, [...(buckets.get(key) || []), event]);
+    };
+    for (const event of this.recentEvents(windowMs)) {
+      if (!failureTypes.has(event.event_type)) continue;
+      const target = event.payload?.target || event.user || {};
+      add(`target:${event.payload?.target_key || targetKey(target)}`, event);
+      for (const alias of event.payload?.alias_keys || challengeAliasSignals(target)) add(`alias:${alias}`, event);
+    }
+    return [...buckets.entries()]
+      .map(([key, events]) => {
+        const uniqueEvents = [...new Map(events.map((event) => [event.id, event])).values()];
+        const terminal = uniqueEvents.filter((event) => ['join_challenge_failed_max_attempts', 'join_challenge_expired'].includes(event.event_type));
+        const badAttempts = uniqueEvents.filter((event) => event.event_type === 'join_challenge_bad_attempt');
+        const targets = [...new Set(uniqueEvents.map((event) => event.payload?.target_key || targetKey(event.payload?.target || event.user || {})).filter(Boolean))];
+        const aliases = [...new Set(uniqueEvents.flatMap((event) => event.payload?.alias_keys || challengeAliasSignals(event.payload?.target || event.user || {})))];
+        const affectedCommunities = [...new Set(uniqueEvents.map((event) => event.payload?.community_id || event.chat?.id || '').filter(Boolean))];
+        return { key, events: uniqueEvents, terminal, badAttempts, targets, aliases, affectedCommunities };
+      })
+      .filter((item) => item.terminal.length >= (this.config.joinChallengeRepeatFailureThreshold || 2) || (item.terminal.length >= 1 && item.badAttempts.length >= (this.config.joinChallengeRepeatBadAttemptThreshold || 3)))
+      .sort((a, b) => b.events.length - a.events.length || a.key.localeCompare(b.key));
+  }
+
+  async maybeRecordJoinChallengeRepeatFailure(message, triggeringEvent = null) {
+    const signals = this.challengeFailureSummary(24 * 60 * 60 * 1000)
+      .filter((signal) => !this.store.all().some((event) => event.event_type === 'join_challenge_repeat_failure' && event.payload?.campaign_key === signal.key));
+    const signal = signals[0];
+    if (!signal) return null;
+    const relatedIds = signal.events.slice(0, 10).map((event) => event.id);
+    return this.record('join_challenge_repeat_failure', message, {
+      scam_type: 'onboarding_abuse',
+      confidence: 85,
+      local_confidence: 85,
+      campaign_key: signal.key,
+      target_key: signal.targets[0] || triggeringEvent?.payload?.target_key || targetKey(message.from),
+      alias_keys: signal.aliases.slice(0, 20),
+      patterns: ['join_challenge_repeat_failure', 'onboarding_abuse'],
+      challenge_failure_count: signal.terminal.length,
+      bad_attempt_count: signal.badAttempts.length,
+      expired_count: signal.events.filter((event) => event.event_type === 'join_challenge_expired').length,
+      failed_max_attempts_count: signal.events.filter((event) => event.event_type === 'join_challenge_failed_max_attempts').length,
+      affected_community_ids: signal.affectedCommunities,
+      related_event_ids: relatedIds,
+      evidence_root_ids: relatedIds,
+      publication_status: 'shared_memory',
+      lifecycle_stage: 'shared_memory',
+      evidence: [
+        `Repeated DKG join challenge failures for ${signal.key} across ${signal.events.length} recent events`,
+        signal.aliases.length ? `Alias signals: ${signal.aliases.slice(0, 6).join(', ')}` : '',
+        `${signal.terminal.length} terminal failures; ${signal.badAttempts.length} bad attempts`
+      ].filter(Boolean)
+    }, { writeDkg: !this.config.testMode });
+  }
+
   async maybeRecordCampaign(message, risk) {
     if (risk.report_decision && risk.report_decision !== 'accepted') return null;
     const campaigns = this.campaignSummary(24 * 60 * 60 * 1000).filter((campaign) => !this.store.all().some((event) => event.event_type === 'fraud_campaign' && event.payload?.campaign_key === campaign.key));
@@ -939,14 +1089,20 @@ export class TelegramShieldBot {
 
   formatCampaigns() {
     const campaigns = this.campaignSummary(7 * 24 * 60 * 60 * 1000).slice(0, 6);
-    if (!campaigns.length) return 'No repeated fraud campaigns found in recent local memory.';
-    return ['Recent campaign signals:', ...campaigns.map((campaign) => `- ${campaign.key} across ${plural(campaign.events.length, 'event')}: ${campaign.events.slice(0, 4).map((event) => event.id).join(', ')}`)].join('\n');
+    const challengeFailures = this.challengeFailureSummary(7 * 24 * 60 * 60 * 1000).slice(0, 6);
+    if (!campaigns.length && !challengeFailures.length) return 'No repeated fraud campaigns found in recent local memory.';
+    return [
+      'Recent campaign signals:',
+      ...campaigns.map((campaign) => `- ${campaign.key} across ${plural(campaign.events.length, 'event')}: ${campaign.events.slice(0, 4).map((event) => event.id).join(', ')}`),
+      ...challengeFailures.map((signal) => `- join challenge repeat ${signal.key} across ${plural(signal.events.length, 'event')}: ${signal.events.slice(0, 4).map((event) => event.id).join(', ')}`)
+    ].join('\n');
   }
 
   formatDigest() {
     const events = this.recentEvents(24 * 60 * 60 * 1000);
     const count = (types) => events.filter((event) => types.includes(event.event_type)).length;
     const campaigns = this.campaignSummary(24 * 60 * 60 * 1000);
+    const challengeFailures = this.challengeFailureSummary(24 * 60 * 60 * 1000);
     const high = events.filter((event) => Number(event.payload?.confidence || 0) >= 80).length;
     const watches = this.activeWatches();
     const restrictions = this.recentRestrictions();
@@ -958,6 +1114,7 @@ export class TelegramShieldBot {
       `- ${plural(events.length, 'local event')}; ${plural(high, 'high-confidence signal')}`,
       `- ${plural(count(['ban_executed']), 'ban')}; ${plural(count(['restrict_executed']), 'temp mute')}; ${plural(count(['report_submitted']), 'accepted report')}`,
       `- ${plural(count(['appeal_submitted']), 'appeal')}; ${plural(count(['review_upheld', 'review_overturned']), 'review decision')}`,
+      `- ${plural(challengeFailures.length, 'repeated join-challenge failure cluster')}`,
       '',
       'Watchlist',
       `- ${plural(watches.length, 'active watch')}; ${plural(restrictions.length, 'active temp mute')}; ${plural(reviews.length, 'pending review item')}`,
@@ -982,6 +1139,136 @@ export class TelegramShieldBot {
 
   canPublishFindingFromRisk(risk = {}) {
     return Number(risk.confidence || 0) >= 80 && Number(risk.local_confidence || 0) >= 60 && (risk.evidence?.length || 0) > 0;
+  }
+
+  redactArtifactText(text = '') {
+    const max = this.config.wmArtifactMaxTextChars || 700;
+    let value = boundedText(text, max);
+    if (this.config.wmArtifactRedact === false) return value;
+    value = value.replace(/0x[a-fA-F0-9]{40}/g, (wallet) => `${wallet.slice(0, 8)}...${wallet.slice(-6)}`);
+    value = value.replace(/\b(?:bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}\b/g, (wallet) => `${wallet.slice(0, 8)}...${wallet.slice(-6)}`);
+    value = value.replace(/\b\d{7,}\b/g, '[telegram-id]');
+    return value;
+  }
+
+  artifactQuality({ risk = {}, text = '', artifactKind = '' } = {}) {
+    let score = 0;
+    const confidence = Number(risk.local_confidence || risk.confidence || 0);
+    if (confidence >= 40) score += 25;
+    if (confidence >= 60) score += 20;
+    if ((risk.domains || extractDomains(text)).length) score += 20;
+    if ((risk.wallets || extractWallets(text)).length) score += 20;
+    if ((risk.patterns || extractPatterns(text)).length) score += 15;
+    if ((risk.dkg_evidence || []).length) score += 20;
+    if (/report|warn|alert|fake|impersonat|phish|scam|wallet|airdrop|support|admin/i.test(text)) score += 10;
+    if (/false positive|not scam|legit|overturn|appeal/i.test(text) || artifactKind === 'false_positive_signal') score += 20;
+    if (artifactKind === 'benign_conversation_flow') score += 45;
+    return Math.min(100, score);
+  }
+
+  shouldWriteConversationArtifact(risk = {}, quality = 0, force = false) {
+    if (this.config.testMode || this.config.wmArtifacts === false) return false;
+    if (force) return true;
+    if (quality >= 70) return true;
+    return Boolean(this.config.wmArtifactShareLowConfidence && Number(risk.local_confidence || risk.confidence || 0) >= (this.config.wmArtifactMinConfidence || 40));
+  }
+
+  commitReceiptId({ artifactKind = '', quality = 0, risk = {}, sourceEventIds = [], text = '' } = {}) {
+    const basis = [artifactKind, quality, risk.scam_type || '', risk.confidence || 0, sourceEventIds.join(','), textFingerprint(text)].join(':');
+    return `commit:${randomUUID().slice(0, 8)}:${Buffer.from(basis).toString('base64url').slice(0, 16)}`;
+  }
+
+  async recordConversationArtifact(message, { risk = {}, text = '', artifactKind = 'conversation_artifact', conversationRole = 'observer', sourceEventIds = [], operatorNote = '', forceDkg = false } = {}) {
+    if (this.config.wmArtifacts === false) return null;
+    const rawText = boundedText(text || message.text || '', this.config.wmArtifactMaxTextChars || 700);
+    const domains = risk.domains?.length ? risk.domains : extractDomains(rawText);
+    const wallets = risk.wallets?.length ? risk.wallets : extractWallets(rawText);
+    const patterns = risk.patterns?.length ? risk.patterns : extractPatterns(rawText);
+    const quality = this.artifactQuality({ risk: { ...risk, domains, wallets, patterns }, text: rawText, artifactKind });
+    const confidence = Number(risk.local_confidence || risk.confidence || 0);
+    const useful = forceDkg || quality >= 40 || confidence >= (this.config.wmArtifactMinConfidence || 40) || domains.length || wallets.length || patterns.length;
+    if (!useful) return null;
+    const commitStamped = this.shouldWriteConversationArtifact(risk, quality, forceDkg);
+    const commitReceiptId = commitStamped ? this.commitReceiptId({ artifactKind, quality, risk, sourceEventIds, text: rawText }) : '';
+    const normalized = this.redactArtifactText(rawText).toLowerCase().replace(/https?:\/\/\S+/g, '[url]').replace(/\s+/g, ' ').trim();
+    return this.record('conversation_artifact', message, {
+      ...risk,
+      artifact_kind: artifactKind,
+      artifact_quality: quality,
+      conversation_role: conversationRole,
+      redaction_level: this.config.wmArtifactRedact === false ? 'bounded_raw' : 'redacted',
+      normalized_text: normalized,
+      message_text: this.redactArtifactText(rawText),
+      text_fingerprint: textFingerprint(rawText),
+      source_event_ids: sourceEventIds.filter(Boolean),
+      operator_note: operatorNote,
+      learning_value: quality >= 70 ? 'high' : quality >= 45 ? 'medium' : 'low',
+      teaches_tactics: patterns,
+      domains,
+      wallets,
+      patterns,
+      commit_receipt_id: commitReceiptId,
+      commit_policy: commitStamped ? (forceDkg ? 'human_or_admin_verified' : 'artifact_quality_threshold') : 'draft_only',
+      commit_authority: commitStamped ? (forceDkg ? 'admin_review' : 'policy_rule') : '',
+      publication_status: commitStamped ? 'shared_memory' : 'working_memory',
+      lifecycle_stage: commitStamped ? 'shared_memory' : 'working_memory_draft',
+      evidence: [
+        ...(risk.evidence || []),
+        `conversation artifact ${artifactKind} captured for scam/fraud working-memory learning`,
+        commitStamped ? `commit receipt ${commitReceiptId} authorizes Shared Memory projection` : 'draft only; not eligible for Shared Memory until committed',
+        operatorNote ? `operator note: ${operatorNote}` : ''
+      ].filter(Boolean)
+    }, { writeDkg: commitStamped });
+  }
+
+  async recordBenignConversationFlow(message, risk = {}) {
+    if (risk.confidence >= (this.config.warnThreshold ?? 60)) return null;
+    const text = message.text || '';
+    if (!BENIGN_FLOW_RE.test(text)) return null;
+    return this.recordConversationArtifact(message, {
+      risk: {
+        ...risk,
+        scam_type: 'benign_conversation_flow',
+        evidence: [...(risk.evidence || []), 'low-risk governance or technical conversation captured as non-fraud contrast example']
+      },
+      text,
+      artifactKind: 'benign_conversation_flow',
+      conversationRole: 'observer',
+      operatorNote: 'non-fraud flow example for distinguishing technical governance discussion from impersonation or scam claims'
+    });
+  }
+
+  shouldShareChannelObservation(message, risk = {}) {
+    if (this.config.channelMemory === false || this.config.testMode) return false;
+    if (!PUBLIC_CHAT_TYPES.has(message.chat?.type || '')) return false;
+    if (message.from?.is_bot === true) return false;
+    const confidence = Number(risk.local_confidence || risk.confidence || 0);
+    if (confidence < (this.config.channelMemoryMinConfidence || 80)) return false;
+    return hasBoundedRawMessageEvidence(message, risk, message.text || '');
+  }
+
+  async recordChannelObservation(message, risk = {}, observationType = 'high_confidence_channel_message') {
+    if (!this.shouldShareChannelObservation(message, risk)) return null;
+    const text = boundedText(message.text || '', this.config.channelMemoryMaxTextChars || 1000);
+    return this.record('channel_observation', message, {
+      ...risk,
+      observation_type: observationType,
+      target_key: targetKey(actorFromMessage(message)),
+      target: actorFromMessage(message),
+      message_id: message.message_id || '',
+      reply_to_message_id: message.reply_to_message?.message_id || '',
+      message_text: text,
+      text_fingerprint: textFingerprint(text),
+      domains: risk.domains?.length ? risk.domains : extractDomains(text),
+      wallets: risk.wallets?.length ? risk.wallets : extractWallets(text),
+      patterns: risk.patterns?.length ? risk.patterns : extractPatterns(text),
+      publication_status: 'shared_memory',
+      lifecycle_stage: 'shared_memory',
+      evidence: [
+        ...(risk.evidence || []),
+        'high-confidence public channel message stored in DKG v10 Shared Memory for spam/scam/fraud pattern analysis'
+      ]
+    }, { writeDkg: true });
   }
 
   shouldSendConversation(message, target, risk, explicit = false) {
@@ -1093,8 +1380,9 @@ export class TelegramShieldBot {
   async handleDmReport(message, explicitText = '') {
     const report = await this.buildDmReport(message, explicitText);
     const eventType = report.accepted ? 'dm_scam_report' : 'report_review_needed';
-    const event = await this.record(eventType, message, report.payload, { writeDkg: report.accepted });
-    if (report.accepted) await this.maybeRecordCampaign({ ...message, text: report.payload.evidence.join('\n') }, report.payload);
+      const event = await this.record(eventType, message, report.payload, { writeDkg: report.accepted });
+      if (!report.accepted) await this.recordConversationArtifact(message, { risk: report.payload, text: explicitText || evidenceText(message), artifactKind: 'weak_dm_report_observation', conversationRole: 'reporter', sourceEventIds: [event.id] });
+      if (report.accepted) await this.maybeRecordCampaign({ ...message, text: report.payload.evidence.join('\n') }, report.payload);
     await this.send(message.chat.id, formatDmReportReply(event, report), { reply_to_message_id: message.message_id });
     return event;
   }
@@ -1105,7 +1393,9 @@ export class TelegramShieldBot {
     const dkgIntel = await this.dkg.queryRiskIndicators({ username: targetUser.username, userId: targetUser.id, aliases: actorAliases(targetUser), text: bounded });
     const adminUsernames = (await this.adminIdentities(message.chat.id)).filter((id) => !/^\d+$/.test(id));
     const renameCopycat = this.adminRenameCopycat(message.chat, targetUser, adminUsernames);
-    const analysis = this.analyzer({ text: bounded, user: { ...targetUser, adminUsernames, adminRenameCopycat: Boolean(renameCopycat) }, globalIntel: dkgIntel });
+    const falsePositiveReview = this.falsePositiveReviewFor(targetUser);
+    const effectiveIntel = falsePositiveReview ? { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [], artifactEvidence: [] } : dkgIntel;
+    const analysis = this.analyzer({ text: bounded, user: { ...targetUser, adminUsernames, adminRenameCopycat: Boolean(renameCopycat) }, globalIntel: effectiveIntel });
     if (renameCopycat) {
       analysis.confidence = Math.max(analysis.confidence || 0, this.config.actionThreshold);
       analysis.is_scam = true;
@@ -1118,7 +1408,20 @@ export class TelegramShieldBot {
       analysis.confidence = Math.min(99, Math.max(analysis.confidence || 0, (analysis.confidence || 0) + 15));
       analysis.evidence = [...(analysis.evidence || []), `Active watchlist entry ${watch.id}: ${watch.payload?.reason || 'admin watch'}`];
     }
-    return combineRisk({ analysis, dkgIntel, threshold: this.config.actionThreshold });
+    const risk = combineRisk({ analysis, dkgIntel: effectiveIntel, threshold: this.config.actionThreshold });
+    if (!falsePositiveReview) return risk;
+    return {
+      ...risk,
+      is_scam: false,
+      confidence: Math.min(risk.confidence || 0, 10),
+      local_confidence: Math.min(risk.local_confidence || 0, 10),
+      dkg_confidence: 0,
+      recommended_action: 'ignore',
+      dkg_backed: false,
+      dkg_evidence: [],
+      dkg_artifact_evidence: [],
+      evidence: [...(risk.evidence || []), `admin false-positive review ${falsePositiveReview.id} suppresses autonomous enforcement`]
+    };
   }
 
   reportHistory(reporter, target) {
@@ -1240,37 +1543,16 @@ export class TelegramShieldBot {
 
     const canDelete = this.config.autoDelete !== false && await this.hasDeleteRights(message.chat.id);
     const deletedMessage = canDelete ? await this.deleteMessage(message.chat.id, message.message_id).then(() => true).catch(() => false) : false;
-    const banThreshold = this.config.banThreshold ?? this.config.actionThreshold;
-    const restrictThreshold = this.config.restrictThreshold ?? 75;
-
-    if (risk.confidence >= banThreshold && this.config.autoBan && await this.hasBanRights(message.chat.id)) {
-      const finding = await this.publishHighConfidenceFinding(message, risk);
-      await this.ban(message.chat.id, actorFromMessage(message).id);
-      await this.record('ban_executed', message, {
-        ...risk,
-        evidence: [...risk.evidence, `auto-ban threshold ${banThreshold}% met`, deletedMessage ? 'triggering message removed' : 'triggering message removal unavailable', `finding event ${finding.id}`]
-      });
-      await this.send(message.chat.id, `tracabot banned ${actorFromMessage(message).username || actorFromMessage(message).id}. ${formatRiskAssessment({ target: actorFromMessage(message), risk })} DKG finding: ${finding.id}`, { reply_to_message_id: message.message_id });
-      return finding;
-    }
-
-    if (risk.confidence >= restrictThreshold && this.config.autoRestrict !== false && await this.hasRestrictRights(message.chat.id)) {
-      const finding = await this.publishHighConfidenceFinding(message, risk);
-      const restrictedUntil = Math.floor(Date.now() / 1000) + 24 * 60 * 60;
-      await this.restrict(message.chat.id, actorFromMessage(message).id, restrictedUntil);
-      await this.record('restrict_executed', message, {
-        ...risk,
-        restricted_until: new Date(restrictedUntil * 1000).toISOString(),
-        action_duration_seconds: 24 * 60 * 60,
-        evidence: [...risk.evidence, `auto-restrict threshold ${restrictThreshold}% met`, deletedMessage ? 'triggering message removed' : 'triggering message removal unavailable', `finding event ${finding.id}`]
-      });
-      await this.send(message.chat.id, `tracabot restricted ${actorFromMessage(message).username || actorFromMessage(message).id}. ${formatRiskAssessment({ target: actorFromMessage(message), risk })} DKG finding: ${finding.id}`, { reply_to_message_id: message.message_id });
-      return finding;
-    }
-
+    const finding = risk.confidence >= (this.config.actionThreshold ?? 85) ? await this.publishHighConfidenceFinding(message, {
+      ...risk,
+      recommended_action: 'admin_review',
+      evidence: [...risk.evidence, deletedMessage ? 'triggering message removed' : 'triggering message removal unavailable', 'auto ban/restrict disabled for message classifier decisions; admin review required']
+    }) : null;
     const review = await this.record('risk_review_needed', message, {
       ...risk,
-      evidence: [...risk.evidence, deletedMessage ? 'triggering message removed' : 'no autonomous restriction available']
+      recommended_action: 'admin_review',
+      finding_event_id: finding?.id || '',
+      evidence: [...risk.evidence, deletedMessage ? 'triggering message removed' : 'triggering message removal unavailable', 'auto ban/restrict disabled for message classifier decisions; admin review required']
     }, { writeDkg: false });
     await this.alertAdmins(message, risk, review);
     return review;
@@ -1284,30 +1566,30 @@ export class TelegramShieldBot {
         await this.sendEphemeral(chatId, '⚠️ /status is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
         return;
       }
-      await this.send(chatId, await this.formatStatus(message), { reply_to_message_id: message.message_id });
+      await this.sendCommandReply(chatId, await this.formatStatus(message), { reply_to_message_id: message.message_id });
       return;
     }
     if (text.startsWith('/stats')) {
       if (/\bcampaigns?\b/i.test(text)) {
-        await this.send(chatId, this.formatCampaigns(), { reply_to_message_id: message.message_id });
+        await this.sendCommandReply(chatId, this.formatCampaigns(), { reply_to_message_id: message.message_id });
         return;
       }
       const stats = await this.dkg.getStats(7);
       const wantsSources = /\b(source|sources|evidence|receipts)\b/i.test(text);
-      await this.send(chatId, wantsSources ? formatStatsSourcesReply(stats) : formatStatsReply(stats));
+      await this.sendCommandReply(chatId, wantsSources ? formatStatsSourcesReply(stats) : formatStatsReply(stats));
       return;
     }
     if (text.startsWith('/help') || text.startsWith('/start')) {
-      await this.send(chatId, this.formatHelp(), { reply_to_message_id: message.message_id });
+      await this.sendCommandReply(chatId, this.formatHelp(), { reply_to_message_id: message.message_id });
       return;
     }
     if (text.startsWith('/why')) {
       const eventId = this.commandText(message, 'why').split(/\s+/)[0] || '';
-      await this.send(chatId, this.formatWhy(eventId), { reply_to_message_id: message.message_id });
+      await this.sendCommandReply(chatId, this.formatWhy(eventId), { reply_to_message_id: message.message_id });
       return;
     }
     if (text.startsWith('/digest')) {
-      await this.send(chatId, this.formatDigest(), { reply_to_message_id: message.message_id });
+      await this.sendCommandReply(chatId, this.formatDigest(), { reply_to_message_id: message.message_id });
       return;
     }
     if (text.startsWith('/watchlist')) {
@@ -1316,7 +1598,7 @@ export class TelegramShieldBot {
         return;
       }
       const filter = this.commandText(message, 'watchlist').split(/\s+/)[0]?.toLowerCase() || '';
-      await this.send(chatId, this.formatWatchlist(filter), { reply_to_message_id: message.message_id, parse_mode: 'HTML', disable_web_page_preview: true });
+      await this.sendCommandReply(chatId, this.formatWatchlist(filter), { reply_to_message_id: message.message_id, parse_mode: 'HTML', disable_web_page_preview: true });
       return;
     }
     if (text.startsWith('/challenge')) {
@@ -1330,7 +1612,7 @@ export class TelegramShieldBot {
         return;
       }
       if (arg === 'status') {
-        await this.send(chatId, `Join challenge is ${this.chatJoinChallengeEnabled(chatId) ? 'on' : 'off'} for this chat. Use /challenge on or /challenge off to change it.`, { reply_to_message_id: message.message_id });
+        await this.sendCommandReply(chatId, `Join challenge is ${this.chatJoinChallengeEnabled(chatId) ? 'on' : 'off'} for this chat. Use /challenge on or /challenge off to change it.`, { reply_to_message_id: message.message_id });
         return;
       }
       const enabled = arg === 'on';
@@ -1339,7 +1621,7 @@ export class TelegramShieldBot {
         moderator: actorFromMessage(message),
         evidence: [`admin turned new-user join challenge ${enabled ? 'on' : 'off'} for this chat`]
       }, { writeDkg: false });
-      await this.send(chatId, `Join challenge is now ${enabled ? 'on' : 'off'} for this chat.`, { reply_to_message_id: message.message_id });
+      await this.sendCommandReply(chatId, `Join challenge is now ${enabled ? 'on' : 'off'} for this chat.`, { reply_to_message_id: message.message_id });
       return;
     }
     if (text.startsWith('/watch')) {
@@ -1357,7 +1639,7 @@ export class TelegramShieldBot {
         moderator: actorFromMessage(message),
         evidence
       }, { writeDkg: false });
-      await this.send(chatId, `👀 Watching ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}. Event: ${event.id}. Reason: ${escapeHtml(reason)}. This increases scrutiny only; it will not ban by itself.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
+      await this.sendCommandReply(chatId, `👀 Watching ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}. Event: ${event.id}. Reason: ${escapeHtml(reason)}. This increases scrutiny only; it will not ban by itself.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
       return;
     }
     if (text.startsWith('/unwatch')) {
@@ -1375,19 +1657,25 @@ export class TelegramShieldBot {
         moderator: actorFromMessage(message),
         evidence
       }, { writeDkg: false });
-      await this.send(chatId, `✅ Removed watch for ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}. Event: ${event.id}. Reason: ${escapeHtml(reason)}.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
+      await this.sendCommandReply(chatId, `✅ Removed watch for ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}. Event: ${event.id}. Reason: ${escapeHtml(reason)}.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
       return;
     }
     if (text.startsWith('/appeal')) {
-      const [eventId, ...reasonParts] = this.commandText(message, 'appeal').split(/\s+/);
-      const reason = reasonParts.join(' ').trim() || 'appeal submitted';
+      const argText = this.commandText(message, 'appeal');
+      const [firstToken, ...rest] = argText.split(/\s+/);
+      const explicitEvent = this.findEvent(firstToken || '');
+      const target = this.resolveCommandTarget(message, 'appeal').target;
+      const reviewedEvent = explicitEvent || this.findAppealableEvent(message, target);
+      const reason = (explicitEvent ? rest.join(' ') : argText).trim() || 'appeal submitted';
       const event = await this.record('appeal_submitted', message, {
-        target_event_id: eventId || '',
+        target_event_id: reviewedEvent?.id || firstToken || '',
         reason,
         appellant: actorFromMessage(message),
-        evidence: [`appeal submitted for ${eventId || 'unknown event'}: ${reason}`]
+        reviewed_target: reviewedEvent?.user || target,
+        reviewed_target_key: targetKey(reviewedEvent?.user || target),
+        evidence: [`appeal submitted for ${reviewedEvent?.id || firstToken || 'latest matching event'}: ${reason}`]
       });
-      await this.send(chatId, `📝 Appeal logged to DKG as ${event.id}. Next: admins can run /review ${eventId || '<event-id>'} uphold reason or /review ${eventId || '<event-id>'} overturn reason.`, { reply_to_message_id: message.message_id });
+      await this.sendCommandReply(chatId, `📝 Appeal logged to DKG as ${event.id}. Admins can reply with /review overturn reason or /review uphold reason.`, { reply_to_message_id: message.message_id });
       return;
     }
     if (text.startsWith('/review')) {
@@ -1395,38 +1683,57 @@ export class TelegramShieldBot {
         await this.sendEphemeral(chatId, '⚠️ /review is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
         return;
       }
-      const [eventId, decisionRaw, ...reasonParts] = this.commandText(message, 'review').split(/\s+/);
+      const parts = this.commandText(message, 'review').split(/\s+/).filter(Boolean);
+      if (!parts.length) {
+        await this.sendCommandReply(chatId, this.formatPendingReviews(), { reply_to_message_id: message.message_id, parse_mode: 'HTML', disable_web_page_preview: true });
+        return;
+      }
+      const decisionIndex = parts.findIndex((part) => /^(uphold|upheld|overturn|overturned|reject)$/i.test(part));
+      const eventOrTarget = decisionIndex > 0 ? parts.slice(0, decisionIndex).join(' ') : '';
+      const decisionRaw = decisionIndex >= 0 ? parts[decisionIndex] : '';
+      const reasonParts = decisionIndex >= 0 ? parts.slice(decisionIndex + 1) : [];
       const decision = /^(uphold|upheld)$/i.test(decisionRaw || '') ? 'upheld' : /^(overturn|overturned|reject)$/i.test(decisionRaw || '') ? 'overturned' : '';
-      if (!eventId || !decision) {
-        await this.sendEphemeral(chatId, 'Usage: /review <event-id> uphold reason or /review <event-id> overturn reason', { reply_to_message_id: message.message_id });
+      const target = eventOrTarget ? this.resolveCommandTarget({ ...message, text: `/review ${eventOrTarget}` }, 'review').target : this.resolveCommandTarget(message, 'review').target;
+      const reviewedEvent = this.findEvent(eventOrTarget) || this.findAppealableEvent(message, target);
+      if (!reviewedEvent || !decision) {
+        await this.sendEphemeral(chatId, 'Usage: /review [@user|event-id] uphold reason or /review [@user|event-id] overturn reason. Reply to a user message also works.', { reply_to_message_id: message.message_id });
         return;
       }
       const reason = reasonParts.join(' ').trim() || `review ${decision}`;
       const eventType = decision === 'upheld' ? 'review_upheld' : 'review_overturned';
+      const reviewedTarget = reviewedEvent?.user || reviewedEvent?.payload?.target || {};
       const event = await this.record(eventType, message, {
-        target_event_id: eventId,
+        target_event_id: reviewedEvent.id,
         review_decision: decision,
         reason,
         reviewer: actorFromMessage(message),
-        evidence: [`admin review ${decision} ${eventId}: ${reason}`]
+        reviewed_target: reviewedTarget,
+        reviewed_target_key: targetKey(reviewedTarget),
+        false_positive_reason: decision === 'overturned' ? reason : '',
+        evidence: [`admin review ${decision} ${reviewedEvent.id}: ${reason}`]
       });
-      await this.send(chatId, `✅ Review ${decision}. I saved the review decision to DKG fraud memory. Reason: ${reason}.`, { reply_to_message_id: message.message_id });
+      if (decision === 'overturned') await this.recordConversationArtifact(message, { risk: { confidence: 80, local_confidence: 80, scam_type: 'false_positive', evidence: [`false positive correction for ${reviewedEvent.id}: ${reason}`] }, text: reason, artifactKind: 'false_positive_signal', conversationRole: 'moderator', sourceEventIds: [reviewedEvent.id, event.id], operatorNote: reason, forceDkg: true });
+      await this.sendCommandReply(chatId, `✅ Review ${decision}. I saved the review decision to DKG fraud memory. Reason: ${reason}.`, { reply_to_message_id: message.message_id });
       return;
     }
     if (text.startsWith('/scan')) {
+      if (await this.rejectNonOwnerPrivateReport(message)) return;
       const { target, text: targetText } = this.resolveCommandTarget(message, 'scan');
       const risk = await this.assess({ ...message, from: target, text: targetText }, target, targetText);
       const event = await this.record('risk_query', { ...message, from: target }, risk);
+      await this.recordConversationArtifact({ ...message, from: target }, { risk, text: targetText || message.text, artifactKind: 'safety_question', conversationRole: 'questioner', sourceEventIds: [event.id] });
       const finding = risk.confidence >= 80 ? await this.publishHighConfidenceFinding({ ...message, from: target, text: targetText }, risk) : null;
       await this.maybeRecordCampaign({ ...message, from: target, text: targetText }, risk);
-      await this.send(chatId, formatScanReply({ target, risk, eventId: event.id, findingId: finding?.id }), { reply_to_message_id: message.message_id });
+      await this.sendCommandReply(chatId, formatScanReply({ target, risk, eventId: event.id, findingId: finding?.id }), { reply_to_message_id: message.message_id });
       return;
     }
     if (text.startsWith('/dmreport')) {
+      if (await this.rejectNonOwnerPrivateReport(message)) return;
       await this.handleDmReport(message, this.commandText(message, 'dmreport') || evidenceText(message));
       return;
     }
     if (text.startsWith('/report')) {
+      if (await this.rejectNonOwnerPrivateReport(message)) return;
       const { target, text: targetText, observedContext } = this.resolveReportTarget(message);
       const risk = await this.assess({ ...message, from: target, text: targetText }, target, targetText);
       const reportDecision = this.evaluateReport({ message, target, targetText, risk });
@@ -1462,8 +1769,9 @@ export class TelegramShieldBot {
       };
       if (!reportDecision.accepted || reportDecision.decision !== 'accepted') {
         const event = await this.record(reportDecision.decision === 'weak' ? 'report_review_needed' : 'report_rejected', { ...message, from: target }, reportPayload, { writeDkg: false });
+        if (reportDecision.decision === 'weak') await this.recordConversationArtifact({ ...message, from: target }, { risk: reportPayload, text: targetText || evidenceText(message), artifactKind: 'weak_report_observation', conversationRole: 'reporter', sourceEventIds: [event.id] });
         await this.maybeRecordCampaign({ ...message, from: target, text: targetText }, reportPayload);
-        await this.send(chatId, formatReportReply(event, reportDecision), { reply_to_message_id: message.message_id });
+        await this.sendCommandReply(chatId, formatReportReply(event, reportDecision), { reply_to_message_id: message.message_id });
         return;
       }
       const event = await this.record('report_submitted', { ...message, from: target }, reportPayload);
@@ -1476,7 +1784,7 @@ export class TelegramShieldBot {
       } else if (reportLocalConfidence >= 60 && reportConfidence >= this.config.actionThreshold) {
         await this.publishHighConfidenceFinding({ ...message, from: target, text: targetText }, reportPayload);
       }
-      await this.send(chatId, formatReportReply(event, reportDecision), { reply_to_message_id: message.message_id });
+      await this.sendCommandReply(chatId, formatReportReply(event, reportDecision), { reply_to_message_id: message.message_id });
       return;
     }
     if (text.startsWith('/ban')) {
@@ -1524,6 +1832,7 @@ export class TelegramShieldBot {
         }
       }
       await this.ban(chatId, replyUser.id);
+      await this.sendCommandReply(chatId, `${formatBanReply(replyUser, '')} ${repliedMessageDeleted ? 'Removed the replied scam message.' : replyMessageId ? 'Could not remove the replied message.' : 'No replied message to remove.'} DKG evidence logging is continuing.`, { reply_to_message_id: message.message_id });
       const event = await this.record('ban_executed', { ...message, from: replyUser }, {
         ...risk,
         reason,
@@ -1535,7 +1844,6 @@ export class TelegramShieldBot {
         evidence: [...risk.evidence, reason, replyUser.sangmata?.evidence || '', repliedMessageDeleted ? 'replied scam message deleted' : replyMessageId ? 'replied scam message deletion unavailable' : '', 'manual /ban command'].filter(Boolean)
       });
       await this.maybeRecordCampaign({ ...message, from: replyUser, text: context }, risk);
-      await this.send(chatId, `${formatBanReply(replyUser, event.id)} ${repliedMessageDeleted ? 'Removed the replied scam message.' : replyMessageId ? 'Could not remove the replied message.' : 'No replied message to remove.'}`);
     }
   }
 
@@ -1617,13 +1925,14 @@ export class TelegramShieldBot {
     const expiresAt = Date.now() + (this.config.joinChallengeTtlSeconds || 60) * 1000;
     const key = this.challengeKey(chatId, member.id);
     const canRestrict = true;
-    await this.allowTextOnly(chatId, member.id, Math.floor(expiresAt / 1000)).catch(() => null);
+    await this.restrict(chatId, member.id, Math.floor(expiresAt / 1000)).catch(() => null);
     const qa = this.selectJoinChallengeQa(chatId, member);
     const sent = await this.send(chatId, await this.challengeText(chatId, member), { parse_mode: 'HTML', disable_web_page_preview: true });
     this.joinChallenges.set(key, { chat: message.chat, user: member, startedAt: Date.now(), expiresAt, messageId: sent?.message_id || '', attempts: 0, mode: qa ? 'qa' : 'ual', qa });
     await this.record('join_challenge_started', { ...message, from: member }, {
       target: member,
       target_key: targetKey(member),
+      alias_keys: challengeAliasSignals(member),
       challenge_type: qa ? 'dkg_asset_qa' : 'dkg_ual',
       challenge_id: qa?.id || '',
       ttl_seconds: this.config.joinChallengeTtlSeconds || 60,
@@ -1709,9 +2018,10 @@ export class TelegramShieldBot {
     const chatId = challenge.chat.id;
     this.joinChallenges.delete(this.challengeKey(chatId, challenge.user.id));
     const actionApplied = await this.applyJoinChallengeFailureAction(challenge, 'max_attempts');
-    await this.record('join_challenge_failed_max_attempts', { ...message, chat: challenge.chat, from: challenge.user }, {
+    const event = await this.record('join_challenge_failed_max_attempts', { ...message, chat: challenge.chat, from: challenge.user }, {
       target: challenge.user,
       target_key: targetKey(challenge.user),
+      alias_keys: challengeAliasSignals(challenge.user),
       action: this.config.joinChallengeAction || 'kick',
       action_applied: actionApplied,
       attempts: challenge.attempts,
@@ -1719,6 +2029,7 @@ export class TelegramShieldBot {
       verification_channel: options.dm ? 'dm' : 'group',
       evidence: [`new user failed DKG join challenge after ${challenge.attempts} attempts`]
     }, { writeDkg: false });
+    await this.maybeRecordJoinChallengeRepeatFailure({ ...message, chat: challenge.chat, from: challenge.user }, event);
     if (challenge.messageId && await this.hasDeleteRights(chatId)) await this.deleteMessage(chatId, challenge.messageId).catch(() => null);
     await this.sendEphemeral(chatId, `${userMention(challenge.user)} did not complete DKG verification after ${challenge.attempts} attempts.`, { parse_mode: 'HTML' }, this.config.successMessageTtlSeconds || 45).catch(() => null);
     if (options.dm && options.sourceChatId) await this.send(options.sourceChatId, 'Verification failed too many times. Ask a group admin to reset your access.', { private: true }).catch(() => null);
@@ -1731,6 +2042,30 @@ export class TelegramShieldBot {
     const replyChatId = options.sourceChatId || chatId;
     const key = this.challengeKey(chatId, message.from.id);
     const shouldRemindInGroup = !options.dm && !challenge.groupReminderSent;
+    if (!options.dm) {
+      challenge.attempts += 1;
+      if (this.config.joinChallengeDeleteBadAttempts !== false && await this.hasDeleteRights(chatId)) {
+        await this.deleteMessage(chatId, message.message_id).catch(() => null);
+      }
+      await this.record('join_challenge_bad_attempt', message, {
+        target: message.from,
+        target_key: targetKey(message.from),
+        alias_keys: challengeAliasSignals(message.from),
+        attempts: challenge.attempts,
+        challenge_type: challenge.mode === 'qa' ? 'dkg_asset_qa' : 'dkg_ual',
+        challenge_id: challenge.qa?.id || '',
+        verification_channel: 'group',
+        evidence: ['pending join challenge user tried to answer in group instead of DM verification link']
+      }, { writeDkg: false });
+      if (await this.maybeFailJoinChallenge(message, challenge, options)) return true;
+      if (shouldRemindInGroup) {
+        challenge.groupReminderSent = true;
+        const username = await this.botUsername().catch(() => 'tracethembot');
+        const dmLink = `https://t.me/${username}?start=${verifyStartPayload(chatId, message.from.id)}`;
+        await this.sendEphemeral(replyChatId, `${userMention(message.from)}, verification only works in DM. Use your verification link: ${dmLink}`, { reply_to_message_id: challenge.messageId || message.message_id, parse_mode: 'HTML', disable_web_page_preview: true }, this.config.challengeMessageTtlSeconds || 120);
+      }
+      return true;
+    }
     if (challenge.mode === 'qa') {
       const normalized = normalizeChallengeAnswer(text);
       const accepted = (challenge.qa?.answers || []).map(normalizeChallengeAnswer).filter(Boolean);
@@ -1742,6 +2077,7 @@ export class TelegramShieldBot {
         await this.record('join_challenge_bad_attempt', message, {
           target: message.from,
           target_key: targetKey(message.from),
+          alias_keys: challengeAliasSignals(message.from),
           attempts: challenge.attempts,
           challenge_type: 'dkg_asset_qa',
           challenge_id: challenge.qa?.id || '',
@@ -1767,6 +2103,7 @@ export class TelegramShieldBot {
       await this.record('join_challenge_bad_attempt', message, {
         target: message.from,
         target_key: targetKey(message.from),
+        alias_keys: challengeAliasSignals(message.from),
         attempts: challenge.attempts,
         verification_channel: options.dm ? 'dm' : 'group',
         evidence: ['pending join challenge user sent an invalid Knowledge Asset address first message']
@@ -1789,6 +2126,7 @@ export class TelegramShieldBot {
       await this.record('join_challenge_bad_attempt', message, {
         target: message.from,
         target_key: targetKey(message.from),
+        alias_keys: challengeAliasSignals(message.from),
         attempts: challenge.attempts,
         ual: text.slice(0, 240),
         validation_reason: validation.reason,
@@ -1815,12 +2153,13 @@ export class TelegramShieldBot {
     this.markJoinChallengeSolved(chatId, message.from.id);
     if (await this.hasRestrictRights(chatId)) await this.restoreMemberPermissions(chatId, message.from.id).catch(() => null);
     if (this.config.joinChallengeDeleteOnPass !== false && await this.hasDeleteRights(chatId)) {
-      await this.deleteMessage(chatId, message.message_id).catch(() => null);
+      if (!options.dm) await this.deleteMessage(chatId, message.message_id).catch(() => null);
       if (challenge.messageId) await this.deleteMessage(chatId, challenge.messageId).catch(() => null);
     }
     await this.record('join_challenge_solved', message, {
       target: message.from,
       target_key: targetKey(message.from),
+      alias_keys: challengeAliasSignals(message.from),
       ual: result.ual || '',
       answer: result.answer || '',
       validation_reason: result.validationReason || '',
@@ -1862,10 +2201,12 @@ export class TelegramShieldBot {
       return;
     }
     if (this.isDmReportMention(message)) {
+      if (await this.rejectNonOwnerPrivateReport(message)) return;
       await this.handleDmReport(message, evidenceText(message));
       return;
     }
     if (this.isRiskQuery(message)) {
+      if (await this.rejectNonOwnerPrivateReport(message)) return;
       const targetMessage = message.reply_to_message || message;
       const explicitNamedTarget = this.targetFromSafetyQuestion(message);
       if (!message.reply_to_message && !this.targetFromMention(message) && !explicitNamedTarget && /\b(?:is|are)\s+(?!(?:this|that|it|he|she|they|them|him|her|me|i)\b)[\p{L}\p{N}_-]{2,32}\s+(?:a\s+|an\s+)?(?:legit(?:imate)?|safe|unsafe|real|fake|scam(?:mer|ming)?|fraud(?:ster)?|risky?|trusted|trustworthy|blacklisted|flagged|suspicious|sus|dangerous|malicious)\b/iu.test(String(message.text || '').replace(/@(?:tracabot|tracethembot)\b/ig, ' '))) {
@@ -1875,19 +2216,45 @@ export class TelegramShieldBot {
       const target = this.targetFromMention(message) || explicitNamedTarget || sangmataTargetFromText(targetMessage.text || '') || actorFromMessage(targetMessage);
       const risk = await this.assess({ ...message, from: target }, target, `${message.text}\n${targetMessage.text || ''}`);
       const event = await this.record('risk_query', { ...message, from: target }, risk);
+      await this.recordConversationArtifact({ ...message, from: target }, { risk, text: `${message.text}\n${targetMessage.text || ''}`, artifactKind: 'safety_question', conversationRole: 'questioner', sourceEventIds: [event.id] });
       const finding = this.canPublishFindingFromRisk(risk) ? await this.publishHighConfidenceFinding({ ...message, from: target }, risk) : null;
       await this.maybeRecordCampaign({ ...message, from: target }, risk);
       const conversational = await this.conversationReply(message, target, risk, event, true);
       if (conversational) await this.send(message.chat.id, conversational, { reply_to_message_id: message.message_id });
       return;
     }
+    if (this.isPrivateOwnerMessage(message)) {
+      const target = sangmataTargetFromText(message.text || '');
+      if (target) {
+        const targetText = message.text || '';
+        const risk = await this.assess({ ...message, from: target, text: targetText }, target, targetText);
+        const event = await this.record('report_submitted', { ...message, from: target, text: targetText }, {
+          ...risk,
+          reporter: actorFromMessage(message),
+          target_key: targetKey(target),
+          report_decision: 'accepted',
+          report_reason: 'bot owner private SangMata report',
+          report_outcome: risk.confidence >= 80 ? 'high_confidence_dkg_report' : 'accepted_dkg_report',
+          evidence: [...(risk.evidence || []), target.sangmata?.evidence, 'bot owner submitted private SangMata report'].filter(Boolean)
+        });
+        const finding = this.canPublishFindingFromRisk(risk) ? await this.publishHighConfidenceFinding({ ...message, from: target, text: targetText }, risk) : null;
+        await this.maybeRecordCampaign({ ...message, from: target, text: targetText }, risk);
+        await this.send(message.chat.id, formatScanReply({ target, risk, eventId: event.id, findingId: finding?.id }), { reply_to_message_id: message.message_id });
+        return;
+      }
+    }
+    if (message.chat?.type === 'private') return;
     const user = actorFromMessage(message);
     const risk = await this.assess(message, user, message.text);
     if (risk.confidence < this.config.actionThreshold) {
       await this.record('risk_check', message, risk);
+      await this.recordConversationArtifact(message, { risk, text: message.text, artifactKind: 'tactic_candidate', conversationRole: 'observer' });
+      await this.recordBenignConversationFlow(message, risk);
+      await this.recordChannelObservation(message, risk);
     }
     if (risk.confidence >= (this.config.warnThreshold ?? 60)) {
       await this.record('scam_detection', message, risk);
+      await this.recordChannelObservation(message, risk);
       await this.maybeRecordCampaign(message, risk);
     }
     if (risk.confidence >= (this.config.restrictThreshold ?? this.config.actionThreshold)) {
@@ -1945,13 +2312,15 @@ export class TelegramShieldBot {
         if (this.config.joinChallengeAction === 'ban') await this.ban(challenge.chat.id, challenge.user.id).catch(() => null);
         else if (this.config.joinChallengeAction === 'kick') await this.ban(challenge.chat.id, challenge.user.id).then(() => this.call('unbanChatMember', { chat_id: challenge.chat.id, user_id: challenge.user.id, only_if_banned: true })).catch(() => null);
       }
-      await this.record('join_challenge_expired', message, {
+      const event = await this.record('join_challenge_expired', message, {
         target: challenge.user,
         target_key: targetKey(challenge.user),
+        alias_keys: challengeAliasSignals(challenge.user),
         action: this.config.joinChallengeAction || 'kick',
         attempts: challenge.attempts,
         evidence: ['new user did not complete DKG Knowledge Asset UAL verification before timeout']
       }, { writeDkg: false });
+      await this.maybeRecordJoinChallengeRepeatFailure(message, event);
       if (challenge.messageId && await this.hasDeleteRights(challenge.chat.id)) await this.deleteMessage(challenge.chat.id, challenge.messageId).catch(() => null);
       await this.sendEphemeral(challenge.chat.id, `${userMention(challenge.user)} did not complete DKG verification in time.`, { parse_mode: 'HTML' }, this.config.successMessageTtlSeconds || 45).catch(() => null);
     }

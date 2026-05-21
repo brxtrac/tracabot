@@ -3,7 +3,7 @@ name: tracabot_ban_guard
 description: Telegram enforcement guard for bans and restrictions with DKG evidence logging.
 user-invocable: false
 tags: [telegram, moderation, ban, restrictions, dkg]
-version: 0.1.0
+version: 0.1.1
 author: brxtrac
 ---
 

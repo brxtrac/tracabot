@@ -43,6 +43,13 @@ function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = nu
     async validateUal(ual) {
       return validateUal ? validateUal(ual) : { ok: true, reason: 'test' };
     },
+    async runtimeStatus() {
+      return {
+        dkgReleaseVersion: '10.0.0-rc.9',
+        adapterVersion: '10.0.0-rc.9',
+        capabilities: { workingMemoryAssertions: true, sharedWorkingMemory: true, verifiedMemoryPublish: true, query: true }
+      };
+    },
     async ensureContextGraph() {}
   };
   const analyzer = () => ({
@@ -82,10 +89,15 @@ function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = nu
       joinChallengeQaBank: [],
       joinChallengeTtlSeconds: 60,
       joinChallengeMaxAttempts: 3,
+      joinChallengeRepeatFailureThreshold: 2,
+      joinChallengeRepeatBadAttemptThreshold: 3,
       joinChallengeAction: 'kick',
       joinChallengeDeleteOnPass: true,
       joinChallengeDeleteBadAttempts: true,
       joinChallengeDkgValidate: true,
+      channelMemory: true,
+      channelMemoryMinConfidence: 80,
+      channelMemoryMaxTextChars: 1000,
       ...configOverrides
     },
     analyzer: analyzerOverride || analyzer,
@@ -112,15 +124,17 @@ function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = nu
   return { bot, calls, dkgWrites };
 }
 
-test('new high-risk join is banned when bot has admin rights', async () => {
+test('new high-risk join is sent to admin review when bot has admin rights', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   await bot.handleNewMembers({
     chat: { id: -100, title: 'demo' },
     from: { id: 1, username: 'admin' },
     new_chat_members: [{ id: 42, username: 'fake_support', is_bot: false }]
   });
-  assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 42));
-  assert.ok(bot.store.all().some((event) => event.event_type === 'ban_executed'));
+  assert.equal(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 42), false);
+  assert.equal(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 42), false);
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('learning fraud patterns')));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user.id === 42));
 });
 
 test('local-only high-risk first post is deleted and published but not banned', async () => {
@@ -166,7 +180,7 @@ test('recent joiner renamed to admin-like identity is deleted and published befo
   assert.match(JSON.stringify(finding.payload.evidence), /changed identity to resemble admin/);
 });
 
-test('DKG-backed high-risk first post is deleted and banned when bot has rights', async () => {
+test('DKG-backed high-risk first post is deleted and sent to admin review when bot has rights', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   await bot.handleMessage({
     chat: { id: -100, title: 'demo' },
@@ -175,8 +189,10 @@ test('DKG-backed high-risk first post is deleted and banned when bot has rights'
     text: 'known scam actor returns'
   });
   assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 127));
-  assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 166));
-  assert.ok(bot.store.all().some((event) => event.event_type === 'ban_executed' && event.user.id === 166));
+  assert.equal(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 166), false);
+  assert.equal(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 166), false);
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('learning fraud patterns')));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user.id === 166 && event.payload.recommended_action === 'admin_review'));
 });
 
 test('auto-discovered admin usernames are used for impersonation detection', async () => {
@@ -216,7 +232,7 @@ test('auto-discovered admin display names are used for rename copycat detection'
   assert.match(JSON.stringify(finding.payload.evidence), /changed identity to resemble admin/);
 });
 
-test('DKG-backed high-risk join alerts admins when bot lacks ban rights', async () => {
+test('DKG-backed high-risk join asks for admin review without ban-rights wording', async () => {
   const { bot, calls } = makeBot({ canBan: false });
   await bot.handleNewMembers({
     chat: { id: -100, title: 'demo' },
@@ -224,9 +240,11 @@ test('DKG-backed high-risk join alerts admins when bot lacks ban rights', async 
     new_chat_members: [{ id: 43, username: 'fake_support2', is_bot: false }]
   });
   assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Admin heads-up')));
-  const alert = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Admin heads-up'))?.payload.text || '';
-  assert.match(alert, /internal DKG receipts are not posted/);
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('learning fraud patterns')));
+  const alert = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text).includes('learning fraud patterns'))?.payload.text || '';
+  assert.match(alert, /Ask an admin to review/);
+  assert.match(alert, /\/appeal/);
+  assert.doesNotMatch(alert, /ban rights|Recommendation: ban/i);
   assert.doesNotMatch(alert, /DKG UAL|DKG event|did:dkg:context-graph|event ID/);
   assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.local_only));
 });
@@ -279,6 +297,81 @@ test('ordinary wallet and token flow discussion does not trigger scam alert', as
   assert.equal(calls.some((call) => ['deleteMessage', 'restrictChatMember', 'banChatMember'].includes(call.method)), false);
   const riskEvents = bot.store.all().filter((event) => ['scam_detection', 'risk_review_needed', 'risk_action_suppressed'].includes(event.event_type));
   assert.equal(riskEvents.length, 0);
+});
+
+test('high-confidence public channel scam promo writes bounded channel observation to DKG', async () => {
+  const { bot, dkgWrites } = makeBot({
+    canBan: false,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] }
+  });
+  await bot.handleMessage({
+    chat: { id: -100, title: 'demo', type: 'supergroup' },
+    from: { id: 4242, username: 'profit_signals', is_bot: false },
+    message_id: 99,
+    text: 'From Zero to $685K profit I joined Alpha Trading (https://t.me/alpha_trading_circle) 16 months ago and within the past 3 months I earned $685,000 thanks to the coaching Mr Theo provides.'
+  });
+  const observation = dkgWrites.find((event) => event.event_type === 'channel_observation');
+  assert.ok(observation);
+  assert.equal(observation.payload.lifecycle_stage, 'shared_memory');
+  assert.equal(observation.payload.publication_status, 'shared_memory');
+  assert.match(observation.payload.message_text, /Alpha Trading/);
+  assert.ok(observation.payload.text_fingerprint);
+});
+
+test('ordinary scam coin discussion does not write raw channel observation to DKG', async () => {
+  const { bot, dkgWrites } = makeBot({
+    canBan: false,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] }
+  });
+  await bot.handleMessage({
+    chat: { id: -100, title: 'demo', type: 'supergroup' },
+    from: { id: 5151, username: 'member', is_bot: false },
+    message_id: 100,
+    text: 'Lots of scam coins launch every week. We should discuss how to protect users and avoid fake airdrops.'
+  });
+  assert.equal(dkgWrites.some((event) => event.event_type === 'channel_observation'), false);
+});
+
+test('benign governance conversation is learned as WM draft, not shared without commit', async () => {
+  const { bot, dkgWrites } = makeBot({
+    canBan: false,
+    analyzer: () => ({ is_scam: false, confidence: 0, scam_type: 'other', evidence: [], recommended_action: 'ignore' }),
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] }
+  });
+  await bot.handleMessage({
+    chat: { id: -100, title: 'demo', type: 'supergroup' },
+    from: { id: 5152, username: 'builder', is_bot: false },
+    message_id: 101,
+    text: 'Working Memory to Shared Memory should use a commit receipt governance gate before publish.'
+  });
+  const artifact = bot.store.all().find((event) => event.event_type === 'conversation_artifact' && event.payload.artifact_kind === 'benign_conversation_flow');
+  assert.ok(artifact);
+  assert.equal(artifact.payload.lifecycle_stage, 'working_memory_draft');
+  assert.equal(artifact.payload.publication_status, 'working_memory');
+  assert.equal(artifact.payload.commit_policy, 'draft_only');
+  assert.equal(artifact.local_only, true);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'conversation_artifact'), false);
+});
+
+test('committed false-positive artifact carries receipt before Shared Memory write', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo', type: 'supergroup' };
+  bot.store.append({
+    id: 'evt-fp-governance',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 86, username: 'guerodelosbajos', is_bot: false },
+    payload: { confidence: 90, scam_type: 'impersonation', evidence: ['false positive candidate'] }
+  });
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 35, text: '/review evt-fp-governance overturn SynthID discussion, not impersonation' });
+  const artifact = dkgWrites.find((event) => event.event_type === 'conversation_artifact' && event.payload.artifact_kind === 'false_positive_signal');
+  assert.ok(artifact);
+  assert.match(artifact.payload.commit_receipt_id, /^commit:/);
+  assert.equal(artifact.payload.commit_policy, 'human_or_admin_verified');
+  assert.equal(artifact.payload.lifecycle_stage, 'shared_memory');
 });
 
 test('ordinary scam discussion does not trigger conversational reply', async () => {
@@ -402,7 +495,7 @@ test('low-risk new members receive plain-language Knowledge Asset address join c
     new_chat_members: [{ id: 44, username: 'newhuman', first_name: 'New', is_bot: false }]
   });
   const restriction = calls.find((call) => call.method === 'restrictChatMember' && call.payload.user_id === 44);
-  assert.equal(restriction.payload.permissions.can_send_messages, true);
+  assert.equal(restriction.payload.permissions.can_send_messages, false);
   assert.equal(restriction.payload.permissions.can_send_audios, false);
   assert.equal(restriction.payload.permissions.can_send_documents, false);
   assert.equal(restriction.payload.permissions.can_send_photos, false);
@@ -438,7 +531,7 @@ test('chat_member joins receive Knowledge Asset address join challenge', async (
     old_chat_member: { status: 'left', user: { id: 48, username: 'member48', is_bot: false } },
     new_chat_member: { status: 'member', user: { id: 48, username: 'member48', first_name: 'Member', is_bot: false } }
   });
-  assert.ok(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 48 && call.payload.permissions.can_send_messages === true));
+  assert.ok(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 48 && call.payload.permissions.can_send_messages === false));
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('quick check')));
   assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_started' && event.user.id === 48));
 });
@@ -450,7 +543,7 @@ test('polling requests chat member updates for joins', async () => {
   assert.deepEqual(poll.payload.allowed_updates, ['message', 'chat_member', 'my_chat_member']);
 });
 
-test('valid DKG UAL solves join challenge and restores permissions', async () => {
+test('group-pasted DKG UAL does not solve join challenge before DM verification', async () => {
   const { bot, calls } = makeBot({
     canBan: true,
     analyzer: analyzeMessage,
@@ -461,15 +554,13 @@ test('valid DKG UAL solves join challenge and restores permissions', async () =>
   const chat = { id: -100, title: 'demo' };
   await bot.handleNewMembers({ chat, from: { id: 1, username: 'admin' }, new_chat_members: [{ id: 45, username: 'learner', first_name: 'Learner', is_bot: false }] });
   await bot.handleMessage({ chat, from: { id: 45, username: 'learner', first_name: 'Learner', is_bot: false }, message_id: 45, text: 'did:dkg:knowledge-asset-valid-123456' });
-  const unlock = calls.find((call) => call.method === 'restrictChatMember' && call.payload.user_id === 45 && call.payload.permissions.can_send_photos === true);
-  assert.equal(unlock.payload.until_date, 0);
-  assert.equal(unlock.payload.use_independent_chat_permissions, true);
-  const successCall = calls.filter((call) => call.method === 'sendMessage').at(-1)?.payload || {};
-  const success = successCall.text || '';
-  assert.match(success, /DKG-verified/);
-  assert.match(success, /@learner/);
-  assert.equal(successCall.parse_mode, 'HTML');
-  assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_solved' && event.local_only));
+  assert.equal(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 45 && call.payload.permissions.can_send_photos === true), false);
+  assert.equal(bot.joinChallenges.has('-100:45'), true);
+  assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 45));
+  const reminder = calls.filter((call) => call.method === 'sendMessage').at(-1)?.payload.text || '';
+  assert.match(reminder, /verification only works in DM/);
+  assert.match(reminder, /https:\/\/t\.me\/tracethembot\?start=verify_m100_45/);
+  assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_bad_attempt' && event.payload.verification_channel === 'group'));
 });
 
 test('DM DKG UAL solves join challenge and restores group permissions', async () => {
@@ -584,7 +675,7 @@ test('solved join challenge ignores Telegram restriction update instead of start
   assert.equal(bot.joinChallenges.has('-100:245'), false);
   const challengeMessages = calls.filter((call) => call.method === 'sendMessage' && call.payload.chat_id === -100 && String(call.payload.text).includes('quick check'));
   assert.equal(challengeMessages.length, 1);
-  const textOnlyRestrictions = calls.filter((call) => call.method === 'restrictChatMember' && call.payload.chat_id === -100 && call.payload.user_id === 245 && call.payload.permissions.can_send_messages === true && call.payload.permissions.can_send_photos === false);
+  const textOnlyRestrictions = calls.filter((call) => call.method === 'restrictChatMember' && call.payload.chat_id === -100 && call.payload.user_id === 245 && call.payload.permissions.can_send_messages === false && call.payload.permissions.can_send_photos === false);
   assert.equal(textOnlyRestrictions.length, 1);
   const unlocks = calls.filter((call) => call.method === 'restrictChatMember' && call.payload.chat_id === -100 && call.payload.user_id === 245 && call.payload.permissions.can_send_photos === true);
   assert.equal(unlocks.length, 1);
@@ -612,7 +703,7 @@ test('verified user is challenged again after leaving and rejoining', async () =
   assert.equal(bot.joinChallenges.has('-100:345'), true);
   const challengeMessages = calls.filter((call) => call.method === 'sendMessage' && call.payload.chat_id === -100 && String(call.payload.text).includes('quick check'));
   assert.equal(challengeMessages.length, 2);
-  const textOnlyRestrictions = calls.filter((call) => call.method === 'restrictChatMember' && call.payload.chat_id === -100 && call.payload.user_id === 345 && call.payload.permissions.can_send_messages === true && call.payload.permissions.can_send_photos === false);
+  const textOnlyRestrictions = calls.filter((call) => call.method === 'restrictChatMember' && call.payload.chat_id === -100 && call.payload.user_id === 345 && call.payload.permissions.can_send_messages === false && call.payload.permissions.can_send_photos === false);
   assert.equal(textOnlyRestrictions.length, 2);
 });
 
@@ -681,7 +772,7 @@ test('invalid challenge first message is deleted and reminded', async () => {
   await bot.handleMessage({ chat, from: { id: 46, username: 'badstart', first_name: 'Bad', is_bot: false }, message_id: 46, text: 'hello everyone' });
   assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 46));
   const reminder = calls.filter((call) => call.method === 'sendMessage').at(-1)?.payload.text || '';
-  assert.match(reminder, /starts with did:dkg/);
+  assert.match(reminder, /verification only works in DM/);
   assert.equal(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id !== 46), false);
   assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_bad_attempt' && event.local_only));
 });
@@ -701,7 +792,7 @@ test('pending challenge group reminders are sent once while repeated messages ar
   await bot.handleMessage({ chat, from: user, message_id: 102, text: 'why removed?' });
   await bot.handleMessage({ chat, from: user, message_id: 103, text: 'let me talk' });
 
-  const reminders = calls.filter((call) => call.method === 'sendMessage' && call.payload.chat_id === -100 && String(call.payload.text).includes('paste a Knowledge Asset address'));
+  const reminders = calls.filter((call) => call.method === 'sendMessage' && call.payload.chat_id === -100 && String(call.payload.text).includes('verification only works in DM'));
   assert.equal(reminders.length, 1);
   assert.equal(reminders[0].payload.parse_mode, 'HTML');
   const deletedUserMessages = calls.filter((call) => call.method === 'deleteMessage' && call.payload.chat_id === -100 && [101, 102, 103].includes(call.payload.message_id));
@@ -731,7 +822,7 @@ test('join challenge max attempts kicks unresolved users locally', async () => {
   assert.equal(failed.payload.max_attempts, 2);
 });
 
-test('noisy group replies are scheduled for cleanup but scan replies remain visible', async () => {
+test('noisy group replies and scan replies are scheduled for cleanup', async () => {
   const { bot, calls } = makeBot({
     canBan: true,
     analyzer: analyzeMessage,
@@ -744,7 +835,8 @@ test('noisy group replies are scheduled for cleanup but scan replies remain visi
   assert.equal(scheduled.length, 1);
   assert.equal(scheduled[0].ttlSeconds, 60);
   await bot.handleCommand({ chat: { id: -100, title: 'demo' }, from: { id: 86, username: 'BRX86' }, message_id: 14, text: '/scan Dmitry' });
-  assert.equal(scheduled.length, 1);
+  assert.equal(scheduled.length, 2);
+  assert.equal(scheduled[1].ttlSeconds, 60);
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('@Dmitry')));
 });
 
@@ -762,7 +854,7 @@ test('private DM challenge replies are not scheduled for cleanup', async () => {
   assert.equal(scheduled.length, 0);
 });
 
-test('invalid DKG UAL challenge attempt is deleted and not accepted', async () => {
+test('invalid group-pasted DKG UAL challenge attempt is deleted and not accepted', async () => {
   const { bot, calls } = makeBot({
     canBan: true,
     analyzer: analyzeMessage,
@@ -776,8 +868,26 @@ test('invalid DKG UAL challenge attempt is deleted and not accepted', async () =
   assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 146));
   assert.ok(!calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 146 && call.payload.permissions.can_send_photos === true));
   const reminder = calls.filter((call) => call.method === 'sendMessage').at(-1)?.payload.text || '';
-  assert.match(reminder, /could not validate/);
-  assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_bad_attempt' && event.payload.validation_reason === 'not_found'));
+  assert.match(reminder, /verification only works in DM/);
+  assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_bad_attempt' && event.payload.verification_channel === 'group'));
+});
+
+test('invalid DM DKG UAL is validated and rejected without unlocking', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    configOverrides: { joinChallenge: true },
+    validateUal: async () => ({ ok: false, reason: 'not_found' })
+  });
+  const group = { id: -100, title: 'demo', type: 'supergroup' };
+  await bot.handleNewMembers({ chat: group, from: { id: 1, username: 'admin' }, new_chat_members: [{ id: 147, username: 'baddmual', first_name: 'Bad DM', is_bot: false }] });
+  await bot.handleMessage({ chat: { id: 147, type: 'private' }, from: { id: 147, username: 'baddmual', is_bot: false }, message_id: 1, text: '/start verify_m100_147' });
+  await bot.handleMessage({ chat: { id: 147, type: 'private' }, from: { id: 147, username: 'baddmual', is_bot: false }, message_id: 2, text: 'did:dkg:knowledge-asset-missing-123456' });
+  assert.equal(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 147 && call.payload.permissions.can_send_photos === true), false);
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && call.payload.chat_id === 147 && String(call.payload.text).includes('could not validate')));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_bad_attempt' && event.payload.verification_channel === 'dm' && event.payload.validation_reason === 'not_found'));
+  assert.equal(bot.joinChallenges.has('-100:147'), true);
 });
 
 test('expired DKG join challenge kicks unresolved user', async () => {
@@ -795,6 +905,68 @@ test('expired DKG join challenge kicks unresolved user', async () => {
   assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 47));
   assert.ok(calls.some((call) => call.method === 'unbanChatMember' && call.payload.user_id === 47));
   assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_expired' && event.local_only));
+});
+
+test('one-off expired DKG join challenge stays local-only without DKG write', async () => {
+  const { bot, dkgWrites } = makeBot({
+    canBan: true,
+    analyzer: () => ({ is_scam: false, confidence: 0, scam_type: 'other', evidence: [], recommended_action: 'ignore' }),
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    configOverrides: { joinChallenge: true, joinChallengeAction: 'kick' }
+  });
+  const chat = { id: -100, title: 'demo' };
+  await bot.handleNewMembers({ chat, from: { id: 1, username: 'admin' }, new_chat_members: [{ id: 470, username: 'timeout_once', first_name: 'Timeout', is_bot: false }] });
+  bot.joinChallenges.get('-100:470').expiresAt = Date.now() - 1;
+  await bot.expireJoinChallenges();
+  assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_expired' && event.local_only));
+  assert.equal(dkgWrites.length, 0);
+});
+
+test('repeated DKG join challenge failures write aggregate Shared Memory once', async () => {
+  const { bot, dkgWrites } = makeBot({
+    canBan: true,
+    analyzer: () => ({ is_scam: false, confidence: 0, scam_type: 'other', evidence: [], recommended_action: 'ignore' }),
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    configOverrides: { joinChallenge: true, joinChallengeAction: 'kick' }
+  });
+  const chat = { id: -100, title: 'demo' };
+  const user = { id: 471, username: 'repeatfail', first_name: 'Repeat', is_bot: false };
+  await bot.handleNewMembers({ chat, from: { id: 1, username: 'admin' }, new_chat_members: [user] });
+  bot.joinChallenges.get('-100:471').expiresAt = Date.now() - 1;
+  await bot.expireJoinChallenges();
+  await bot.handleNewMembers({ chat, from: { id: 1, username: 'admin' }, new_chat_members: [user] });
+  bot.joinChallenges.get('-100:471').expiresAt = Date.now() - 1;
+  await bot.expireJoinChallenges();
+  assert.equal(dkgWrites.length, 1);
+  assert.equal(dkgWrites[0].event_type, 'join_challenge_repeat_failure');
+  assert.equal(dkgWrites[0].payload.challenge_failure_count, 2);
+  assert.equal(dkgWrites[0].payload.target_key, 'id:471');
+});
+
+test('join challenge repeat failures cluster normalized 1win alias variants', async () => {
+  const { bot, dkgWrites, calls } = makeBot({
+    canBan: true,
+    analyzer: () => ({ is_scam: false, confidence: 0, scam_type: 'other', evidence: [], recommended_action: 'ignore' }),
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    configOverrides: { joinChallenge: true, joinChallengeAction: 'kick' }
+  });
+  const chat = { id: -100, title: 'demo' };
+  for (const user of [
+    { id: 481, username: '1win', first_name: 'One', is_bot: false },
+    { id: 482, username: '1-win', first_name: 'Other', is_bot: false },
+    { id: 483, username: '１WIN', first_name: 'Third', is_bot: false }
+  ]) {
+    await bot.handleNewMembers({ chat, from: { id: 1, username: 'admin' }, new_chat_members: [user] });
+    bot.joinChallenges.get(`-100:${user.id}`).expiresAt = Date.now() - 1;
+    await bot.expireJoinChallenges();
+  }
+  assert.equal(dkgWrites.length, 1);
+  assert.equal(dkgWrites[0].payload.campaign_key, 'alias:1win');
+  assert.ok(dkgWrites[0].payload.alias_keys.includes('1win'));
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 88, text: '/stats campaigns' });
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 89, text: '/digest' });
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('join challenge repeat alias:1win')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('repeated join-challenge failure cluster')));
 });
 
 test('telegram command descriptions match the public bot command list', () => {
@@ -955,6 +1127,53 @@ test('/appeal records correction request and /review records admin decision', as
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Review overturned')));
 });
 
+test('/appeal and /review infer latest target event from user or reply', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  bot.store.append({
+    id: 'evt-auto-review',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 86, username: 'guerodelosbajos', is_bot: false },
+    payload: { confidence: 90, scam_type: 'impersonation', evidence: ['false positive candidate'] }
+  });
+  await bot.handleCommand({ chat, from: { id: 86, username: 'guerodelosbajos' }, message_id: 33, text: '/appeal this was SynthID discussion' });
+  await bot.handleCommand({
+    chat,
+    from: { id: 1, username: 'admin' },
+    message_id: 34,
+    text: '/review overturn agreed false positive',
+    reply_to_message: { chat, from: { id: 86, username: 'guerodelosbajos' }, text: 'Soo... vididentifier is synthid?' }
+  });
+  assert.ok(dkgWrites.some((event) => event.event_type === 'appeal_submitted' && event.payload.target_event_id === 'evt-auto-review'));
+  assert.ok(dkgWrites.some((event) => event.event_type === 'review_overturned' && event.payload.target_event_id === 'evt-auto-review'));
+});
+
+test('/review overturn suppresses future enforcement for the reviewed user', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  bot.store.append({
+    id: 'evt-false-positive',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 4242, username: 'askme42', is_bot: false },
+    payload: { confidence: 99, scam_type: 'other', evidence: ['bad prior signal'] }
+  });
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 34, text: '/review evt-false-positive overturn false positive' });
+  await bot.handleNewMembers({
+    chat,
+    from: { id: 1, username: 'admin' },
+    new_chat_members: [{ id: 4242, username: 'askme42', is_bot: false }]
+  });
+  assert.equal(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 4242), false);
+  assert.equal(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 4242), false);
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('learning fraud patterns')), false);
+  const checks = bot.store.all().filter((event) => event.event_type === 'risk_check' && event.user.id === 4242);
+  assert.ok(checks.some((event) => event.payload.confidence <= 10 && event.payload.recommended_action === 'ignore'));
+});
+
 test('/watch boosts scrutiny until /unwatch closes it', async () => {
   const { bot, calls } = makeBot({
     canBan: true,
@@ -1034,6 +1253,24 @@ test('/watchlist shows active watches, mutes, and review items', async () => {
   assert.match(reply.text || '', /Needs review/);
   assert.match(reply.text || '', /tg:\/\/user\?id=8388593201/);
   assert.equal(reply.parse_mode, 'HTML');
+});
+
+test('/review with no args shows latest pending review items', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const scheduled = [];
+  bot.scheduleDelete = (chatId, messageId, ttlSeconds) => scheduled.push({ chatId, messageId, ttlSeconds });
+  const chat = { id: -100, title: 'demo' };
+  bot.store.append({ id: 'review-old', event_type: 'risk_review_needed', timestamp: new Date(Date.now() - 60_000).toISOString(), chat, user: { id: 87, username: 'old_review' }, payload: { confidence: 65, evidence: ['old signal'] } });
+  bot.store.append({ id: 'review-new', event_type: 'report_review_needed', timestamp: new Date().toISOString(), chat, user: { id: 88, username: 'new_review' }, payload: { confidence: 70, evidence: ['new signal'] } });
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 45, text: '/review' });
+  const reply = calls.find((call) => call.method === 'sendMessage')?.payload || {};
+  assert.match(reply.text || '', /Latest pending review items/);
+  assert.match(reply.text || '', /review-new/);
+  assert.match(reply.text || '', /review-old/);
+  assert.ok((reply.text || '').indexOf('review-new') < (reply.text || '').indexOf('review-old'));
+  assert.equal(reply.parse_mode, 'HTML');
+  assert.equal(scheduled.length, 1);
+  assert.equal(scheduled[0].ttlSeconds, 60);
 });
 
 test('/watchlist rejects non-admin requesters', async () => {
@@ -1131,7 +1368,7 @@ test('campaign summaries ignore weak local-only and prior campaign events as roo
   assert.deepEqual(campaign.payload.evidence_root_ids, ['evt-root-1', 'evt-root-2']);
 });
 
-test('medium-risk message is deleted and restricted instead of banned', async () => {
+test('medium-risk domain-only message is capped below action without DKG evidence', async () => {
   const { bot, calls } = makeBot({
     canBan: true,
     analyzer: () => ({
@@ -1149,10 +1386,10 @@ test('medium-risk message is deleted and restricted instead of banned', async ()
     message_id: 31,
     text: 'Check fake-claim.example'
   });
-  assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 31));
-  assert.ok(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 68));
+  assert.equal(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 31), false);
+  assert.equal(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 68), false);
   assert.equal(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 68), false);
-  assert.ok(bot.store.all().some((event) => event.event_type === 'restrict_executed'));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'risk_check' && event.payload.confidence === 59));
 });
 
 test('/scan checks a wallet without banning', async () => {
@@ -1331,6 +1568,26 @@ test('/dmreport publishes cross-community DM impersonation evidence without grou
   const reply = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
   assert.match(reply, /DM scam report saved/);
   assert.match(reply, /cross-community warnings/);
+});
+
+test('private SangMata reports only process for configured bot owner', async () => {
+  const { bot, calls, dkgWrites } = makeBot({ canBan: false, adminIds: ['1354777145'] });
+  const text = 'User 8367741707 changed name from Joo Woklf to beldex Support';
+
+  await bot.handleMessage({ chat: { id: 1354777145, type: 'private' }, from: { id: 1354777145, username: 'BRX86', is_bot: false }, message_id: 1, text });
+
+  assert.ok(dkgWrites.some((event) => event.event_type === 'report_submitted' && String(event.user?.id) === '8367741707'));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && call.payload.chat_id === 1354777145 && String(call.payload.text).includes('beldex Support')));
+});
+
+test('private SangMata reports from non-owner do not flag DM sender', async () => {
+  const { bot, calls, dkgWrites } = makeBot({ canBan: false, adminIds: ['1354777145'] });
+  const text = 'User 8367741707 changed name from Joo Woklf to beldex Support';
+
+  await bot.handleMessage({ chat: { id: 999, type: 'private' }, from: { id: 999, username: 'random_reporter', is_bot: false }, message_id: 1, text });
+
+  assert.equal(dkgWrites.length, 0);
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('TRACaBot risk for @random_reporter')), false);
 });
 
 test('/dmreport accepts screenshot caption metadata but rejects screenshot-only reports', async () => {

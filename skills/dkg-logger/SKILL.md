@@ -3,7 +3,7 @@ name: tracabot_dkg_logger
 description: Writes evidence-backed tracabot fraud knowledge to DKG v10 via the OpenClaw DKG adapter.
 user-invocable: false
 tags: [origintrail, dkg-v10, openclaw, shared-memory, provenance]
-version: 0.1.0
+version: 0.1.1
 author: brxtrac
 ---
 

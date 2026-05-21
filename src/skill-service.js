@@ -9,6 +9,47 @@ function actorAliases(user = {}) {
   return [user.username, user.first_name, [user.first_name, user.last_name].filter(Boolean).join(' ')].filter(Boolean);
 }
 
+function normalizeArtifactText(text = '') {
+  return String(text || '')
+    .slice(0, 700)
+    .replace(/0x[a-fA-F0-9]{40}/g, (wallet) => `${wallet.slice(0, 8)}...${wallet.slice(-6)}`)
+    .replace(/\b(?:bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}\b/g, (wallet) => `${wallet.slice(0, 8)}...${wallet.slice(-6)}`)
+    .replace(/\b\d{7,}\b/g, '[telegram-id]')
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, '[url]')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function redactArtifactText(text = '') {
+  return String(text || '')
+    .slice(0, 700)
+    .replace(/0x[a-fA-F0-9]{40}/g, (wallet) => `${wallet.slice(0, 8)}...${wallet.slice(-6)}`)
+    .replace(/\b(?:bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}\b/g, (wallet) => `${wallet.slice(0, 8)}...${wallet.slice(-6)}`)
+    .replace(/\b\d{7,}\b/g, '[telegram-id]')
+    .replace(/(?:api[_-]?key|token|secret|password|private[_-]?key)\s*[:=]\s*\S+/gi, '$1=[redacted]');
+}
+
+function textFingerprint(text = '') {
+  return String(text).toLowerCase().replace(/https?:\/\/\S+/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((word) => word.length > 2).slice(0, 16).join(' ');
+}
+
+function artifactQuality({ risk = {}, text = '', adminVerified = false } = {}) {
+  let score = adminVerified ? 30 : 0;
+  if (Number(risk.local_confidence || risk.confidence || 0) >= 40) score += 25;
+  if (Number(risk.local_confidence || risk.confidence || 0) >= 60) score += 20;
+  if ((risk.domains || []).length) score += 20;
+  if ((risk.wallets || []).length) score += 20;
+  if ((risk.patterns || []).length) score += 15;
+  if (/report|warn|alert|fake|impersonat|phish|scam|wallet|airdrop|support|admin/i.test(text)) score += 10;
+  return Math.min(100, score);
+}
+
+function commitReceiptId({ artifactKind = '', quality = 0, risk = {}, sourceEventIds = [], text = '' } = {}) {
+  const basis = [artifactKind, quality, risk.scam_type || '', risk.confidence || 0, sourceEventIds.join(','), textFingerprint(text)].join(':');
+  return `commit:${randomUUID().slice(0, 8)}:${Buffer.from(basis).toString('base64url').slice(0, 16)}`;
+}
+
 function targetFromInput(input = {}) {
   return {
     id: input.telegramUserId || input.userId || input.id || '',
@@ -202,6 +243,53 @@ export class TracabotSkillService {
     this.store.append(event);
     return { tool: 'monitor_chat_event', monitored: true, eventId: event.id, risk, adminVerified, highConfidence, dkg: event.dkg, writesDkg: true };
   }
+
+  async sortConversationArtifact(input = {}) {
+    const target = targetFromInput(input);
+    const text = String(input.text || input.messageText || input.context || '').slice(0, 4096);
+    const dkgIntel = await this.dkg.queryRiskIndicators({ username: target.username, userId: target.id, aliases: actorAliases(target), text });
+    const local = this.analyzer({ text, user: { ...target, adminUsernames: [...this.config.adminIds].filter((id) => !/^\d+$/.test(id)) }, globalIntel: dkgIntel });
+    const risk = combineRisk({ analysis: local, dkgIntel, threshold: this.config.actionThreshold });
+    const adminVerified = Boolean(input.adminVerified || input.verifiedByAdmin);
+    const quality = artifactQuality({ risk, text, adminVerified });
+    const writeDkg = adminVerified || quality >= 70 || (input.shareLowConfidence === true && quality >= 40);
+    const sourceEventIds = input.sourceEventIds || [];
+    const receiptId = writeDkg ? commitReceiptId({ artifactKind: input.artifactKind || 'openclaw_sorted_conversation', quality, risk, sourceEventIds, text }) : '';
+    const event = {
+      id: randomUUID(),
+      event_type: 'conversation_artifact',
+      timestamp: new Date().toISOString(),
+      agentDid: this.config.agentDid,
+      chat: input.chat || { id: input.chatId || 'openclaw-skill' },
+      user: target,
+      payload: {
+        ...risk,
+        target,
+        target_key: target.kind === 'wallet' ? `wallet:${target.id}` : target.id ? `id:${target.id}` : target.username ? `username:${target.username.toLowerCase()}` : target.label || '',
+        artifact_kind: input.artifactKind || 'openclaw_sorted_conversation',
+        artifact_quality: quality,
+        conversation_role: input.conversationRole || 'openclaw_sorter',
+        redaction_level: 'redacted',
+        normalized_text: normalizeArtifactText(text),
+        message_text: redactArtifactText(text),
+        text_fingerprint: textFingerprint(text),
+        source_event_ids: sourceEventIds,
+        operator_note: input.operatorNote || '',
+        learning_value: quality >= 70 ? 'high' : quality >= 45 ? 'medium' : 'low',
+        teaches_tactics: risk.patterns || [],
+        commit_receipt_id: receiptId,
+        commit_policy: writeDkg ? (adminVerified ? 'human_or_admin_verified' : 'artifact_quality_threshold') : 'draft_only',
+        commit_authority: writeDkg ? (adminVerified ? 'admin_review' : 'openclaw_policy_rule') : '',
+        publication_status: writeDkg ? 'shared_memory' : 'working_memory',
+        lifecycle_stage: writeDkg ? 'shared_memory' : 'working_memory_draft',
+        evidence: [...(risk.evidence || []), `OpenClaw sorted conversation artifact with quality ${quality}`, writeDkg ? `commit receipt ${receiptId} authorizes Shared Memory projection` : 'draft only; not eligible for Shared Memory until committed']
+      }
+    };
+    if (writeDkg) event.dkg = await this.dkg.writeEvent(event);
+    else event.local_only = true;
+    this.store.append(event);
+    return { tool: 'sort_conversation_artifact', eventId: event.id, risk, artifactQuality: quality, writesDkg: writeDkg, dkg: event.dkg || null };
+  }
 }
 
 export async function runSkillTool(tool, input = {}, env = process.env) {
@@ -212,6 +300,7 @@ export async function runSkillTool(tool, input = {}, env = process.env) {
   if (tool === 'get_watchlist') return service.getWatchlist(input);
   if (tool === 'query_campaigns') return service.queryCampaigns(input);
   if (tool === 'monitor_chat_event') return service.monitorChatEvent(input);
+  if (tool === 'sort_conversation_artifact') return service.sortConversationArtifact(input);
   if (tool === 'submit_appeal') return service.submitAppeal(input);
   if (tool === 'review_event') return service.reviewEvent(input);
   throw new Error(`Unknown tracabot skill tool: ${tool}`);

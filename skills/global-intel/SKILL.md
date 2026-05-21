@@ -3,7 +3,7 @@ name: tracabot_global_intel
 description: Queries DKG v10 Shared Memory and Context Graph evidence before local Telegram fraud decisions.
 user-invocable: false
 tags: [dkg-v10, shared-memory, context-graph, fraud-intelligence]
-version: 0.1.0
+version: 0.1.1
 author: brxtrac
 ---
 

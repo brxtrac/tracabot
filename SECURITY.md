@@ -14,7 +14,11 @@ tracabot contacts:
 
 ## DKG Write Authority
 
-The integration writes scam detections, reports, and moderation actions to DKG v10 Shared Memory through the official DKG/OpenClaw adapter setup using `DkgDaemonClient` against the local DKG v10 daemon. It uses the adapter to create the configured Context Graph, write Shared Memory, query evidence, and publish eligible high-confidence event roots. If the publish step fails, the Shared Memory write is kept and the publish error is recorded in the local audit event.
+The integration writes scam detections, reports, selective high-confidence channel observations, and moderation actions to DKG v10 Shared Memory through the official DKG/OpenClaw adapter setup using `DkgDaemonClient` against the local DKG v10 daemon. It uses the adapter to create the configured Context Graph, write Shared Memory, query evidence, and publish eligible high-confidence event roots. If the publish step fails, the Shared Memory write is kept and the publish error is recorded in the local audit event.
+
+TRACaBot treats `DkgDaemonClient` as the public-interface boundary to the authenticated node API. It does not import internal DKG v10 monorepo packages, patch DKG node source, load code into the daemon process, or bypass Curator authority on `SHARE` / `PUBLISH` operations.
+
+Transient Shared Memory write failures are retried for short network outages, timeouts, rate limits, and 5xx responses. If all retries fail, Telegram moderation continues and the local audit event records `dkg_error` instead of dropping the action.
 
 Local JSONL files are operational working memory for weak reports, watchlist state, digest state, and monitoring-only actions. They should not be treated as public DKG evidence unless a later evidence-backed event explicitly qualifies for DKG sharing.
 
@@ -23,6 +27,7 @@ Local JSONL files are operational working memory for weak reports, watchlist sta
 - Manual `/ban` requires the sender to be listed in `TRACABOT_ADMINS` or to be a Telegram chat admin.
 - Non-admin `/report` calls can publish accepted evidence, but they cannot directly execute a Telegram ban.
 - Rejected and weak reports are stored locally only and are not written to DKG Shared Memory. Unsafe monitoring events are written only when the analyzer finds concrete evidence; publication requires admin verification or very high confidence.
+- Bounded raw public `message_text` is written to Shared Memory only for high-confidence channel abuse, such as scam channel promos, outside token/coin promos, fake airdrops, wallet/domain lures, investment-profit spam, or admin/support DM impersonation. Ordinary discussion about scam coins or scam prevention stays local.
 - Duplicate reports and reporter bursts are rate-limited to reduce abuse.
 - Telegram message and evidence fields are bounded before analysis, local logging, and DKG writes.
 - Conversational LLM replies are bounded, topic-gated to scam/fraud/wallet safety, and cannot execute Telegram moderation actions or DKG writes.
@@ -36,3 +41,5 @@ When `TRACABOT_LLM_PROVIDER=auto`, TRACaBot reads local OpenClaw configuration t
 ## Dynamic Code
 
 No remote code loading, `eval`, preinstall scripts, or postinstall scripts are used.
+
+No endorsement/voting UI and no publisher-side Conviction/staking UX are included; appeal and review flows are command/agent surfaces.
