@@ -24,12 +24,13 @@ TRACaBot turns those moderation artifacts into agent-readable knowledge. It obse
 
 ## Memory Layers
 
-TRACaBot currently uses two operational memory layers:
+TRACaBot currently uses three operational memory layers:
 
-- Local working memory: bounded JSONL event store and in-memory Telegram context used for drafts, watchlists, review queues, digests, join challenges, and non-evidence monitoring. Plain `/watch`, `/unwatch`, `/watchlist`, `/digest`, and join-challenge housekeeping remain local-only.
-- DKG v10 Shared Memory: evidence-backed artifacts written through `DkgDaemonClient.share` using the OpenClaw DKG adapter. Unsafe chat observations with concrete evidence are shared as collaborative working memory; only admin-verified or very-high-confidence observations are eligible for publication.
+- Local working memory: bounded JSONL event store and in-memory Telegram context used for drafts, watchlists, review queues, digests, join challenges, and non-evidence monitoring. Plain `/watch`, `/unwatch`, `/watchlist`, `/digest`, and one-off join-challenge housekeeping remain local-only.
+- DKG v10 Working Memory: when supported by the installed OpenClaw adapter, `createAssertion`, `writeAssertion`, and `promoteAssertion` stage evidence in DKG Working Memory before selected roots move to Shared Working Memory.
+- DKG v10 Shared Working Memory: evidence-backed artifacts promoted through the assertion lifecycle, with `share` retained as a compatibility fallback for older adapter builds. Unsafe chat observations with concrete evidence are shared as collaborative working memory; only admin-verified or very-high-confidence observations are eligible for publication.
 
-The repository did not find a confirmed public Working Memory-specific method exposed by the locally available OpenClaw adapter package. The integration therefore uses local operational working memory plus DKG Shared Memory through the supported adapter interface. If a public Working Memory adapter method becomes available, draft scan notes, campaign candidates, and review drafts can be routed there without changing the evidence schema.
+The runtime `/status` command reports whether the current adapter exposes Working Memory assertions, Shared Working Memory fallback writes, Verified Memory publish, and query capability.
 
 ## DKG v10 Primitives
 
@@ -40,14 +41,14 @@ The repository did not find a confirmed public Working Memory-specific method ex
 - SHARE: evidence-backed events are written to Shared Memory.
 - PUBLISH: qualifying high-confidence event roots are promoted with `publishSharedMemory`.
 - Integration: `skills/tracabot/skill.json` exposes OpenClaw-callable tools.
-- Curator authority: the configured TRACaBot/OpenClaw runtime holds authority for `createContextGraph`, `share`, `query`, and targeted `publishSharedMemory` operations.
+- Curator authority: the configured TRACaBot/OpenClaw runtime holds authority for `createContextGraph`, assertion lifecycle operations, `share`, `query`, and targeted `publishSharedMemory` operations.
 
 ## Bounty Scope Compliance
 
 TRACaBot is intended for OriginTrail DKG v10 Bounty Program Round 1, Section 5. It is in scope because it does both required things:
 
 - It reads from and writes to DKG v10 Shared Memory on a v10 node through the official OpenClaw DKG adapter setup. The adapter is used as the HTTP client boundary to the local authenticated node API; TRACaBot does not patch the DKG node, load code into the daemon, or import internal v10 packages such as `@origintrail-official/dkg-core`, `-storage`, `-chain`, `-publisher`, `-query`, or `-agent`.
-- It connects Shared Memory to an OpenClaw-compatible agent workflow that advances LLM-Wiki/autoresearch: Telegram communities and OpenClaw agents produce structured, provenance-rich fraud knowledge that can be queried, reviewed, corrected, clustered, and later promoted.
+- It connects DKG Working Memory and Shared Working Memory to an OpenClaw-compatible agent workflow that advances LLM-Wiki/autoresearch: Telegram communities and OpenClaw agents produce structured, provenance-rich fraud knowledge that can be queried, reviewed, corrected, clustered, and promoted.
 
 It also matches the priority integration target in Section 5: OpenClaw. TRACaBot exposes an OpenClaw skill manifest and JSON bridge, and its DKG runtime boundary follows the official DKG/OpenClaw adapter setup.
 
@@ -84,9 +85,9 @@ This advances the LLM-Wiki/autoresearch direction by turning moderation events i
 ## Promotion Path
 
 1. Local observation: messages, watchlist entries, weak reports, and digest state remain local working memory.
-2. Evidence-backed Shared Memory: unsafe chat observations, accepted reports, fraud findings, restrictions, campaigns, appeals, and reviews are shared through DKG v10. `channel_observation` shares bounded raw text only for high-confidence public channel abuse, not ordinary scam discussion.
+2. Evidence-backed Shared Working Memory: unsafe chat observations, accepted reports, fraud findings, restrictions, campaigns, appeals, and reviews are staged through the DKG assertion lifecycle when available and shared through DKG v10. `channel_observation` shares bounded raw text only for high-confidence public channel abuse, not ordinary scam discussion.
 3. Context Graph publication: high-confidence accepted reports, high-confidence findings, bans, admin-verified reviews, and very-high-confidence unsafe chat events are promoted with targeted `publishSharedMemory` calls.
-4. Verified Memory readiness: upheld bans, repeated campaigns, and reviewed evidence can later be promoted into Verified Memory or consumed by context oracles. Overturned reviews and appeals provide negative/correction signals for the same trust gradient.
+4. Verified Memory readiness: upheld bans, repeated campaigns, and reviewed evidence can be promoted into Verified Memory or consumed by context oracles. Overturned reviews and appeals provide negative/correction signals for the same trust gradient.
 
 ## Context Oracle Readiness
 
@@ -109,11 +110,11 @@ An oracle can later reason over these fields to decide whether an actor, wallet,
 ## Security Notes
 
 - Runtime egress: `api.telegram.org` and the configured DKG node, default `http://127.0.0.1:9200`.
-- DKG operations: `createContextGraph`, `share`, `query`, `publishSharedMemory`.
+- DKG operations: `createContextGraph`, `createAssertion`, `writeAssertion`, `promoteAssertion`, `share`, `query`, `publishSharedMemory`.
 - Secrets: `TELEGRAM_BOT_TOKEN`, `DKG_AUTH_TOKEN`, and adapter credentials remain in environment files.
 - No preinstall/postinstall scripts and no remote code evaluation.
 - Plain watchlist monitoring is local-only and not shared to DKG.
-- Join-challenge starts, failures, solves, and expirations are local-only; only validated evidence-backed fraud/moderation artifacts are shared to DKG.
+- Join-challenge starts, solves, and one-off expirations are local-only. Repeated challenge-failure clusters can be shared as aggregate onboarding-abuse intelligence; validated evidence-backed fraud/moderation artifacts remain the primary DKG writes.
 - Public Telegram replies redact internal UALs, event IDs, graph names, OpenClaw endpoint/model details, and admin setup details.
 - Telegram enforcement requires configured admin or Telegram chat-admin identity plus bot rights.
 

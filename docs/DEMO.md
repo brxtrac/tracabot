@@ -29,7 +29,7 @@ npm run test:commands
 npm audit --omit=dev
 ```
 
-Expected current result: `102` Node tests pass, command-loop smoke test passes, and production audit reports zero vulnerabilities.
+Expected current result: all Node tests pass, command-loop smoke test passes, and production audit reports zero vulnerabilities. Current release check: `164` Node tests pass.
 
 ## 3. Telegram Walkthrough
 
@@ -47,8 +47,8 @@ Urgent free USDT airdrop. Connect wallet at claim-example.test and DM support to
 7. Run `/ban` as a reply to the scam message if using a disposable test account.
 8. Run `/stats`, `/stats campaigns`, `/digest`, and `/watchlist`.
 9. Ask a conversational safety question as a reply: `@tracabot is this a scam?`
-10. Run `/status` as an admin to show DKG, permissions, thresholds, and OpenClaw LLM discovery without exposing secrets.
-11. Have a low-risk test account join the group, click the challenge deep link, and DM a full `did:dkg:` Knowledge Asset UAL to verify DKG familiarity before the TTL expires.
+10. Run `/status` as an admin to show DKG version, OpenClaw adapter capabilities, permissions, thresholds, learning policy, and OpenClaw LLM discovery without exposing secrets.
+11. Have a low-risk test account join the group, click the challenge deep link, and DM either the configured Knowledge Asset Q&A answer or a full `did:dkg:` Knowledge Asset UAL before the TTL expires.
 
 Show that the bot explains local evidence, DKG evidence, confidence, action taken, and promotion status while public group replies avoid exposing internal UALs, graph details, OpenClaw endpoints, model names, and admin setup details.
 
@@ -84,7 +84,7 @@ The demo refuses production writes unless `TRACABOT_TEST_MODE=true` is set.
 - 0:00 Problem: Telegram scam intelligence is siloed.
 - 0:45 Install: DKG/OpenClaw setup and bot configuration.
 - 1:45 Detection: `/scan` and `/report` on a scam message.
-- 3:00 DKG: show Shared Memory write/read and controlled provenance details.
+- 3:00 DKG: show Working Memory assertion lifecycle, Shared Memory write/read, and controlled provenance details.
 - 4:00 Enforcement: `/ban` deletes replied scam message and bans target.
 - 5:00 Explainability: `/why`, `/appeal`, `/review`.
 - 6:00 Conversation: `@tracabot is this a scam?` evidence-bound reply using OpenClaw LLM when available.

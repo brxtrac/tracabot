@@ -28,7 +28,8 @@ Scope basis: TRACaBot reads/writes DKG v10 Shared Memory through the official Op
 ## DKG Operations
 
 - `createContextGraph` for the configured graph, default `tracabot`.
-- `share` for evidence-backed DKG v10 Shared Memory writes.
+- `createAssertion`, `writeAssertion`, and `promoteAssertion` for Working Memory staging and Shared Working Memory promotion when adapter-supported.
+- `share` as a compatibility fallback for evidence-backed DKG v10 Shared Memory writes.
 - `query` with Shared Memory enabled for cross-community evidence lookup.
 - `publishSharedMemory` for targeted publication of qualifying high-confidence event roots.
 
@@ -36,9 +37,9 @@ Scope basis: TRACaBot reads/writes DKG v10 Shared Memory through the official Op
 
 - Local working memory: JSONL audit log, watchlist state, digest state, weak reports, join-challenge state, challenge configuration overrides, and monitoring-only watch/unwatch actions.
 - Shared Memory: accepted reports, DM scam reports, fraud findings, restrictions, bans, campaigns, appeals, reviews, and selective `channel_observation` events with structured evidence. Bounded raw `message_text` is shared only for high-confidence public channel abuse such as scam channel promos, outside token/coin promos, fake airdrops, wallet/domain lures, investment-profit spam, or admin/support DM impersonation.
-- Context Graph publication: high-confidence accepted reports, high-confidence findings, and executed bans.
+- Context Graph publication: high-confidence accepted reports, high-confidence findings, executed bans, admin-reviewed decisions, and qualifying repeated campaign summaries.
 
-The repository did not confirm a separate public OpenClaw adapter method dedicated to DKG v10 Working Memory. Until that API is available, operational drafts stay local and collaborative evidence uses the supported Shared Memory adapter calls.
+Draft artifacts start in local working memory, then the OpenClaw learning loop can commit high-quality artifacts into DKG Shared Working Memory through the same adapter boundary. Low-quality or uncommitted material stays local.
 
 ## Egress
 

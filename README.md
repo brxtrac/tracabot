@@ -1,6 +1,6 @@
 # TRACaBot
 
-TRACaBot is an OpenClaw + Telegram + OriginTrail DKG v10 intelligent anti-scam bot. It monitors Telegram communities, detects scam patterns, records local working memory, and writes evidence-backed fraud intelligence to DKG v10 Shared Memory so all instances of TRACaBot can query reusable scam context and apply it on their respective communities. Imagine a Telegram anti-scam bot that updates real time with knowledge from all communities to create a safe environment for users to exchange. 
+TRACaBot is an OpenClaw + Telegram + OriginTrail DKG v10 intelligent anti-scam bot. It monitors Telegram communities, detects scam patterns, records local working memory, and writes evidence-backed fraud intelligence to DKG v10 Shared Memory so TRACaBot instances can reuse scam context across communities.
 
 The default Context Graph is `tracabot`. Every community running TRACaBot against that Context Graph contributes to the same DKG v10 Shared Memory layer. TRACaBot writes events with provenance, local/DKG confidence, stable Telegram IDs, usernames/display-name aliases, reporter metadata, scam type, wallet/pattern indicators, and moderation outcomes. High-confidence fraud findings, accepted high-confidence reports, and executed bans are automatically published from Shared Memory into the Context Graph so other communities can query them immediately.
 
@@ -16,7 +16,7 @@ npm run demo
 npm run skill -- get_digest '{}'
 ```
 
-For full human and agent testing paths, see `docs/TESTING.md`. The canonical bounty design brief is `docs/DESIGN_BRIEF.md`; older lowercase docs are legacy drafts kept for historical context.
+For full human and agent testing paths, see `docs/TESTING.md`. The canonical design brief is `docs/DESIGN_BRIEF.md`.
 
 ## Why It Exists
 
@@ -35,9 +35,9 @@ Telegram scam moderation usually stays trapped inside one chat. TRACaBot turns e
 - `/watchlist` is admin-only and shows local active watches, temporary mutes, and pending review items for follow-up.
 - `/challenge on|off|status` is admin-only and toggles the new-user DKG join challenge per chat without restarting the bot.
 - `/appeal <event-id> reason` records a correction request to DKG Shared Memory.
-- `/review <event-id> uphold|overturn reason` is admin-only and writes a DKG review decision for future audits and false-positive correction.
+- `/review [@user|event-id] uphold|overturn reason` is admin-only and writes a DKG review decision for future audits and false-positive correction. Reply-based review inference also works.
 - `/digest` summarizes recent bans, restrictions, reports, watches, appeals, reviews, and campaign signals.
-- `/status` is admin-only and shows DKG reachability, Telegram permissions, thresholds, and conversational mode status without exposing secrets.
+- `/status` is admin-only and shows DKG reachability, DKG/OpenClaw adapter version/capabilities, Telegram permissions, thresholds, learning policy, and conversational mode status without exposing secrets.
 - `/help` explains commands, autonomous thresholds, safeguards, and the DKG shared-memory loop for admins.
 
 ## Community Workflow
@@ -57,9 +57,9 @@ Admins keep enforcement guarded and auditable:
 - Use `/ban` only as a reply to a scammer, scam message, or supported SangMata rename alert. The bot must have Telegram ban rights.
 - Use `/watch` for suspicious accounts that should receive extra scrutiny but should not be banned yet.
 - Use `/watchlist` to see watched users, temporary mutes, and pending review items.
-- Use `/review <event-id> uphold|overturn reason` to resolve appeals or false positives. Review decisions are written to DKG Shared Memory.
+- Use `/review [@user|event-id] uphold|overturn reason` to resolve appeals or false positives. Review decisions are written to DKG Shared Memory.
 - Use `/stats`, `/stats campaigns`, and `/digest` to understand recent detections, repeated scam waves, and recommended follow-up.
-- Use `/status` to verify bot permissions, DKG reachability, thresholds, and conversational mode without exposing secrets.
+- Use `/status` to verify bot permissions, DKG/OpenClaw adapter versions and memory capabilities, thresholds, learning policy, and conversational mode without exposing secrets.
 
 ## Campaign Summaries
 
@@ -69,7 +69,7 @@ Published campaign summaries include the campaign key, event count, affected com
 
 ## DKG Join Challenge
 
-TRACaBot can replace generic captcha bots with a DKG-native onboarding gate. When `TRACABOT_JOIN_CHALLENGE=true`, low-risk new members are allowed to send text only and must verify with a Knowledge Asset before normal chat permissions are restored.
+TRACaBot can replace generic captcha bots with a DKG-native onboarding gate. When `TRACABOT_JOIN_CHALLENGE=true`, low-risk new members are muted until they verify with a Knowledge Asset or configured Knowledge Asset Q&A in DM, then normal chat permissions are restored.
 
 The default-friendly mode is Q&A: publish `docs/TRACABOT_CHALLENGE_ASSET.md` as a DKG Knowledge Asset, set `TRACABOT_JOIN_CHALLENGE_ASSET_URL` to its DKG Explorer link, and configure `TRACABOT_JOIN_CHALLENGE_QA_BANK` with rotating questions whose answers are visible in the asset. The bot posts the asset link in the group, asks one question, and asks the user to DM the answer. Answers are normalized for case, punctuation, and spacing.
 
@@ -84,7 +84,8 @@ High-risk joins still bypass the challenge and go directly to the configured ris
 TRACaBot uses the official DKG/OpenClaw adapter setup as its DKG boundary. `DkgDaemonClient` points at the local DKG v10 daemon at `DKG_NODE_URL` and keeps TRACaBot aligned with the same DKG service OpenClaw uses:
 
 - `DkgDaemonClient.createContextGraph` ensures the configured Context Graph exists.
-- `DkgDaemonClient.share` writes reports, findings, moderation evidence, and selective channel observations to DKG v10 Shared Memory.
+- `DkgDaemonClient.createAssertion`, `writeAssertion`, and `promoteAssertion` stage evidence in DKG Working Memory and promote selected roots to Shared Working Memory when available.
+- `DkgDaemonClient.share` remains the compatibility fallback for DKG v10 Shared Memory writes when an older adapter lacks assertion lifecycle methods.
 - `DkgDaemonClient.publishSharedMemory` automatically publishes only eligible high-confidence or admin-reviewed fraud memory into Verified Memory.
 - `DkgDaemonClient.query` reads shared DKG evidence before scoring a target.
 
@@ -94,7 +95,7 @@ TRACaBot's event ontology and lifecycle are documented in `docs/TRACABOT_ONTOLOG
 
 TRACaBot also ships an OpenClaw skill interface in `skills/tracabot/skill.json` and a JSON CLI bridge, `tracabot-skill`, so OpenClaw agents can call the same fraud intelligence without going through Telegram. Skill tools include `scan_target`, `monitor_chat_event`, `explain_event`, `get_watchlist`, `get_digest`, `query_campaigns`, `submit_appeal`, and `review_event`.
 
-OpenClaw can also call `sort_conversation_artifact` to classify scam, spam, phishing, weak-report, warning, or false-positive conversation material. High-quality artifacts are written as `conversation_artifact` events to DKG v10 Shared Memory for LLM-Wiki-style learning, but they do not trigger autonomous enforcement by themselves.
+OpenClaw can also call `sort_conversation_artifact` to classify scam, spam, phishing, weak-report, warning, benign contrast, or false-positive conversation material. High-quality artifacts are written as `conversation_artifact` events to DKG v10 Shared Memory for LLM-Wiki-style learning, but they do not trigger autonomous enforcement by themselves.
 
 For autonomous LLM-Wiki-style learning, run `node ./bin/openclaw-learning-loop.js` beside the Telegram bot. TRACaBot keeps listening to Telegram and drafting local WM artifacts; the OpenClaw loop drains those drafts through `sort_conversation_artifact`, stamps committed artifacts with `commit_receipt_id`, and writes only committed artifacts to DKG Shared Memory. Use `--once` for a single pass or `--dry-run` to inspect pending draft inputs. Tune with `TRACABOT_LEARNING_LOOP_INTERVAL_MS` and `TRACABOT_LEARNING_LOOP_LIMIT`.
 

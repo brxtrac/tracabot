@@ -14,7 +14,7 @@ tracabot contacts:
 
 ## DKG Write Authority
 
-The integration writes scam detections, reports, selective high-confidence channel observations, and moderation actions to DKG v10 Shared Memory through the official DKG/OpenClaw adapter setup using `DkgDaemonClient` against the local DKG v10 daemon. It uses the adapter to create the configured Context Graph, write Shared Memory, query evidence, and publish eligible high-confidence event roots. If the publish step fails, the Shared Memory write is kept and the publish error is recorded in the local audit event.
+The integration writes scam detections, reports, selective high-confidence channel observations, and moderation actions to DKG v10 Shared Memory through the official DKG/OpenClaw adapter setup using `DkgDaemonClient` against the local DKG v10 daemon. It uses the adapter to create the configured Context Graph, stage assertion data in Working Memory when supported, promote selected roots to Shared Working Memory, query evidence, and publish eligible high-confidence event roots. If the publish step fails, the Shared Memory write is kept and the publish error is recorded in the local audit event.
 
 TRACaBot treats `DkgDaemonClient` as the public-interface boundary to the authenticated node API. It does not import internal DKG v10 monorepo packages, patch DKG node source, load code into the daemon process, or bypass Curator authority on `SHARE` / `PUBLISH` operations.
 
