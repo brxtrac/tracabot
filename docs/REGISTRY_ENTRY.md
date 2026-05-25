@@ -3,10 +3,10 @@
 ## Package
 
 - Name: `tracabot`
-- Version: `0.1.1`
+- Source version: `0.1.1`
 - Repository: `https://github.com/brxtrac/tracabot`
 - Commit: pinned to the final submission commit in the `dkg-integrations` registry PR
-- npm: `https://www.npmjs.com/package/tracabot/v/0.1.1`
+- npm registry install version: `https://www.npmjs.com/package/tracabot/v/0.1.0` (published with provenance; final source commit is pinned separately in the registry PR)
 - License: MIT
 - Category: OpenClaw priority integration, Telegram safety, DKG v10 Shared Memory
 - Tags: `openclaw`, `dkg-v10`, `shared-memory`, `telegram`, `anti-scam`, `context-graph`, `llm-wiki`, `autoresearch`
