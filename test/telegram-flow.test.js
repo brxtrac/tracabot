@@ -133,7 +133,7 @@ test('new high-risk join is sent to admin review when bot has admin rights', asy
   });
   assert.equal(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 42), false);
   assert.equal(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 42), false);
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('learning fraud patterns')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')));
   assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user.id === 42));
 });
 
@@ -191,7 +191,7 @@ test('DKG-backed high-risk first post is deleted and sent to admin review when b
   assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 127));
   assert.equal(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 166), false);
   assert.equal(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 166), false);
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('learning fraud patterns')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')));
   assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user.id === 166 && event.payload.recommended_action === 'admin_review'));
 });
 
@@ -240,8 +240,8 @@ test('DKG-backed high-risk join asks for admin review without ban-rights wording
     new_chat_members: [{ id: 43, username: 'fake_support2', is_bot: false }]
   });
   assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('learning fraud patterns')));
-  const alert = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text).includes('learning fraud patterns'))?.payload.text || '';
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')));
+  const alert = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review'))?.payload.text || '';
   assert.match(alert, /Ask an admin to review/);
   assert.match(alert, /\/appeal/);
   assert.doesNotMatch(alert, /ban rights|Recommendation: ban/i);
@@ -1150,6 +1150,28 @@ test('/appeal and /review infer latest target event from user or reply', async (
   assert.ok(dkgWrites.some((event) => event.event_type === 'review_overturned' && event.payload.target_event_id === 'evt-auto-review'));
 });
 
+test('/review infers event when admin replies to bot review alert', async () => {
+  const { bot, calls, dkgWrites } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  await bot.handleMessage({
+    chat,
+    from: { id: 166, username: 'known_bad', is_bot: false },
+    message_id: 127,
+    text: 'known scam actor returns'
+  });
+  const alertIndex = calls.findIndex((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review'));
+  assert.notEqual(alertIndex, -1);
+  await bot.handleCommand({
+    chat,
+    from: { id: 1, username: 'admin' },
+    message_id: 128,
+    text: '/review overturn long term community member',
+    reply_to_message: { chat, from: { id: 999, username: 'tracethembot', is_bot: true }, message_id: alertIndex + 1, text: calls[alertIndex].payload.text }
+  });
+  const reviewSource = bot.store.all().find((event) => event.event_type === 'risk_review_needed' && event.user.id === 166);
+  assert.ok(dkgWrites.some((event) => event.event_type === 'review_overturned' && event.payload.target_event_id === reviewSource.id));
+});
+
 test('/review overturn suppresses future enforcement for the reviewed user', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   const chat = { id: -100, title: 'demo' };
@@ -1169,7 +1191,7 @@ test('/review overturn suppresses future enforcement for the reviewed user', asy
   });
   assert.equal(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 4242), false);
   assert.equal(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 4242), false);
-  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('learning fraud patterns')), false);
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')), false);
   const checks = bot.store.all().filter((event) => event.event_type === 'risk_check' && event.user.id === 4242);
   assert.ok(checks.some((event) => event.payload.confidence <= 10 && event.payload.recommended_action === 'ignore'));
 });

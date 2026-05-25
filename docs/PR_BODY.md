@@ -24,7 +24,7 @@ Telegram commands are registered on startup:
 - `/watchlist`: admin-only local queue of active watches, temporary mutes, and pending review items.
 - `/challenge on|off|status`: admin-only per-chat join challenge toggle.
 - `/appeal`: submit a correction or appeal to DKG Shared Memory.
-- `/review`: admin-only upheld/overturned review decision written to DKG.
+- `/review`: admin-only upheld/overturned review decision written to DKG. Admins can reply directly to a bot review alert, and review confirmations remain visible for auditability.
 - `/digest`: summarize recent actions, reports, watches, appeals, reviews, and campaign signals.
 - Join challenge: low-risk new members verify with a DKG Knowledge Asset UAL or configured Knowledge Asset Q&A; challenge state, per-chat overrides, and failed attempts remain local-only and do not pollute DKG.
 
@@ -66,7 +66,7 @@ Tests and audit:
 
 ```text
 npm test
-164 tests passed
+165 tests passed
 
 npm audit --omit=dev
 found 0 vulnerabilities

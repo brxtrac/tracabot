@@ -324,6 +324,7 @@ export class TelegramShieldBot {
     this.chatAdmins = new Map();
     this.joinChallenges = new Map();
     this.solvedJoinChallenges = new Map();
+    this.reviewMessageEvents = new Map();
     this.nextProactiveScanAt = Date.now() + this.config.proactiveScanMinutes * 60 * 1000;
     this.conversationLastReply = new Map();
   }
@@ -699,13 +700,16 @@ export class TelegramShieldBot {
     const backed = canAutonomouslyEscalate(risk);
     const text = [
       backed
-        ? 'TRACaBot is learning fraud patterns and flagged this for admin review.'
-        : 'TRACaBot is learning fraud patterns and needs an admin review.',
+        ? 'TRACaBot flagged this for admin review.'
+        : 'TRACaBot needs an admin review.',
       formatRiskAssessment({ target: actorFromMessage(message), risk }),
       'If this is wrong, reply with /appeal and an optional reason.',
       message.text ? `Context: ${boundedText(message.text, MAX_CONTEXT_CHARS)}` : ''
     ].filter(Boolean).join('\n');
-    await this.send(message.chat.id, text, { reply_to_message_id: message.message_id });
+    const sent = await this.send(message.chat.id, text, { reply_to_message_id: message.message_id });
+    if (sent?.message_id && event?.id) {
+      this.reviewMessageEvents.set(`${message.chat.id}:${sent.message_id}`, event.id);
+    }
     for (const adminId of this.config.adminIds) {
       try {
         await this.send(adminId, text);
@@ -809,6 +813,9 @@ export class TelegramShieldBot {
   }
 
   findAppealableEvent(message, target = {}) {
+    const repliedBotEventId = this.reviewMessageEvents.get(`${message.chat?.id}:${message.reply_to_message?.message_id}`);
+    const repliedBotEvent = this.findEvent(repliedBotEventId);
+    if (repliedBotEvent) return repliedBotEvent;
     const targetId = target.id ? String(target.id) : '';
     const targetUsername = target.username ? String(target.username).replace(/^@/, '').toLowerCase() : '';
     const replyUser = actorFromMessage(message.reply_to_message || {});
@@ -1717,7 +1724,7 @@ export class TelegramShieldBot {
         evidence: [`admin review ${decision} ${reviewedEvent.id}: ${reason}`]
       });
       if (decision === 'overturned') await this.recordConversationArtifact(message, { risk: { confidence: 80, local_confidence: 80, scam_type: 'false_positive', evidence: [`false positive correction for ${reviewedEvent.id}: ${reason}`] }, text: reason, artifactKind: 'false_positive_signal', conversationRole: 'moderator', sourceEventIds: [reviewedEvent.id, event.id], operatorNote: reason, forceDkg: true });
-      await this.sendCommandReply(chatId, `✅ Review ${decision}. I saved the review decision to DKG fraud memory. Reason: ${reason}.`, { reply_to_message_id: message.message_id });
+      await this.sendPersistentCommandReply(chatId, `✅ Review ${decision}. I saved the review decision to DKG fraud memory. Reason: ${reason}.`, { reply_to_message_id: message.message_id });
       return;
     }
     if (text.startsWith('/scan')) {

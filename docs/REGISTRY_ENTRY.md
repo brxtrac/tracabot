@@ -36,7 +36,7 @@ Scope basis: TRACaBot reads/writes DKG v10 Shared Memory through the official Op
 ## Memory Policy
 
 - Local working memory: JSONL audit log, watchlist state, digest state, weak reports, join-challenge state, challenge configuration overrides, and monitoring-only watch/unwatch actions.
-- Shared Memory: accepted reports, DM scam reports, fraud findings, restrictions, bans, campaigns, appeals, reviews, and selective `channel_observation` events with structured evidence. Bounded raw `message_text` is shared only for high-confidence public channel abuse such as scam channel promos, outside token/coin promos, fake airdrops, wallet/domain lures, investment-profit spam, or admin/support DM impersonation.
+- Shared Memory: accepted reports, DM scam reports, fraud findings, restrictions, bans, campaigns, appeals, reviews, and selective `channel_observation` events with structured evidence. Admin review decisions can be entered by replying directly to the bot's review alert and remain visible in Telegram for auditability. Bounded raw `message_text` is shared only for high-confidence public channel abuse such as scam channel promos, outside token/coin promos, fake airdrops, wallet/domain lures, investment-profit spam, or admin/support DM impersonation.
 - Context Graph publication: high-confidence accepted reports, high-confidence findings, executed bans, admin-reviewed decisions, and qualifying repeated campaign summaries.
 
 Draft artifacts start in local working memory, then the OpenClaw learning loop can commit high-quality artifacts into DKG Shared Working Memory through the same adapter boundary. Low-quality or uncommitted material stays local.
