@@ -44,7 +44,7 @@ OpenClaw skill tools are also available: `scan_target`, `monitor_chat_event`, `s
 
 ## Verification
 
-Local OpenClaw mini PC verification:
+Live DKG v10 / OpenClaw adapter verification:
 
 ```text
 dkg status
@@ -61,6 +61,8 @@ Core command paths exercised: /stats, /scan, /report, /ban
 Graph: did:dkg:context-graph:tracabot/_shared_memory
 RetrievedIntel: riskScore 100, reportsAcrossCommunities 4
 ```
+
+Review and governance paths are covered in the automated test suite, including `/appeal`, `/review`, reply-based review inference from bot alerts, false-positive suppression after overturns, `/watchlist` review queues, and visible persistent review confirmations.
 
 Tests and audit:
 
@@ -81,6 +83,8 @@ Bot command loop verified with stubbed Telegram API and live DKG v10 read/write 
 ## Security Attestation
 
 I attest that this code is my own work or properly licensed, contains no intentional backdoors, uses no dynamic remote code loading, and has no preinstall or postinstall scripts. Network egress is declared as `api.telegram.org` plus the configured local DKG node. DKG write authority is limited to Context Graph creation, Shared Memory writes, Shared Memory queries, and targeted auto-publishing of qualifying high-confidence fraud events through the configured Curator-authorized runtime.
+
+The registry install points to the published provenance-backed `tracabot@0.1.0` package, while the source, design brief, and demo links are pinned to the final reviewed commit for this PR.
 
 ## Maintenance
 
