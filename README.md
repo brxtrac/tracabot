@@ -1,6 +1,6 @@
 # TRACaBot
 
-TRACaBot is an OpenClaw + Telegram + OriginTrail DKG v10 intelligent anti-scam bot. It monitors Telegram communities, detects scam patterns, records local working memory, and writes evidence-backed fraud intelligence to DKG v10 Shared Memory so TRACaBot instances can reuse scam context across communities.
+TRACaBot is an OpenClaw + Telegram + OriginTrail DKG v10 intelligent anti-scam bot. It monitors Telegram communities, detects scam patterns, records local working memory, and writes evidence-backed fraud intelligence to DKG v10 Shared Memory so every TRACaBot instance can query reusable scam context and apply it in its own community. Think of it as a Telegram anti-scam agent that updates with knowledge from all participating communities instead of forcing every group to defend itself alone.
 
 The default Context Graph is `tracabot`. Every community running TRACaBot against that Context Graph contributes to the same DKG v10 Shared Memory layer. TRACaBot writes events with provenance, local/DKG confidence, stable Telegram IDs, usernames/display-name aliases, reporter metadata, scam type, wallet/pattern indicators, and moderation outcomes. High-confidence fraud findings, accepted high-confidence reports, and executed bans are automatically published from Shared Memory into the Context Graph so other communities can query them immediately.
 
@@ -21,6 +21,12 @@ For full human and agent testing paths, see `docs/TESTING.md`. The canonical des
 ## Why It Exists
 
 Telegram scam moderation usually stays trapped inside one chat. TRACaBot turns each meaningful scan, report, and moderation action into structured fraud knowledge that can be queried across communities. If a fraudster is banned or reported in one channel, another TRACaBot instance can flag the same Telegram user ID, reused username/display-name alias, wallet, or scam pattern when that actor appears elsewhere.
+
+Existing Telegram moderation tools such as Shieldy, Miss Rose, and similar bots are useful for basic spam filters, captchas, and admin commands, but they were not built for the agent era. They do not keep persistent cross-community memory, do not build reusable evidence, do not reason over scam campaigns across channels, and do not expose agentic workflows for review, correction, or shared intelligence.
+
+TRACaBot is designed for communities that want persistent and verifiable protection instead of isolated bot actions. It is especially relevant for the OriginTrail ecosystem as DKG grows into infrastructure for fighting AI harm: our own community channels, holders, contributors, and newcomers should be protected by the same verifiable memory principles we are building for others.
+
+Telegram is one of the most active social surfaces for many Web3 and AI communities. TRACaBot turns that surface into a practical DKG onboarding point: new participants can see how Working Memory, Shared Working Memory, and evidence-backed trust gradients can secure real communication rather than only reading about DKG in abstract terms.
 
 ## Commands
 
@@ -88,6 +94,12 @@ TRACaBot uses the official DKG/OpenClaw adapter setup as its DKG boundary. `DkgD
 - `DkgDaemonClient.share` remains the compatibility fallback for DKG v10 Shared Memory writes when an older adapter lacks assertion lifecycle methods.
 - `DkgDaemonClient.publishSharedMemory` automatically publishes only eligible high-confidence or admin-reviewed fraud memory into Verified Memory.
 - `DkgDaemonClient.query` reads shared DKG evidence before scoring a target.
+
+TRACaBot maps Telegram moderation onto the DKG v10 memory model as a trust gradient:
+
+- Working Memory: daily communication artifacts, weak signals, local watch notes, review queues, join-challenge state, and draft conversation artifacts that the agent should remember but not yet share.
+- Shared Working Memory: moderate to high-risk evidence that should help related communities, including accepted reports, impersonation patterns, suspicious domains, reused wallets, appeals, admin reviews, and campaign signals.
+- Verified Memory readiness: high-confidence or admin-reviewed evidence, such as confirmed impersonation attempts, bans, accepted reports, and false-positive corrections, is shaped so it can later be published or consumed by context oracles without rewriting the data model.
 
 This cross-community loop is the core product behavior: observe locally, write structured evidence to DKG Shared Memory, auto-publish high-confidence events, then let every other TRACaBot instance query the same graph before the fraudster can repeat the attack in a different channel.
 
