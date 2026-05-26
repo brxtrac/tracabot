@@ -2375,6 +2375,12 @@ export class TelegramShieldBot {
     await this.expireJoinChallenges();
   }
 
+  async dropPendingUpdates() {
+    if (this.config.dropPendingUpdatesOnStart === false) return;
+    const updates = await this.call('getUpdates', { offset: -1, limit: 1, timeout: 0, allowed_updates: ['message', 'chat_member', 'my_chat_member'] });
+    if (updates.length) this.offset = updates[0].update_id + 1;
+  }
+
   async run() {
     if (!this.config.telegramToken) throw new Error('TELEGRAM_BOT_TOKEN is required');
     try {
@@ -2386,6 +2392,11 @@ export class TelegramShieldBot {
       await this.call('setMyCommands', { commands: TELEGRAM_COMMANDS });
     } catch (error) {
       console.error(`setMyCommands failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    try {
+      await this.dropPendingUpdates();
+    } catch (error) {
+      console.error(`dropPendingUpdates failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     for (;;) {
       try {

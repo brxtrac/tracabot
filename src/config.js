@@ -160,6 +160,7 @@ export function loadConfig(env = process.env) {
     proactiveScanMinutes,
     telegramTimeoutMs,
     dkgQueryTimeoutMs,
+    dropPendingUpdatesOnStart: parseBoolean(env.TRACABOT_DROP_PENDING_UPDATES_ON_START, true),
     contextGraph,
     publishContextGraphId,
     communityId: env.TRACABOT_COMMUNITY_ID || '',
