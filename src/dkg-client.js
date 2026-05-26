@@ -7,6 +7,7 @@ const MAX_EVIDENCE_LENGTH = 500;
 const MAX_FACT_ID_LENGTH = 80;
 const MAX_INDICATORS = 20;
 const SHARE_RETRY_DELAYS_MS = [250, 1000];
+const DKG_QUERY_COOLDOWN_MS = 60 * 1000;
 const ADAPTER_PACKAGE = '@origintrail-official/dkg-adapter-openclaw';
 const ADAPTER_PATHS = [
   '/root/.dkg/releases/current/node_modules/@origintrail-official/dkg-adapter-openclaw/dist/index.js',
@@ -117,6 +118,14 @@ function lifecycleStage(event = {}) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function withTimeout(promise, ms, label = 'operation') {
+  let timeout;
+  const timer = new Promise((_, reject) => {
+    timeout = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timer]).finally(() => clearTimeout(timeout));
 }
 
 function assertionNameForEvent(event = {}) {
@@ -308,6 +317,7 @@ export class DkgClient {
     this.contextReady = false;
     this.adapterClient = adapterClient;
     this.adapterLoader = adapterLoader;
+    this.queryDisabledUntil = 0;
   }
 
   async client() {
@@ -480,15 +490,17 @@ export class DkgClient {
   }
 
   async queryBindings(sparql) {
+    if (Date.now() < this.queryDisabledUntil) return [];
     try {
       const client = await this.client();
-      const response = await client.query(sparql, {
+      const response = await withTimeout(client.query(sparql, {
         contextGraphId: this.config.contextGraph,
         includeSharedMemory: true
-      });
+      }), this.config.dkgQueryTimeoutMs || 4000, 'DKG query');
       return response?.result?.bindings || response?.bindings || [];
     } catch (error) {
       console.error(`DKG query failed: ${error instanceof Error ? error.message : String(error)}`);
+      if (isRetryableDkgError(error)) this.queryDisabledUntil = Date.now() + DKG_QUERY_COOLDOWN_MS;
       return [];
     }
   }

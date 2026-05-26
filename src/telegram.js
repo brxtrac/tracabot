@@ -334,7 +334,16 @@ export class TelegramShieldBot {
   }
 
   async send(chatId, text, extra = {}) {
-    return this.call('sendMessage', { chat_id: chatId, text, ...extra });
+    try {
+      return await this.call('sendMessage', { chat_id: chatId, text, ...extra });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (extra.reply_to_message_id && /message to be replied not found/i.test(message)) {
+        const { reply_to_message_id, ...fallbackExtra } = extra;
+        return this.call('sendMessage', { chat_id: chatId, text, ...fallbackExtra });
+      }
+      throw error;
+    }
   }
 
   scheduleDelete(chatId, messageId, ttlSeconds = this.config.botMessageTtlSeconds || 60) {

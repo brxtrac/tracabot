@@ -229,6 +229,24 @@ test('risk lookups use shared scam domains across communities', async () => {
   assert.equal(intel.evidence[0].eventId, 'domain-hit');
 });
 
+test('DKG query timeouts fail fast and enter cooldown', async () => {
+  let calls = 0;
+  const dkg = new DkgClient({ contextGraph: 'tracabot', dkgQueryTimeoutMs: 10 }, {
+    adapterClient: {
+      async query() {
+        calls += 1;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return { result: { bindings: [{ s: 'late' }] } };
+      }
+    }
+  });
+  const started = Date.now();
+  assert.deepEqual(await dkg.queryBindings('SELECT * WHERE { ?s ?p ?o }'), []);
+  assert.ok(Date.now() - started < 45);
+  assert.deepEqual(await dkg.queryBindings('SELECT * WHERE { ?s ?p ?o }'), []);
+  assert.equal(calls, 1);
+});
+
 test('auto-publishes high-confidence fraud findings to the context graph', async () => {
   const adapterClient = makeAdapterClient();
   const dkg = new DkgClient({ contextGraph: 'tracabot' }, {

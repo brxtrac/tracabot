@@ -48,6 +48,7 @@ export function loadConfig(env = process.env) {
   const banThreshold = Number(env.TRACABOT_BAN_THRESHOLD || actionThreshold);
   const proactiveScanMinutes = Number(env.TRACABOT_PROACTIVE_SCAN_MINUTES || 30);
   const telegramTimeoutMs = Number(env.TRACABOT_TELEGRAM_TIMEOUT_MS || 30000);
+  const dkgQueryTimeoutMs = Number(env.TRACABOT_DKG_QUERY_TIMEOUT_MS || 4000);
   const adminIds = new Set((env.TRACABOT_ADMINS || '')
     .split(',')
     .map((id) => id.trim().replace(/^@/, '').toLowerCase())
@@ -76,6 +77,9 @@ export function loadConfig(env = process.env) {
   }
   if (!Number.isFinite(telegramTimeoutMs) || telegramTimeoutMs < 5000) {
     throw new Error('TRACABOT_TELEGRAM_TIMEOUT_MS must be at least 5000');
+  }
+  if (!Number.isFinite(dkgQueryTimeoutMs) || dkgQueryTimeoutMs < 1000) {
+    throw new Error('TRACABOT_DKG_QUERY_TIMEOUT_MS must be at least 1000');
   }
   const conversationMinConfidence = Number(env.TRACABOT_CONVERSATION_MIN_CONFIDENCE || 60);
   const proactiveReplyThreshold = Number(env.TRACABOT_PROACTIVE_REPLY_THRESHOLD || 75);
@@ -155,6 +159,7 @@ export function loadConfig(env = process.env) {
     actionThreshold,
     proactiveScanMinutes,
     telegramTimeoutMs,
+    dkgQueryTimeoutMs,
     contextGraph,
     publishContextGraphId,
     communityId: env.TRACABOT_COMMUNITY_ID || '',
