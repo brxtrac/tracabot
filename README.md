@@ -2,6 +2,8 @@
 
 TRACaBot is an OpenClaw + Telegram + OriginTrail DKG v10 intelligent anti-scam bot. It monitors Telegram communities, detects scam patterns, records local working memory, and writes evidence-backed fraud intelligence to DKG v10 Shared Memory so every TRACaBot instance can query reusable scam context and apply it in its own community. Think of it as a Telegram anti-scam agent that updates with knowledge from all participating communities instead of forcing every group to defend itself alone.
 
+> **AI agents / self-hosters**: See [AGENT_INSTALL.md](./AGENT_INSTALL.md) for the best experience.
+
 The default Context Graph is `tracabot`. Every community running TRACaBot against that Context Graph contributes to the same DKG v10 Shared Memory layer. TRACaBot writes events with provenance, local/DKG confidence, stable Telegram IDs, usernames/display-name aliases, reporter metadata, scam type, wallet/pattern indicators, and moderation outcomes. High-confidence fraud findings, accepted high-confidence reports, and executed bans are automatically published from Shared Memory into the Context Graph so other communities can query them immediately.
 
 ## Quick Start For Testers
@@ -40,10 +42,11 @@ Telegram is one of the most active social surfaces for many Web3 and AI communit
 - `/watch` and `/unwatch` are admin-only scrutiny controls when replying to a user or SangMata rename alert; `/watch <telegram-id>`, `/watch @user`, `/unwatch <telegram-id>`, and `/unwatch @user` also work. ID/reply-based use creates a clickable Telegram mention and boosts future risk scoring without banning by itself.
 - `/watchlist` is admin-only and shows local active watches, temporary mutes, and pending review items for follow-up.
 - `/challenge on|off|status` is admin-only and toggles the new-user DKG join challenge per chat without restarting the bot.
+- `/conversation on|off|status` is admin-only and toggles natural language / agentic chat mode per group (default on). When enabled, users can mention the bot or reply and speak naturally; TRACaBot classifies intent and maps requests to scans, reports, DKG memory queries, stats, evidence explanations, etc. The agent stays strictly on anti-scam + fraud intelligence topics and answers briefly.
 - `/appeal <event-id> reason` records a correction request to DKG Shared Memory.
 - `/review [@user|event-id] uphold|overturn reason` is admin-only and writes a DKG review decision for future audits and false-positive correction. Reply-based review inference also works.
 - `/digest` summarizes recent bans, restrictions, reports, watches, appeals, reviews, and campaign signals.
-- `/status` is admin-only and shows DKG reachability, DKG/OpenClaw adapter version/capabilities, Telegram permissions, thresholds, learning policy, and conversational mode status without exposing secrets.
+- `/status` is admin-only and shows DKG reachability, DKG/OpenClaw adapter version/capabilities, Telegram permissions, thresholds, learning policy, conversational mode, and proactive cross-group prior-action alert status (in-chat + admin DMs when history exists in the Context Graph) without exposing secrets.
 - `/help` explains commands, autonomous thresholds, safeguards, and the DKG shared-memory loop for admins.
 
 ## Community Workflow
@@ -111,7 +114,7 @@ OpenClaw can also call `sort_conversation_artifact` to classify scam, spam, phis
 
 For autonomous LLM-Wiki-style learning, run `node ./bin/openclaw-learning-loop.js` beside the Telegram bot. TRACaBot keeps listening to Telegram and drafting local WM artifacts; the OpenClaw loop drains those drafts through `sort_conversation_artifact`, stamps committed artifacts with `commit_receipt_id`, and writes only committed artifacts to DKG Shared Memory. Use `--once` for a single pass or `--dry-run` to inspect pending draft inputs. Tune with `TRACABOT_LEARNING_LOOP_INTERVAL_MS` and `TRACABOT_LEARNING_LOOP_LIMIT`.
 
-TRACaBot can also run in conversational safety mode. It keeps its own standalone Telegram bot token, but can read local OpenClaw OAuth/model/gateway configuration to draft scam-safety replies through the same OpenClaw LLM account already configured on the host. If OpenClaw chat access is unavailable, TRACaBot falls back to deterministic evidence-based safety templates. Conversation is limited to scam/fraud/wallet-safety questions and proactive scam warnings; LLM text never executes Telegram bans, deletes, restrictions, or DKG writes by itself.
+TRACaBot can also run in conversational safety mode. It keeps its own standalone Telegram bot token and can use `9router`, an OpenClaw-discovered LLM account, a direct OpenAI-compatible API, or a local LLM gateway to draft short scam-safety replies and classify ambiguous natural-language intent. Deterministic routing handles obvious requests such as stats, digest, reviews, watchlist, campaigns, help, and private-info refusals before any LLM call, so tokens are reserved for ambiguous or genuinely conversational turns. Conversation is limited to scam/fraud/wallet-safety questions and TRACaBot capabilities; LLM text never executes Telegram bans, deletes, restrictions, or DKG writes by itself.
 
 Local JSONL state is the bot's operational working memory for weak reports, watchlist state, digest state, join-challenge state, and ambiguous monitoring-only actions. Unsafe chat events with concrete evidence are written to DKG v10 Shared Memory through the OpenClaw adapter as collaborative evidence memory; only admin-verified or very-high-confidence events are published as Verified Memory.
 
@@ -122,6 +125,48 @@ The bot separates local analysis confidence from DKG confidence. Report-only evi
 TRACaBot applies graduated autonomous enforcement by default: low-confidence events are logged, medium-confidence events can be deleted and restricted, and high-confidence events can be deleted and banned. It also writes and queries scam domains in DKG Shared Memory, so a phishing or Telegram lure domain seen in one community can be flagged in another. Repeated domains, wallets, scam patterns, or text fingerprints are clustered into local campaign signals and can be written as `fraud_campaign` DKG events when the same wave repeats.
 
 Conversation artifact logging is controlled by `TRACABOT_WM_ARTIFACTS`, `TRACABOT_WM_ARTIFACT_MIN_CONFIDENCE`, `TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS`, `TRACABOT_WM_ARTIFACT_REDACT`, and `TRACABOT_WM_ARTIFACT_SHARE_LOW_CONFIDENCE`. By default, raw identifiers are redacted and low-quality artifacts stay local.
+
+## LLM Backends
+
+TRACaBot uses the LLM for two bounded tasks: natural-language Telegram replies and intent classification for direct bot mentions/replies. It does not use LLM output as direct enforcement authority. Slash commands, obvious natural-language intents, private-info refusals, and most scam scoring are deterministic to avoid wasting tokens.
+
+Recommended hosted setup with 9router:
+
+```text
+TRACABOT_CONVERSATIONAL=true
+TRACABOT_LLM_PROVIDER=9router
+TRACABOT_LLM_BASE_URL=https://api.9router.com
+TRACABOT_LLM_API_KEY=your-9router-key
+TRACABOT_LLM_MODEL=openai/gpt-4o-mini
+```
+
+Recommended model: `openai/gpt-4o-mini`. TRACaBot mostly needs compact JSON intent classification and one-sentence safety replies, so a small fast model is usually a better default than a frontier reasoning model. Use a stronger model only if your chat has many ambiguous admin-review instructions or multilingual scam reports that the small model misses.
+
+OpenClaw-discovered setup, useful when the host already has OAuth/model config in OpenClaw:
+
+```text
+TRACABOT_CONVERSATIONAL=true
+TRACABOT_LLM_PROVIDER=auto
+OPENCLAW_CONFIG_PATH=/root/.openclaw/openclaw.json
+```
+
+Direct OpenAI-compatible or local endpoint:
+
+```text
+TRACABOT_CONVERSATIONAL=true
+TRACABOT_LLM_PROVIDER=http
+TRACABOT_LLM_BASE_URL=http://127.0.0.1:11434
+TRACABOT_LLM_API_KEY=
+TRACABOT_LLM_MODEL=llama3.1
+```
+
+Disable LLM while keeping commands and deterministic templates:
+
+```text
+TRACABOT_LLM_PROVIDER=off
+```
+
+OpenClaw is still useful when 9router is the LLM backend: TRACaBot keeps using the OpenClaw DKG adapter for Context Graph/Working Memory/Shared Memory/Verified Memory operations, and the OpenClaw skill bridge (`tracabot-skill`) remains the agent-facing API for scan, monitor, curate, digest, review, appeal, and learning-loop workflows.
 
 TRACaBot treats DKG Shared Memory as collaborative evidence memory and Context Graph publication as verified/high-confidence memory. Once an event meets the publish policy through admin verification or very high confidence, the bot asks the OpenClaw DKG adapter to publish that event root. If the publish step fails, the Shared Memory write is kept and the error is recorded for audit.
 
@@ -146,6 +191,12 @@ Transient DKG Shared Memory write failures such as temporary network errors, tim
 - Telegram bot token from BotFather
 
 ## Install
+
+**For AI agents and one-command style self-hosting**, see the dedicated **[AGENT_INSTALL.md](./AGENT_INSTALL.md)** guide. It is written to be followed reliably by coding agents.
+
+---
+
+### Human / Traditional Install
 
 1. Install and set up DKG/OpenClaw on the host:
 
@@ -177,6 +228,7 @@ watch - Locally watch a user, ID, username, or SangMata target
 unwatch - Remove a local watch target
 watchlist - Show active watches, mutes, and review items
 challenge - Turn new-user join challenge on or off
+conversation - Toggle natural language agent mode per group (default on)
 appeal - Submit a correction request for an event
 review - Admin review decision for an event
 digest - Summarize recent actions and campaign signals
@@ -219,10 +271,10 @@ TRACABOT_DROP_PENDING_UPDATES_ON_START=true
 DKG_NODE_URL=http://127.0.0.1:9200
 TRACABOT_STORE_PATH=./data/tracabot-events.jsonl
 TRACABOT_CONVERSATIONAL=true
-TRACABOT_LLM_PROVIDER=auto
-TRACABOT_LLM_BASE_URL=
-TRACABOT_LLM_API_KEY=
-TRACABOT_LLM_MODEL=
+TRACABOT_LLM_PROVIDER=9router
+TRACABOT_LLM_BASE_URL=https://api.9router.com
+TRACABOT_LLM_API_KEY=your-9router-key
+TRACABOT_LLM_MODEL=openai/gpt-4o-mini
 OPENCLAW_CONFIG_PATH=
 TRACABOT_CONVERSATION_MIN_CONFIDENCE=60
 TRACABOT_PROACTIVE_REPLY_THRESHOLD=75
@@ -303,7 +355,7 @@ npm run test:commands
 - `/ban` says admin required: add your numeric Telegram ID or username to `TRACABOT_ADMINS`, or run the command from a Telegram chat-admin account.
 - DKG evidence is missing: confirm `dkg status`, `DKG_NODE_URL`, `TRACABOT_DKG_MODE=openclaw-adapter`, and any `DKG_AUTH_TOKEN` required by your adapter.
 - Skill command returns JSON error: run from the project root, pass valid JSON, and check `OPENCLAW_DKG_ADAPTER_PATH` only if the adapter is installed outside standard OpenClaw paths.
-- Conversational replies are template-only: confirm OpenClaw gateway is running, `TRACABOT_CONVERSATIONAL=true`, and `TRACABOT_LLM_PROVIDER=auto`. Run `/status` as an admin to see the discovered OpenClaw model without exposing credentials.
+- Conversational replies are template-only: confirm `TRACABOT_CONVERSATIONAL=true`, `TRACABOT_LLM_PROVIDER` is not `off`, and either 9router/direct `TRACABOT_LLM_*` values or OpenClaw discovery are configured. Run `/status` as an admin to see redacted backend status without exposing credentials.
 - Demo refuses to write: set `TRACABOT_TEST_MODE=true` for `npm run demo`; this prevents accidental production test writes.
 
 ## OpenClaw Setup
