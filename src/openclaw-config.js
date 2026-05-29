@@ -15,6 +15,19 @@ export function discoverOpenClawLlm(config = {}) {
   if (!openclaw) return null;
   const gateway = openclaw.gateway || {};
   const model = config.llmModel || openclaw.agents?.defaults?.model?.primary || '';
+  const [providerId] = String(model).split('/');
+  const modelProvider = openclaw.models?.providers?.[providerId] || null;
+  if (!config.llmBaseUrl && modelProvider?.baseUrl) {
+    return {
+      provider: 'openclaw-model-provider',
+      baseUrl: modelProvider.baseUrl,
+      token: config.llmApiKey || modelProvider.apiKey || '',
+      model,
+      hasToken: Boolean(config.llmApiKey || modelProvider.apiKey),
+      authMode: 'bearer',
+      source: config.openClawConfigPath || 'openclaw config'
+    };
+  }
   const port = gateway.port || 18789;
   const baseUrl = config.llmBaseUrl || `http://127.0.0.1:${port}`;
   const token = config.llmApiKey || gateway.auth?.token || '';

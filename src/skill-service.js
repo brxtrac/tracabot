@@ -4,6 +4,7 @@ import { DkgClient } from './dkg-client.js';
 import { EventStore } from './store.js';
 import { loadConfig } from './config.js';
 import { combineRisk } from './risk-engine.js';
+import { LlmClient } from './llm-client.js';
 
 function actorAliases(user = {}) {
   return [user.username, user.first_name, [user.first_name, user.last_name].filter(Boolean).join(' ')].filter(Boolean);
@@ -205,6 +206,80 @@ export class TracabotSkillService {
     return { tool: 'review_event', eventId: event.id, decision, dkg: event.dkg };
   }
 
+  async decideArtefactAction(input = {}) {
+    const text = String(input.text || '');
+    let quality = this._basicQuality(input);
+    const hasAdminSignal = Boolean(input.adminVerified);
+
+    // Local fast-path history (always available)
+    const priorReviews = this.store.all().filter(e =>
+      ['review_upheld', 'review_overturned', 'risk_review_needed', 'proactive_cross_group_warning'].includes(e.event_type) &&
+      (String(e.user?.id || '') === String(input.telegramUserId || '') ||
+       String(e.payload?.target?.id || '') === String(input.telegramUserId || '') ||
+       String(e.payload?.target_key || '').includes(String(input.telegramUserId || '')))
+    );
+    let hasPriorAdminDecision = priorReviews.some(e => ['review_upheld', 'review_overturned', 'proactive_cross_group_warning'].includes(e.event_type));
+
+    // Real Context Graph lookup (the key improvement for intelligent curation)
+    let graphHistory = { hasPriorAdminAction: false, events: [] };
+    try {
+      if (typeof this.dkg?.queryAdminHistoryForActor === 'function') {
+        graphHistory = await this.dkg.queryAdminHistoryForActor({
+          userId: input.telegramUserId,
+          username: input.username,
+          aliases: actorAliases({ username: input.username, first_name: input.firstName || input.label })
+        }).catch(() => ({ hasPriorAdminAction: false, events: [] }));
+      }
+    } catch {}
+
+    if (graphHistory.hasPriorAdminAction) {
+      hasPriorAdminDecision = true;
+      // Boost quality when the actor has prior severe admin outcomes elsewhere
+      quality = Math.min(100, quality + 20);
+    }
+
+    let recommendation = 'local_wm_draft';
+    let publication = 'working_memory';
+
+    const reviewThreshold = this.config.artefactReviewThreshold || 70;
+
+    if (hasAdminSignal || quality >= reviewThreshold) {
+      recommendation = 'commit_to_swm';
+      publication = 'shared_memory';
+    } else if (quality >= 55 || hasPriorAdminDecision) {
+      recommendation = 'queue_for_admin_review';
+    }
+
+    const priorCount = (graphHistory.events || []).length + priorReviews.length;
+
+    return {
+      tool: 'decide_artefact_action',
+      recommendation,
+      quality,
+      publication_status: publication,
+      reasoning: hasAdminSignal ? 'admin verified' :
+                graphHistory.hasPriorAdminAction ? `prior admin action(s) in Tracabot Context Graph (${graphHistory.events.length})` :
+                hasPriorAdminDecision ? 'prior admin decision on this actor (local)' :
+                `quality ${quality}`,
+      writes_dkg: recommendation !== 'local_wm_draft',
+      prior_reviews_found: priorCount,
+      graph_history: {
+        has_prior_admin_action: graphHistory.hasPriorAdminAction,
+        events: graphHistory.events?.slice(0, 3) || []
+      },
+      cross_group_boost_applied: graphHistory.hasPriorAdminAction
+    };
+  }
+
+  _basicQuality(input = {}) {
+    let score = input.adminVerified ? 30 : 0;
+    const conf = Number(input.confidence || input.local_confidence || 0);
+    if (conf >= 60) score += 25;
+    if ((input.domains || []).length || (input.wallets || []).length) score += 20;
+    if (/scam|report|impersonat|phish|wallet/i.test(String(input.text || ''))) score += 15;
+    return Math.min(100, score);
+  }
+
   async monitorChatEvent(input = {}) {
     const target = targetFromInput(input);
     const text = String(input.text || input.messageText || input.context || '').slice(0, 4096);
@@ -290,6 +365,39 @@ export class TracabotSkillService {
     this.store.append(event);
     return { tool: 'sort_conversation_artifact', eventId: event.id, risk, artifactQuality: quality, writesDkg: writeDkg, dkg: event.dkg || null };
   }
+
+  async generateSafeTip() {
+    // Safe Tips skill implementation — used by the bot for proactive education and by external OpenClaw agents
+    const llm = new LlmClient(this.config);
+
+    const system = [
+      'You are Tracabot, a calm, professional anti-scam bodyguard for Telegram communities.',
+      'Create one short, varied, practical safety sentence (max 140 chars).',
+      'Rotate topics naturally: DM impersonators, urgent wallet links, fake support, seed phrases, verification habits, staying on TRAC, checking official channels.',
+      'Tone: protective and helpful, never alarmist. Focus on one clear habit.',
+      'Output ONLY the sentence. No quotes, no intro, no extra text.'
+    ].join('\n');
+
+    const response = await llm.complete({ system, user: 'Generate today\'s short safety reminder.' }).catch(() => ({ text: '' }));
+    const tip = String(response.text || '').trim().replace(/^["']|["']$/g, '');
+
+    if (tip.length > 15 && tip.length < 160) {
+      return tip;
+    }
+
+    // High-quality rotating fallbacks (varied, non-repetitive)
+    const fallbacks = [
+      'Stay on TRAC: verify through official channels before any wallet action.',
+      'Never share seed phrases or private keys with anyone claiming to be support.',
+      'DMs asking you to "verify" or "sync" your wallet are almost always scams.',
+      'Check the official project account yourself — never click links from strangers.',
+      'Real teams never DM you first asking for wallet access or recovery phrases.',
+      'When in doubt, ask in the main group chat before clicking anything.',
+      'Scammers often impersonate admins or support — verify usernames carefully.',
+      'A quick search for the exact phrase they used often reveals the scam pattern.'
+    ];
+    return fallbacks[Math.floor(Math.random() * fallbacks.length)];
+  }
 }
 
 export async function runSkillTool(tool, input = {}, env = process.env) {
@@ -303,5 +411,7 @@ export async function runSkillTool(tool, input = {}, env = process.env) {
   if (tool === 'sort_conversation_artifact') return service.sortConversationArtifact(input);
   if (tool === 'submit_appeal') return service.submitAppeal(input);
   if (tool === 'review_event') return service.reviewEvent(input);
+  if (tool === 'decide_artefact_action') return service.decideArtefactAction(input);
+  if (tool === 'generate_safe_tip') return service.generateSafeTip(input);
   throw new Error(`Unknown tracabot skill tool: ${tool}`);
 }

@@ -23,6 +23,7 @@ Events move through this trust path:
 - `tracabot:FraudCampaign`
 - `tracabot:ChannelObservation`
 - `tracabot:ConversationArtifact`
+- `tracabot:ProactiveCrossGroupWarning` (new in Phase 4 — surfaces actors with prior admin actions from other communities)
 - `tracabot:EvidenceItem`
 - `tracabot:ScamDomain`
 - `tracabot:ScamPattern`
@@ -104,6 +105,8 @@ Additional fields:
 - `tracabot:learningValue`
 - `tracabot:operatorNote`
 - `tracabot:falsePositiveReason`
+- `tracabot:implicitDetection`
+- `tracabot:detectionMethod`
 
 Conversation artifacts are DKG v10 Shared Memory only once committed. They can inform replies, warnings, and explanations, but they do not raise `riskScore` for autonomous enforcement by themselves.
 
@@ -131,3 +134,30 @@ This prevents a single weak report or recursive campaign summary from becoming g
 - Admin watches a suspicious account without banning: reply with `/watch possible fake support`.
 - Admin reviews a contested event: `/review <event-id> overturn user was discussing scam prevention`.
 - Admin checks repeated waves: `/stats campaigns` or `/digest`.
+
+## Implicit Action Detection & Rich Provenance (Phase 8 Enhancements)
+
+To support deep LLM-driven implicit actions (watch/appeal/review detected from reply context, tagging, or conversation role without exact slash commands) while maintaining full auditability, the following metadata and patterns are recommended:
+
+**New/Extended Fields on Relevant Events** (report_submitted, dm_scam_report, watch_started, appeal_submitted, review_upheld, review_overturned, risk_review_needed, conversation_artifact, etc.):
+
+- `tracabot:implicitDetection` (boolean) — true when the action was inferred by the LLM from context rather than explicit command.
+- `tracabot:detectionMethod` — "llm_context_reply", "llm_admin_reply_after_flag", "llm_tagged_user_context", "explicit_command", etc.
+- `tracabot:replyToEventId` or `tracabot:replyToFlagEventId` — links an implicit appeal or review decision back to the original risk_review_needed / alert event.
+- `tracabot:adminIntentConfidence` or `tracabot:llmConfidence` — how sure the agent was of the inferred action.
+- `tracabot:naturalLanguageSource` — the raw user text that triggered the implicit action.
+- `tracabot:originalFlagContext` — bounded excerpt or event id of the message being appealed/reviewed.
+
+**New Recommended Event Types / Roles** (when appropriate):
+- Stronger use of existing `tracabot:Appeal` with the new implicit provenance fields.
+- `tracabot:ImplicitAdminAction` (or just enrich the concrete events) for watch/review/appeal that came through the conversational brain.
+
+**Banlist / Modlog Support**:
+- Enforcement events (ban_executed, restrict_executed, review_upheld) should carry enough summary fields (`tracabot:summaryReason`, `tracabot:shortContext`) so the banlist command (and future LLM memory queries) can produce concise, useful human-readable entries without re-processing raw evidence.
+
+**General Principle**:
+Every action that mutates state or adds to the graph — especially those triggered implicitly by the LLM — must carry sufficient structured provenance so that future "why did this happen?" queries (via LLM or direct SPARQL) can give accurate, explainable answers, and so the learning loop / curator can use the signals for better future decisions.
+
+These fields should be populated in the relevant `record()` calls inside telegram.js handlers and in executeAgentAction when implicit paths are taken. The artefact curator and learning loop should preserve and propagate the implicit metadata.
+
+This keeps the memory layer rich, queryable, and trustworthy as the agent becomes more autonomous in interpreting natural language and context.

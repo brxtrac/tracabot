@@ -83,7 +83,7 @@ export function loadConfig(env = process.env) {
   }
   const conversationMinConfidence = Number(env.TRACABOT_CONVERSATION_MIN_CONFIDENCE || 60);
   const proactiveReplyThreshold = Number(env.TRACABOT_PROACTIVE_REPLY_THRESHOLD || 75);
-  const conversationRateLimitSeconds = Number(env.TRACABOT_CONVERSATION_RATE_LIMIT_SECONDS || 60);
+  const conversationRateLimitSeconds = Number(env.TRACABOT_CONVERSATION_RATE_LIMIT_SECONDS || 8);
   const conversationMaxChars = Number(env.TRACABOT_CONVERSATION_MAX_CHARS || 700);
   const joinChallengeTtlSeconds = Number(env.TRACABOT_JOIN_CHALLENGE_TTL_SECONDS || 60);
   const joinChallengeMaxAttempts = Number(env.TRACABOT_JOIN_CHALLENGE_MAX_ATTEMPTS || 3);
@@ -208,6 +208,9 @@ export function loadConfig(env = process.env) {
     wmArtifactShareLowConfidence: parseBoolean(env.TRACABOT_WM_ARTIFACT_SHARE_LOW_CONFIDENCE, false),
     wmArtifactRedact: parseBoolean(env.TRACABOT_WM_ARTIFACT_REDACT, true),
     wmArtifactMinConfidence,
-    wmArtifactMaxTextChars
+    wmArtifactMaxTextChars,
+    dailySafeTipIntervalHours: Number(env.TRACABOT_DAILY_SAFE_TIP_INTERVAL_HOURS ?? 0),
+    artefactReviewThreshold: Number(env.TRACABOT_ARTEFACT_REVIEW_THRESHOLD || 70),
+    proactiveAlertCrossGroup: parseBoolean(env.TRACABOT_PROACTIVE_ALERT_CROSS_GROUP, true)
   };
 }

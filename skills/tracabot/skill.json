@@ -49,6 +49,16 @@
       "name": "review_event",
       "description": "Write an admin review decision to DKG Shared Memory.",
       "inputSchema": { "type": "object", "required": ["eventId", "decision", "reason"], "properties": { "eventId": { "type": "string" }, "decision": { "type": "string", "enum": ["uphold", "overturn"] }, "reason": { "type": "string" }, "actorId": { "type": "string" }, "actorUsername": { "type": "string" } } }
+    },
+    {
+      "name": "decide_artefact_action",
+      "description": "High-quality decision (artefact curator): should this chat event or conversation artefact stay in local Working Memory, commit to DKG Shared Memory, or be queued for admin /review? Performs live queries against the Tracabot Context Graph for prior admin actions (including cross-group history) + quality scoring. Used by learning loop, live bot, and external agents.",
+      "inputSchema": { "type": "object", "required": ["text"], "properties": { "telegramUserId": { "type": "string" }, "username": { "type": "string" }, "text": { "type": "string" }, "artifactKind": { "type": "string" }, "adminVerified": { "type": "boolean" }, "sourceEventIds": { "type": "array", "items": { "type": "string" } } } }
+    },
+    {
+      "name": "generate_safe_tip",
+      "description": "Generate a short, varied, calm, non-alarmist safety reminder (max ~140 chars) for the community. Topics rotate: DM scams, seed phrases, verification habits, staying on TRAC. Used for low-volume proactive education posts.",
+      "inputSchema": { "type": "object", "properties": {} }
     }
   ],
   "permissions": {

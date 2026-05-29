@@ -105,6 +105,23 @@ export function formatRiskAssessment({ target, risk }) {
   return `TRACaBot check for ${name}: ${verdict} (${risk.confidence}%). Type: ${risk.scam_type}. Public signals: ${evidence}. Ask an admin to review. Users can reply with /appeal and an optional reason.`;
 }
 
+/**
+ * Humble, review-queue specific summary.
+ * Never uses absolute "HIGH RISK 100%" framing when we are only queuing for humans
+ * (especially when !hasDkgBacking).
+ */
+export function formatReviewNeededSummary({ target, risk, hasDkgBacking = false }) {
+  const name = displayName(target);
+  const conf = risk.confidence || 0;
+  const type = risk.scam_type || 'suspicious';
+  const ev = publicEvidence(risk).join('; ') || 'local signals';
+
+  if (hasDkgBacking) {
+    return `TRACaBot flagged ${name} for admin review (${conf}% confidence, DKG-backed). Pattern: ${type}. Signals: ${ev}.`;
+  }
+  return `TRACaBot flagged ${name} for admin review (${conf}% local confidence). Pattern: ${type}. Signals: ${ev}. Awaiting admin decision — no strong cross-community DKG evidence yet.`;
+}
+
 export function formatDkgReference(event) {
   if (!event) return '';
   if (event.dkg?.ual) {

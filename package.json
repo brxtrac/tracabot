@@ -1,6 +1,6 @@
 {
   "name": "tracabot",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "OpenClaw-compatible Telegram anti-scam agent that writes and queries DKG v10 Shared Memory.",
   "homepage": "https://github.com/brxtrac/tracabot#readme",
   "repository": {
@@ -52,6 +52,7 @@
     "skills",
     "LICENSE",
     "README.md",
-    "SECURITY.md"
+    "SECURITY.md",
+    "AGENT_INSTALL.md"
   ]
 }

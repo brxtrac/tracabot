@@ -204,6 +204,8 @@ function eventTriples(event) {
     { subject, predicate: `${NS}commitReceiptId`, object: literal(event.payload?.commit_receipt_id || '') },
     { subject, predicate: `${NS}commitPolicy`, object: literal(event.payload?.commit_policy || '') },
     { subject, predicate: `${NS}commitAuthority`, object: literal(event.payload?.commit_authority || '') },
+    { subject, predicate: `${NS}implicitDetection`, object: literal(event.payload?.implicit_detection ? 'true' : '') },
+    { subject, predicate: `${NS}detectionMethod`, object: literal(event.payload?.detection_method || '') },
     { subject, predicate: `${NS}targetEventId`, object: literal(event.payload?.target_event_id || '') },
     { subject, predicate: `${NS}restrictedUntil`, object: literal(event.payload?.restricted_until || '') },
     { subject, predicate: `${NS}actionDurationSeconds`, object: literal(event.payload?.action_duration_seconds || '') },
@@ -558,6 +560,46 @@ export class DkgClient {
         confidence: binding.confidence,
         evidence: binding.evidence
       }))
+    };
+  }
+
+  // Phase 4: Query prior high-severity admin actions on this actor across the Tracabot graph
+  async queryAdminHistoryForActor({ userId = '', username = '', aliases = [] } = {}) {
+    const identifiers = [userId, username, ...aliases].filter(Boolean).map(v => String(v).toLowerCase().replace(/^@/, ''));
+    if (!identifiers.length) return { hasPriorAdminAction: false, events: [] };
+
+    // Build SPARQL to find high-severity events involving this actor
+    const valueClauses = identifiers.map(id => 
+      `{ ?s <${NS}telegramUserId> "${id}" . } UNION { ?s <${NS}username> "${id}" . } UNION { ?s <${NS}actorAlias> "${id}" . }`
+    ).join(' UNION ');
+
+    const sparql = `
+      SELECT ?g ?s ?eventType ?confidence ?scamType ?created WHERE {
+        GRAPH ?g {
+          { ${valueClauses} }
+          OPTIONAL { ?s <${NS}eventType> ?eventType . }
+          OPTIONAL { ?s <${NS}confidence> ?confidence . }
+          OPTIONAL { ?s <${NS}scamType> ?scamType . }
+          OPTIONAL { ?s <dcterms:created> ?created . }
+        }
+      } LIMIT 30
+    `;
+
+    const bindings = await this.queryBindings(sparql);
+
+    const severeTypes = ['ban_executed', 'review_overturned', 'fraud_finding'];
+    const severeEvents = bindings
+      .map(b => ({
+        eventType: cleanValue(b.eventType),
+        confidence: Number(cleanValue(b.confidence)) || 0,
+        scamType: cleanValue(b.scamType),
+        ual: cleanValue(b.g)
+      }))
+      .filter(e => severeTypes.includes(e.eventType) && e.confidence >= 70);
+
+    return {
+      hasPriorAdminAction: severeEvents.length > 0,
+      events: severeEvents
     };
   }
 

@@ -7,6 +7,16 @@ const OPENCLAW_CHAT_PATHS = [
   '/api/agent/chat'
 ];
 
+const PROVIDER_BASE_URLS = {
+  '9router': 'https://api.9router.com',
+  ninerouter: 'https://api.9router.com',
+  http: '',
+  direct: '',
+  openai: 'https://api.openai.com',
+  openrouter: 'https://openrouter.ai/api',
+  local: 'http://127.0.0.1:11434'
+};
+
 function withTimeout(ms = 30000) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), ms);
@@ -41,25 +51,47 @@ export class LlmClient {
     this.config = config;
   }
 
+  provider() {
+    return String(this.config.llmProvider || 'auto').trim().toLowerCase();
+  }
+
+  httpBaseUrl() {
+    const configured = String(this.config.llmBaseUrl || '').trim();
+    if (configured) return configured;
+    return PROVIDER_BASE_URLS[this.provider()] || '';
+  }
+
+  modelForProvider() {
+    const provider = this.provider();
+    if (this.config.llmModel) return this.config.llmModel;
+    if (provider === '9router' || provider === 'ninerouter') return 'openai/gpt-4o-mini';
+    if (provider === 'openai') return 'gpt-4o-mini';
+    if (provider === 'local') return 'llama3.1';
+    return 'default';
+  }
+
   async complete({ system, user }) {
-    if (this.config.llmProvider === 'off') return { ok: false, provider: 'off', text: '' };
-    if (this.config.llmBaseUrl) return this.completeHttp({ system, user });
-    if (['auto', 'openclaw', 'openclaw-auto'].includes(this.config.llmProvider || 'auto')) return this.completeOpenClaw({ system, user });
-    return { ok: false, provider: this.config.llmProvider || 'auto', text: '' };
+    const provider = this.provider();
+    if (provider === 'off') return { ok: false, provider: 'off', text: '' };
+    if (this.httpBaseUrl()) return this.completeHttp({ system, user });
+    if (['auto', 'openclaw', 'openclaw-auto'].includes(provider)) return this.completeOpenClaw({ system, user });
+    return { ok: false, provider, text: '' };
   }
 
   async completeHttp({ system, user }) {
-    const model = this.config.llmModel || 'default';
+    const provider = this.provider();
+    const baseUrl = this.httpBaseUrl().replace(/\/$/, '');
+    const model = this.modelForProvider();
     try {
-      const response = await postJson(`${this.config.llmBaseUrl.replace(/\/$/, '')}/v1/chat/completions`, {
+      const response = await postJson(`${baseUrl}/v1/chat/completions`, {
         model,
         messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
         temperature: 0.2,
         max_tokens: 220
       }, this.config.llmApiKey, this.config.telegramTimeoutMs || 30000);
-      return { ok: true, provider: 'http-chat', text: textFromChatResponse(response), raw: response };
+      return { ok: true, provider: provider === 'auto' ? 'http-chat' : provider, endpoint: '/v1/chat/completions', model, text: textFromChatResponse(response), raw: response };
     } catch (error) {
-      return { ok: false, provider: 'http-chat', error: error instanceof Error ? error.message : String(error), text: '' };
+      return { ok: false, provider: provider === 'auto' ? 'http-chat' : provider, error: error instanceof Error ? error.message : String(error), text: '' };
     }
   }
 
@@ -67,6 +99,20 @@ export class LlmClient {
     const discovered = discoverOpenClawLlm(this.config);
     if (!discovered) return { ok: false, provider: 'openclaw-auto', text: '' };
     const base = discovered.baseUrl.replace(/\/$/, '');
+    if (discovered.provider === 'openclaw-model-provider') {
+      try {
+        const model = String(discovered.model || 'default').replace(/^[^/]+\//, '');
+        const response = await postJson(`${base}/chat/completions`, {
+          model,
+          messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+          temperature: 0.2,
+          max_tokens: 220
+        }, discovered.token, this.config.telegramTimeoutMs || 30000);
+        return { ok: true, provider: discovered.provider, endpoint: '/chat/completions', text: textFromChatResponse(response), raw: response };
+      } catch (error) {
+        return { ok: false, provider: discovered.provider, error: error instanceof Error ? error.message : String(error), text: '' };
+      }
+    }
     const body = {
       model: discovered.model || 'default',
       messages: [{ role: 'system', content: system }, { role: 'user', content: user }],

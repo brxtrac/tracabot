@@ -51,7 +51,17 @@ export async function processLearningDrafts({ service = TracabotSkillService.fro
       continue;
     }
     try {
+      // Phase 3: Consult the artefact curator for a recommendation before/around sorting
+      let curatorRec = null;
+      try {
+        curatorRec = await service.decideArtefactAction({
+          ...input,
+          artifactKind: input.artifactKind || 'openclaw_sorted_conversation'
+        });
+      } catch (e) {}
+
       const result = await service.sortConversationArtifact(input);
+
       service.store.append({
         id: randomUUID(),
         event_type: 'learning_draft_processed',
@@ -65,10 +75,11 @@ export async function processLearningDrafts({ service = TracabotSkillService.fro
           sorted_event_id: result.eventId,
           writes_dkg: Boolean(result.writesDkg),
           artifact_quality: result.artifactQuality,
+          curator_recommendation: curatorRec?.recommendation || null,
           evidence: [`autonomous OpenClaw learning processed WM draft ${draft.id}`]
         }
       });
-      results.push({ draftId: draft.id, ok: true, result });
+      results.push({ draftId: draft.id, ok: true, result, curatorRec });
     } catch (error) {
       service.store.append({
         id: randomUUID(),
