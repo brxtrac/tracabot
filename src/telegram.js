@@ -1415,6 +1415,14 @@ export class TelegramShieldBot {
     return rows;
   }
 
+  replyScanKeyboard(requesterId, target = {}, eventId = '') {
+    const rows = [];
+    if (target.id || target.username) rows.push([button('❔ Explain', callbackData('why', requesterId, shortId(eventId)))]);
+    rows.push([button('📊 Stats', callbackData('stats', requesterId)), button('🛡️ Reviews', callbackData('review-list', requesterId))]);
+    rows.push([button('🏠 Menu', callbackData('dashboard', requesterId)), button('✖️ Close', callbackData('close', requesterId))]);
+    return rows;
+  }
+
   mainNavKeyboard(requesterId, options = {}) {
     const includeReview = options.includeReview !== false;
     const rows = [[
@@ -1936,6 +1944,10 @@ export class TelegramShieldBot {
     return /^@(?:tracabot|tracethembot)$/i.test(String(messageText(message) || '').trim());
   }
 
+  isBotMentionReplyScan(message = {}) {
+    return this.isBareBotMention(message) && Boolean(message.reply_to_message?.from);
+  }
+
   isRecentBotNearReply(message = {}) {
     if (message.text?.startsWith('/')) return false;
     if (!this.isReplyToBot(message)) return false;
@@ -2007,10 +2019,6 @@ export class TelegramShieldBot {
 
   async handleNaturalLanguageRequest(message) {
     const rawText = messageText(message);
-    if (this.isBareBotMention(message)) {
-      await this.sendMenu(message);
-      return true;
-    }
     const mentionsBot = /@(?:tracabot|tracethembot)\b/i.test(rawText);
     const safetyLike = isSafetyQuestion(message) || /\b(?:safe|unsafe|legit(?:imate)?|real|fake|scam(?:mer|ming)?|fraud(?:ster)?|risky?|trusted|trustworthy|blacklisted|flagged|suspicious|sus|dangerous|malicious)\b/i.test(rawText);
     if (safetyLike) return false;
@@ -2888,6 +2896,7 @@ export class TelegramShieldBot {
       await this.sendInteractiveReply(chatId, formatScanReply({ target, risk, eventId: event.id, findingId: finding?.id }), this.scanKeyboard(message.from?.id || message.from?.username || '', target, event.id), { reply_to_message_id: message.message_id });
       return;
     }
+
     if (isCommand(text, 'report')) {
       if (await this.rejectNonOwnerPrivateReport(message)) return;
       const reportEvidence = forwardedEvidenceText(message);
@@ -3006,6 +3015,21 @@ export class TelegramShieldBot {
       });
       await this.maybeRecordCampaign({ ...message, from: replyUser, text: context }, risk);
     }
+  }
+
+  async handleMentionReplyScan(message) {
+    if (!this.isBotMentionReplyScan(message)) return false;
+    if (await this.rejectNonOwnerPrivateReport(message)) return true;
+    const targetMessage = message.reply_to_message;
+    const target = sangmataTargetFromText(targetMessage.text || '') || actorFromMessage(targetMessage);
+    const targetText = messageText(targetMessage) || messageText(message);
+    const risk = await this.assess({ ...message, from: target, text: targetText }, target, targetText);
+    const event = await this.record('risk_query', { ...message, from: target, text: targetText }, risk);
+    await this.recordConversationArtifact({ ...message, from: target }, { risk, text: targetText, artifactKind: 'safety_question', conversationRole: 'questioner', sourceEventIds: [event.id] });
+    const finding = risk.confidence >= 80 ? await this.publishHighConfidenceFinding({ ...message, from: target, text: targetText }, risk) : null;
+    await this.maybeRecordCampaign({ ...message, from: target, text: targetText }, risk);
+    await this.sendInteractiveReply(message.chat.id, formatScanReply({ target, risk, eventId: event.id, findingId: finding?.id }), this.replyScanKeyboard(message.from?.id || message.from?.username || '', target, event.id), { reply_to_message_id: message.message_id });
+    return true;
   }
 
   challengeKey(chatId, userId) {
@@ -3535,10 +3559,8 @@ export class TelegramShieldBot {
       await this.handleDmReport(message, evidenceText(message));
       return;
     }
-    if (this.isBareBotMention(message)) {
-      await this.sendMenu(message);
-      return;
-    }
+    if (await this.handleMentionReplyScan(message)) return;
+    if (this.isBareBotMention(message)) return;
     if (await this.handleAlertReply(message)) return;
     if (this.isNaturalFalsePositiveReview(message) && await this.handleNaturalFalsePositiveReview(message)) return;
     if (await this.handleNaturalLanguageRequest(message)) return;

@@ -1339,13 +1339,31 @@ test('natural language LLM replies are sanitized', async () => {
   assert.doesNotMatch(reply, /token|admin list|abc/i);
 });
 
-test('bare bot mentions open the compact menu for both handles', async () => {
+test('bare bot mentions do not open the main menu', async () => {
   const { bot, calls } = makeBot({ canBan: true, conversational: true, llm: null });
   assert.equal(bot.isBareBotMention({ text: '@tracabot' }), true);
   assert.equal(bot.isBareBotMention({ text: '@tracethembot' }), true);
   await bot.handleMessage({ chat: { id: -100, title: 'demo' }, from: { id: 1, username: 'admin' }, message_id: 32, text: '@tracethembot' });
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('Choose an action below')));
-  assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 32));
+  assert.equal(calls.some((call) => call.method === 'sendMessage'), false);
+  assert.equal(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 32), false);
+});
+
+test('bot mention replying to a message scans the replied message with inline actions', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  await bot.handleMessage({
+    chat,
+    from: { id: 1, username: 'admin' },
+    message_id: 33,
+    text: '@tracethembot',
+    reply_to_message: { chat, from: { id: 88, username: 'suspect', is_bot: false }, message_id: 32, text: 'DM support to claim your wallet prize' }
+  });
+  const scan = calls.find((call) => call.method === 'sendMessage' && call.payload.reply_markup?.inline_keyboard)?.payload;
+  assert.ok(scan);
+  assert.ok(buttonByText(scan, 'Explain'));
+  assert.ok(buttonByText(scan, 'Stats'));
+  assert.ok(buttonByText(scan, 'Reviews'));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'risk_query' && event.user.id === 88));
 });
 
 test('natural language why explains local event decisions', async () => {
