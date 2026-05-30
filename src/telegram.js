@@ -37,6 +37,28 @@ const WATCHLIST_INTENT_RE = /\b(?:muted|mutes)\b/i;
 const CAMPAIGN_INTENT_RE = /\b(?:campaigns?|repeated patterns?|repeated domains?|scam wave|clusters?)\b/i;
 const HELP_INTENT_RE = /\b(?:help|commands?|what can you do|who are you|what are you|purpose|hello|hi|are you alive)\b/i;
 const BOT_REPLY_CONTEXT_TTL_MS = 2 * 60 * 1000;
+const START_PUNCH_LINES = [
+  'Bots forget. TRACaBot remembers.',
+  'Simple bots react. TRACaBot remembers, connects context, and evolves.',
+  'Scammers move across communities. TRACaBot memory moves faster.',
+  'Every scam signal makes TRACaBot smarter for the next community.',
+  'TRACaBot turns scam activity into shared defense memory.',
+  'From moderation bot to anti-scam agent: memory, context, action.',
+  'TRACaBot does not just block scams. It learns the pattern.',
+  'Persistent memory beats repeated scams.',
+  'TRACaBot gives communities an anti-scam agent that learns, remembers, and acts with context.',
+  'Scam defense is moving from bots to agents. TRACaBot is already there.',
+  'One community scam signal becomes another community early warning.',
+  'TRACaBot connects scam context so communities do not start from zero.',
+  'The future of anti-scam defense is agentic, shared, and memory-driven.',
+  'TRACaBot builds protection that compounds with every processed signal.',
+  'Scammers repeat patterns. TRACaBot remembers them.',
+  'Not just moderation. Agentic anti-scam memory.',
+  'TRACaBot brings persistent memory to community protection.',
+  'Every report, review, and action becomes context for stronger defense.',
+  'TRACaBot is an anti-scam agent layer for communities that need memory, not guesswork.',
+  'The next generation of protection is not a bot command. It is an agent with memory.'
+];
 
 function boundedText(value = '', max = MAX_TEXT_CHARS) {
   return String(value || '').slice(0, max);
@@ -925,12 +947,15 @@ export class TelegramShieldBot {
   }
 
   formatHelp() {
+    const punchLine = START_PUNCH_LINES[Math.floor(Math.random() * START_PUNCH_LINES.length)];
     return [
-      '🛡️ Welcome to Tracabot',
+      '🛡️ TRACaBot Agent online',
       '',
-      'I help communities spot scam patterns, review suspicious reports, and protect members with shared DKG memory.',
+      'I help communities spot scams, learn from every attack, and turn shared memory into stronger protection across agents and communities.',
       '',
-      'Choose an option below to check risk, review reports, or see what Tracabot has learned.',
+      'Choose an option below to check risk, review reports, or see what TRACaBot has processed, learned, and executed.',
+      '',
+      punchLine,
       '',
       'More info: https://tracabot.com'
     ].join('\n');

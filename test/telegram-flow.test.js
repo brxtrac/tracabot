@@ -1118,8 +1118,11 @@ test('/start opens protection menu and explains direct commands', async () => {
     text: '/start'
   });
   const help = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
-  assert.match(help, /Welcome to Tracabot/i);
+  assert.match(help, /TRACaBot Agent online/i);
+  assert.match(help, /learn from every attack/);
+  assert.match(help, /shared memory into stronger protection across agents and communities/);
   assert.match(help, /Choose an option below/);
+  assert.match(help, /processed, learned, and executed/);
   assert.match(help, /tracabot\.com/);
   for (const command of ['/tracabot', '/dashboard', '/settings', '/review', '/stats', '/watch', '/unwatch', '/appeal', '/banlist', '/dmreport', '/watchlist', '/why event-id', '/digest', '/challenge', '/conversation']) {
     assert.ok(!help.split('\n').some((line) => line.trim().startsWith(command)), `expected /start copy not to include ${command}`);
