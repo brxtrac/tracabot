@@ -1665,6 +1665,17 @@ export class TelegramShieldBot {
     return `${label} across ${campaign.events.length} events`;
   }
 
+  latestEnforcementStatsLine() {
+    const event = this.store.all()
+      .filter((item) => ['ban_executed', 'restrict_executed', 'review_upheld'].includes(item.event_type))
+      .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))[0];
+    if (!event) return 'No recent bans, mutes, or confirmed scam reviews.';
+    const target = event.user || event.payload?.target || event.payload?.reviewed_target || {};
+    const action = event.event_type === 'ban_executed' ? 'Ban' : event.event_type === 'restrict_executed' ? 'Mute' : 'Confirmed scam review';
+    const name = displayName(target) || target.id || 'target';
+    return `${action}: ${name} · ${ageLabel(event.timestamp)}`;
+  }
+
   formatStatsDashboard(stats) {
     const events = this.recentEvents(24 * 60 * 60 * 1000);
     const count = (types) => events.filter((event) => types.includes(event.event_type)).length;
@@ -1708,7 +1719,8 @@ export class TelegramShieldBot {
       '🧬 Pattern watch',
       this.campaignStatsLabel(campaigns[0]),
       '',
-      'Next: use /scan on suspicious users, /report with evidence, or Stats > Sources for receipts.'
+      '👮 Latest enforcement',
+      this.latestEnforcementStatsLine()
     ].join('\n');
   }
 

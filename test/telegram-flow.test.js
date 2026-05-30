@@ -2182,6 +2182,8 @@ test('stats menu combines weekly receipts and daily activity without digest dupl
   assert.match(reply.text, /Shared memory/);
   assert.match(reply.text, /Review queue/);
   assert.match(reply.text, /Pattern watch/);
+  assert.match(reply.text, /Latest enforcement/);
+  assert.doesNotMatch(reply.text, /Next: use \/scan/);
   assert.doesNotMatch(reply.text, /tracabot digest \(24h\)|TRACaBot report \(7d\)|24h local/);
 });
 
