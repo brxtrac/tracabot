@@ -4,8 +4,8 @@ import { safetyCloser, safetyStyleInstruction } from './reply-style.js';
 const SAFETY_TERMS = /\b(scam|scammer|scamming|fraud|fraudster|phish|phishing|drain|drainer|wallet|seed phrase|private key|airdrop|giveaway|safe|unsafe|dangerous|suspicious|sus|risk|risky|trusted|trust|trustworthy|legit|legitimate|real|fake|blacklisted|flagged|known|malicious|impersonat|support|admin|dm)\b/i;
 const ASK_TERMS = /\b(is this|am i|are they|is he|is she|is it|can i|should i|trust|trust this|trusted|trustworthy|safe|unsafe|legit|legitimate|real|fake|scam|scammer|scammed|blacklisted|flagged|fraud|fraudster|suspicious|sus|dangerous|malicious|risk|risky)\b/i;
 const FORBIDDEN = /\b(seed phrase|private key)\b.*\b(send|share|paste|enter|provide)\b/i;
-const BODYGUARD_REDIRECT = 'I am here as the community anti-scam bodyguard: ask me to scan, report, review, or explain scam evidence.';
-const ACTIONABLE_TOPIC_TERMS = /\b(scan|report|review|appeal|ban|watch|watchlist|stats?|statistics|digest|why|evidence|campaigns?|pending reviews?|review queue|safe tip|scam|scammer|scamming|fraud|fraudster|phish|phishing|drain|drainer|wallet|seed phrase|private key|airdrop|giveaway|safe|unsafe|dangerous|suspicious|sus|risk|risky|trusted|trust|trustworthy|legit|legitimate|real|fake|blacklisted|flagged|known|malicious|impersonat|support|admin|dm)\b/i;
+const BODYGUARD_REDIRECT = 'I am here as the community anti-scam bodyguard: ask me to scan, report, review, open the menu, or explain scam evidence.';
+const ACTIONABLE_TOPIC_TERMS = /\b(scan|report|review|appeal|ban|stats?|statistics|digest|menu|settings|why|explain|evidence|campaigns?|pending reviews?|review queue|safe tip|scam|scammer|scamming|fraud|fraudster|phish|phishing|drain|drainer|wallet|seed phrase|private key|airdrop|giveaway|safe|unsafe|dangerous|suspicious|sus|risk|risky|trusted|trust|trustworthy|legit|legitimate|real|fake|blacklisted|flagged|known|malicious|impersonat|support|admin|dm)\b/i;
 const SELF_INTRO_TERMS = /\b(help|commands?|what can you do|who are you|what are you|purpose|hello|hi|are you alive)\b/i;
 const OFF_TOPIC_BUILDER_TERMS = /\b(website|web site|landing page|frontend|front end|page|ui|ux|live feed|visuali[sz]ation|context graph|memory grow|build|make changes?|implement|code|stack|next\.js|react|static site|admin-only|public)\b/i;
 
@@ -48,10 +48,10 @@ export function buildSafetyPrompt({ message = {}, target = {}, risk = {}, event 
   const system = [
     'You are TRACaBot — the community anti-scam bodyguard for Telegram groups, backed by persistent, verifiable cross-community memory in OriginTrail DKG v10 Shared Memory.',
     'Use normal, natural English. Do not use caveman style, broken grammar, or terse fragment style.',
-    'Your domain is strictly limited to: scam/fraud/phishing/impersonation/wallet-drain risks, DKG fraud evidence, TRACaBot moderation tools (scan/report/ban/watch/review/appeal/stats/why), and safe usage guidance in crypto/Telegram contexts.',
+    'Your domain is strictly limited to: scam/fraud/phishing/impersonation/wallet-drain risks, DKG fraud evidence, TRACaBot moderation tools (menu/settings/scan/report/ban/review/appeal/stats), and safe usage guidance in crypto/Telegram contexts.',
     'You are welcoming but bodyguard-first: users may joke or be playful, but you redirect quickly to protection, scam checks, reports, reviews, stats, or evidence.',
     'You are brief, professional, protective, and decisive. One or two short sentences. No open-ended companionship, no banter loops, no off-topic engagement.',
-    'If the query is not about fraud risk, evidence, or a TRACaBot capability, reply with one sentence: "I am here as the community anti-scam bodyguard: ask me to scan, report, review, or explain scam evidence."',
+    'If the query is not about fraud risk, evidence, or a TRACaBot capability, reply with one sentence: "I am here as the community anti-scam bodyguard: ask me to scan, report, review, open the menu, or explain scam evidence."',
     'Ground every claim in the provided risk data and DKG sources. Never invent evidence or claim certainty beyond the scores.',
     'Never instruct users to share seed phrases, private keys, or click suspicious links. Never suggest bypassing admin commands.',
     safetyStyleInstruction(maxChars)
@@ -136,7 +136,9 @@ export function buildAgentIntentPrompt({ message = {}, maxChars = 600, history =
     '',
     'Core principles for responses:',
     '- Stay on scam checks, impersonation, phishing, wallet safety, reports, reviews, stats, and verifiable memory.',
-    '- Common natural requests like "show me stats", "stats for the day", "daily summary", "what\'s happening", "show me the digest" should map to "get_stats" or "get_digest".',
+    '- Common natural requests like "show me stats", "stats for the day", "daily summary", "what\'s happening", "show me the digest" should map to "get_stats".',
+    '- Requests for menu, main menu, or what actions are available should map to "dashboard".',
+    '- Requests to change bot settings, turn challenge on/off, or turn natural language mode on/off should map to "settings" unless a specific setting action exists.',
     '- Questions about yourself ("are you alive?", "what is your purpose?", "who are you", "hello") should map to "help" or "greeting" and answer as a community bodyguard, not a social companion.',
     '- If playful or vague, give one short line that redirects to protection work: scam checks, reports, reviews, stats, memory.',
     '- If the message is about building websites, product features, UI, live feeds, Context Graph visualization, or any non-fraud collaboration, set on_topic=false, action="ignore", and do not ask clarifying questions.',
@@ -144,20 +146,22 @@ export function buildAgentIntentPrompt({ message = {}, maxChars = 600, history =
     '- Use the shared Tracabot Context Graph (via your tools) to check user history, prior admin decisions, and similar patterns when relevant.',
     '',
     'Available actions you can request the system to perform (choose the best one):',
-    '- list_pending_reviews: show admin review queue / things needing verification (includes cross-group warnings). Use for "anything to review?", "pending reviews", "show me the review queue", etc.',
-    '- show_watchlist (filter: "review"|"mutes"|"all"): current watches and review items.',
-    '- get_stats or get_digest: recent activity summary, fraud signals, campaigns. Use this for "show me stats", "daily stats", "stats for the day", "what happened today", "summary", etc.',
-    '- explain_event: detailed evidence for a specific event id (use when user asks "why" or references an id).',
+    '- dashboard: open/show the main Tracabot button menu.',
+    '- settings: open/show admin settings for join challenge and natural language mode.',
+    '- list_pending_reviews: show admin review queue / things needing verification (also includes mutes). Use for "anything to review?", "pending reviews", "show mutes", etc.',
+    '- show_watchlist (filter: "review"|"mutes"|"all"): legacy alias for list_pending_reviews/review tabs.',
+    '- get_stats: recent activity summary, digest, fraud signals, campaigns. Use this for "show me stats", "daily stats", "stats for the day", "what happened today", "summary", "digest", etc.',
+    '- explain_event: detailed evidence for a specific event id (use when user asks "why", "explain", or references an id). This is internal, not a slash command.',
     '- scan_target: run a full risk check on a user/wallet/message (with graph context + prior admin history).',
     '- show_campaigns: repeated scam patterns across communities from the graph.',
     '- generate_safe_tip: (rarely) produce a calm educational safety reminder for the group.',
     '- banlist: (admin) recent enforcement actions with memory summaries.',
+    '- mute: (admin only) temporarily mute a replied, mentioned, or ID target. Parse durations like 5 minutes, 5 hours, 1 day; default 24 hours.',
     '- help or greeting: short friendly intro to your capabilities + how to stay safe.',
-    '- false_positive_review / overturn: process a correction when user says someone is "not a scammer", "legit", "false positive", etc. (admin only).',
-    '- watch: (admin only, often implicit) watch a user when admin tags or replies with context implying scrutiny.',
+    '- false_positive_review / reject: process a correction when user says someone is "not a scammer", "legit", "false positive", etc. (admin only).',
     '- appeal: (often implicit) log an appeal/correction when the person who was flagged replies to the bot\'s alert message or speaks again soon after in context.',
-    '- review: (admin only, often implicit) uphold or overturn when admin replies to a Tracabot flag message, tags the flagged user, or gives verdict language ("this is real", "false positive", "overturn this", "confirm") in context. Pass the decision clearly in parameters.',
-    '- report or dmreport: parse natural language reports of scams or DM impersonation (tagged or replied) into structured evidence.',
+    '- review: (admin only, often implicit) confirm or reject a scam flag when admin replies to a Tracabot flag message, tags the flagged user, or gives verdict language ("confirm scam", "not a scam", "false positive", "reject") in context. Pass the decision clearly in parameters.',
+    '- report: parse natural language reports of scams, forwarded suspicious DMs, or DM impersonation into structured evidence. Ask for @username/details when missing.',
     '- general_on_topic: answer directly using tools or graph knowledge.',
     '- clarify: ask for more details if the request is ambiguous (e.g. which user or event).',
     '- ignore: only for clearly unrelated chit-chat (still be polite and briefly redirect).',
@@ -175,15 +179,49 @@ export function buildAgentIntentPrompt({ message = {}, maxChars = 600, history =
     'Be strongly context-aware for implicit actions (Phase 8):',
     '- If the message is a reply to one of Tracabot\'s own previous alert/flag messages:',
     '  - If the speaker is the person who was flagged → this is very likely an implicit appeal. Choose "appeal".',
-    '  - If the speaker is a known admin/trusted moderator → this is very likely an implicit review (uphold or overturn). Look at the language for verdict signals and choose "review" with clear parameters.',
-    '- If an admin tags or replies to a user in a way that implies "keep an eye on this" without saying the word watch → choose "watch".',
-    '- Natural language scam/DM impersonation reports (even without /report or /dmreport) should map to report or dmreport when the user is addressing the bot.',
+    '  - If the speaker is a known admin/trusted moderator → this is very likely an implicit review (confirm or reject). Look at the language for verdict signals and choose "review" with clear parameters.',
+    '- If an admin wants ongoing attention on a user, map it to report/review guidance rather than watch; watch/unwatch commands are not part of the UI.',
+    '- Natural language scam/DM impersonation reports (even without /report) should map to report when the user is addressing the bot.',
     'Prefer using tools/graph over guessing. Keep the user safe and informed. When in doubt about an implicit admin action, ask for explicit confirmation rather than guessing wrong.'
   ].join('\n');
   const user = [
     `Current user message: ${String(message.text || '').slice(0, 900)}`,
     `Reply context (message they are replying to): ${String(message.reply_to_message?.text || '').slice(0, 700)}`,
     `Recent conversation with this user in this chat:\n${String(history || '').slice(-1800) || '(none)'}`,
+    'Return ONLY the JSON object.'
+  ].join('\n');
+  return { system, user };
+}
+
+export function buildAlertReplyClassifierPrompt({ message = {}, alert = {}, senderTrusted = false, senderIsFlagged = false, maxChars = 500 }) {
+  const target = alert.target || {};
+  const system = [
+    'You classify replies to TRACaBot fraud-review alerts.',
+    'TRACaBot is a Telegram anti-scam bodyguard. Decide the safest conduct and output compact JSON only.',
+    'Use confirm/reject language: confirm means confirm the fraud/scam flag; reject means reject the fraud/scam flag as false positive.',
+    'If senderTrusted is true, a clear verdict should become admin_review. If senderTrusted is false and they dispute the flag, it should become appeal.',
+    'Never infer a username from ordinary words like Not, This, False, Real, Scam, Scammer, or Legit. Prefer the provided alert target and event id.',
+    'If the reply is ambiguous, choose clarify. If unrelated, choose ignore.',
+    'Return JSON with exactly these fields: intent, decision, target_event_id, reason, confidence, user_reply.',
+    'Allowed intent values: admin_review, appeal, clarify, ignore.',
+    'Allowed decision values: confirm, reject, null.',
+    `Keep user_reply under ${maxChars} characters.`
+  ].join('\n');
+  const user = [
+    `Reply text: ${String(message.text || '').slice(0, 900)}`,
+    `Replied alert text: ${String(message.reply_to_message?.text || '').slice(0, 900)}`,
+    `senderTrusted: ${senderTrusted}`,
+    `senderIsFlagged: ${senderIsFlagged}`,
+    `alertEventId: ${alert.eventId || ''}`,
+    `alertTargetUsername: ${target.username || ''}`,
+    `alertTargetId: ${target.id || ''}`,
+    `alertEventType: ${alert.eventType || ''}`,
+    `alertSummary: ${String(alert.summary || '').slice(0, 700)}`,
+    'Examples:',
+    '- admin says "not a scam" => {"intent":"admin_review","decision":"reject"}',
+    '- admin says "confirm scam" or "this is a scam" => {"intent":"admin_review","decision":"confirm"}',
+    '- non-admin says "not a scam" or "this is me" => {"intent":"appeal","decision":"reject"}',
+    '- "why?" => {"intent":"clarify","decision":null}',
     'Return ONLY the JSON object.'
   ].join('\n');
   return { system, user };

@@ -565,30 +565,38 @@ export class DkgClient {
 
   // Phase 4: Query prior high-severity admin actions on this actor across the Tracabot graph
   async queryAdminHistoryForActor({ userId = '', username = '', aliases = [] } = {}) {
-    const identifiers = [userId, username, ...aliases].filter(Boolean).map(v => String(v).toLowerCase().replace(/^@/, ''));
+    const identifiers = [userId, username, ...aliases]
+      .filter(Boolean)
+      .map(v => String(v).toLowerCase().replace(/^@/, '').replace(/[^\p{L}\p{N}_-]/gu, ''))
+      .filter(Boolean);
     if (!identifiers.length) return { hasPriorAdminAction: false, events: [] };
 
     // Build SPARQL to find high-severity events involving this actor
-    const valueClauses = identifiers.map(id => 
-      `{ ?s <${NS}telegramUserId> "${id}" . } UNION { ?s <${NS}username> "${id}" . } UNION { ?s <${NS}actorAlias> "${id}" . }`
+    const valueClauses = [...new Set(identifiers)].map(id =>
+      `{ ?s <${NS}telegramUserId> ${literal(id)} . } UNION { ?s <${NS}username> ${literal(id)} . } UNION { ?s <${NS}actorAlias> ${literal(id)} . }`
     ).join(' UNION ');
 
     const sparql = `
-      SELECT ?g ?s ?eventType ?confidence ?scamType ?created WHERE {
+      SELECT ?g ?s ?eventType ?confidence ?scamType ?created ?chatId ?username ?eventSource ?testMode WHERE {
         GRAPH ?g {
           { ${valueClauses} }
           OPTIONAL { ?s <${NS}eventType> ?eventType . }
           OPTIONAL { ?s <${NS}confidence> ?confidence . }
           OPTIONAL { ?s <${NS}scamType> ?scamType . }
           OPTIONAL { ?s <dcterms:created> ?created . }
+          OPTIONAL { ?s <${NS}telegramChatId> ?chatId . }
+          OPTIONAL { ?s <${NS}username> ?username . }
+          OPTIONAL { ?s <${NS}source> ?eventSource . }
+          OPTIONAL { ?s <${NS}testMode> ?testMode . }
         }
       } LIMIT 30
     `;
 
     const bindings = await this.queryBindings(sparql);
 
-    const severeTypes = ['ban_executed', 'review_overturned', 'fraud_finding'];
+    const severeTypes = ['ban_executed', 'review_upheld', 'fraud_finding'];
     const severeEvents = bindings
+      .filter(b => isProductionBindingForContext(b, this.config.contextGraph))
       .map(b => ({
         eventType: cleanValue(b.eventType),
         confidence: Number(cleanValue(b.confidence)) || 0,

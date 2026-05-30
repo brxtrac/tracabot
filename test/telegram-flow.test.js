@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TELEGRAM_COMMANDS, TelegramShieldBot } from '../src/telegram.js';
 import { analyzeMessage } from '../src/scam-analyzer.js';
+import { extractDomains } from '../src/dkg-client.js';
 import { EventStore } from '../src/store.js';
 
 function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = null, dkgIntel = null, adminIds = ['1234'], llm = null, conversational = false, chatAdmins = [], configOverrides = {}, validateUal = null }) {
@@ -125,6 +126,27 @@ function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = nu
     return { ok: true };
   };
   return { bot, calls, dkgWrites };
+}
+
+function lastPayload(calls, method, text = '') {
+  return calls.filter((call) => call.method === method && (!text || String(call.payload.text || '').includes(text))).at(-1)?.payload;
+}
+
+function buttonByText(panel, text) {
+  const button = panel?.reply_markup?.inline_keyboard?.flat().find((item) => String(item.text || '').includes(text));
+  assert.ok(button, `missing button ${text}`);
+  return button;
+}
+
+async function openMenu(bot, calls, chat, from = { id: 1, username: 'admin' }, messageId = 9000) {
+  await bot.handleCommand({ chat, from, message_id: messageId, text: '/start' });
+  return lastPayload(calls, 'sendMessage');
+}
+
+async function openMenuPanel(bot, calls, chat, from, buttonText, callbackId = 'menu-cb') {
+  const menu = await openMenu(bot, calls, chat, from);
+  await bot.handleCallbackQuery({ id: callbackId, from, message: { chat, message_id: menu.message_id || 9001 }, data: buttonByText(menu, buttonText).callback_data });
+  return lastPayload(calls, 'editMessageText');
 }
 
 test('new high-risk join is sent to admin review when bot has admin rights', async () => {
@@ -251,7 +273,8 @@ test('DKG-backed high-risk join asks for admin review without ban-rights wording
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')));
   const alert = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review'))?.payload.text || '';
   assert.match(alert, /for admin review.*DKG-backed|flagged .* for admin review/);
-  assert.match(alert, /\/appeal/);
+  assert.match(alert, /Reply naturally/);
+  assert.match(alert, /non-admin replies are logged as appeals/);
   assert.doesNotMatch(alert, /ban rights|Recommendation: ban/i);
   assert.doesNotMatch(alert, /DKG UAL|DKG event|did:dkg:context-graph|event ID/);
   assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.local_only));
@@ -374,7 +397,7 @@ test('committed false-positive artifact carries receipt before Shared Memory wri
     user: { id: 86, username: 'guerodelosbajos', is_bot: false },
     payload: { confidence: 90, scam_type: 'impersonation', evidence: ['false positive candidate'] }
   });
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 35, text: '/review evt-fp-governance overturn SynthID discussion, not impersonation' });
+  await bot.handleMessage({ chat, from: { id: 1, username: 'admin' }, message_id: 35, text: '@tracethembot @guerodelosbajos is not a scammer; SynthID discussion, not impersonation' });
   const artifact = dkgWrites.find((event) => event.event_type === 'conversation_artifact' && event.payload.artifact_kind === 'false_positive_signal');
   assert.ok(artifact);
   assert.match(artifact.payload.commit_receipt_id, /^commit:/);
@@ -549,7 +572,83 @@ test('polling requests chat member updates for joins', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   await bot.pollOnce();
   const poll = calls.find((call) => call.method === 'getUpdates');
-  assert.deepEqual(poll.payload.allowed_updates, ['message', 'chat_member', 'my_chat_member']);
+  assert.deepEqual(poll.payload.allowed_updates, ['message', 'callback_query', 'chat_member', 'my_chat_member']);
+});
+
+test('review queue uses admin-scoped inline buttons and callback decisions', async () => {
+  const { bot, calls, dkgWrites } = makeBot({ canBan: true, trustedUserIds: [1, 2] });
+  const flagged = await bot.record('risk_review_needed', { chat: { id: -100, type: 'supergroup' }, from: { id: 77, username: 'suspect' }, text: 'risk' }, { confidence: 90, evidence: ['suspicious evidence'], scam_type: 'impersonation' }, { writeDkg: false });
+  const chat = { id: -100, type: 'supergroup' };
+  const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Reviews', 'review-menu');
+  const openButton = panel.reply_markup.inline_keyboard.flat().find((item) => item.callback_data?.includes('review-open'));
+  assert.ok(openButton);
+  await bot.handleCallbackQuery({ id: 'cb1', from: { id: 2, username: 'otheradmin' }, message: { chat: { id: -100, type: 'supergroup' }, message_id: panel.message_id || 20 }, data: openButton.callback_data });
+  assert.ok(calls.some((call) => call.method === 'answerCallbackQuery' && String(call.payload.text).includes('Open your own panel')));
+  await bot.handleCallbackQuery({ id: 'cb2', from: { id: 1, username: 'admin' }, message: { chat: { id: -100, type: 'supergroup' }, message_id: 20 }, data: openButton.callback_data });
+  const opened = calls.find((call) => call.method === 'editMessageText' && String(call.payload.text).includes('Review'))?.payload;
+  const confirmData = opened.reply_markup.inline_keyboard[0][0].callback_data;
+  await bot.handleCallbackQuery({ id: 'cb3', from: { id: 1, username: 'admin' }, message: { chat: { id: -100, type: 'supergroup' }, message_id: 20 }, data: confirmData });
+  assert.ok(bot.store.all().some((event) => event.event_type === 'review_upheld' && event.payload.target_event_id === flagged.id));
+  const finalScreen = calls.filter((call) => call.method === 'editMessageText').at(-1).payload;
+  assert.match(finalScreen.text, /Confirmed scam/);
+  assert.doesNotMatch(finalScreen.text, /Reply to this message with a reason|Submit confirmation/);
+  assert.ok(finalScreen.reply_markup.inline_keyboard.flat().some((item) => item.text.includes('Back to queue')));
+});
+
+test('/mute mutes replied user for parsed duration and writes shared-memory event', async () => {
+  const { bot, calls, dkgWrites } = makeBot({ canBan: true });
+  await bot.handleMessage({
+    chat: { id: -100, type: 'supergroup' },
+    from: { id: 1, username: 'admin' },
+    message_id: 11,
+    text: '/mute 5 minutes spam cleanup',
+    reply_to_message: { message_id: 9, from: { id: 222, username: 'noisy', is_bot: false }, text: 'spam' }
+  });
+  const mute = calls.find((call) => call.method === 'restrictChatMember' && call.payload.user_id === 222 && call.payload.permissions.can_send_messages === false);
+  assert.ok(mute);
+  const event = dkgWrites.find((item) => item.event_type === 'restrict_executed' && item.user.id === 222);
+  assert.equal(event.payload.action_duration_seconds, 300);
+  assert.equal(event.payload.action, 'mute');
+});
+
+test('/mute falls back to bodyguard reply without restrict rights', async () => {
+  const { bot, calls } = makeBot({ canBan: false });
+  await bot.handleMessage({ chat: { id: -100, type: 'supergroup' }, from: { id: 1, username: 'admin' }, message_id: 12, text: '/mute 1 day', reply_to_message: { from: { id: 222, username: 'noisy' }, text: 'spam' } });
+  assert.equal(calls.some((call) => call.method === 'restrictChatMember'), false);
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('need Telegram admin restrict rights')));
+});
+
+test('command parser rejects command prefix collisions', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] }
+  });
+  await bot.handleMessage({ chat: { id: -100, type: 'supergroup' }, from: { id: 1, username: 'admin' }, message_id: 1, text: '/statusfoo' });
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('DKG release')), false);
+});
+
+test('hidden Telegram text_link URLs are included in scam analysis', async () => {
+  const { bot } = makeBot({
+    canBan: true,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] }
+  });
+  let queriedText = '';
+  bot.dkg.queryRiskIndicators = async ({ text }) => {
+    queriedText = text;
+    return { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: extractDomains(text), patterns: [], evidence: [] };
+  };
+  await bot.handleMessage({
+    chat: { id: -100, type: 'supergroup' },
+    from: { id: 88, username: 'hiddenlink', is_bot: false },
+    message_id: 1,
+    text: 'Official support says verify your wallet now',
+    entities: [{ type: 'text_link', offset: 0, length: 8, url: 'https://claim-wallet.example/drain' }]
+  });
+  const riskEvent = bot.store.all().find((event) => ['risk_check', 'scam_detection', 'risk_review_needed'].includes(event.event_type) && event.user.id === 88);
+  assert.match(queriedText, /claim-wallet\.example/);
+  assert.ok(riskEvent.payload.evidence.some((item) => String(item).includes('claim-wallet.example')));
 });
 
 test('group-pasted DKG UAL does not solve join challenge before DM verification', async () => {
@@ -570,6 +669,28 @@ test('group-pasted DKG UAL does not solve join challenge before DM verification'
   assert.match(reminder, /verification only works in DM/);
   assert.match(reminder, /https:\/\/t\.me\/tracethembot\?start=verify_m100_45/);
   assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_bad_attempt' && event.payload.verification_channel === 'group'));
+});
+
+test('join challenge rolls back restriction when challenge message send fails', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    configOverrides: { joinChallenge: true }
+  });
+  bot.call = async (method, payload) => {
+    calls.push({ method, payload });
+    if (method === 'getMe') return { id: 999, username: 'tracethembot' };
+    if (method === 'getChatMember') return { status: 'administrator', can_restrict_members: true, can_delete_messages: true };
+    if (method === 'sendMessage') throw new Error('send failed');
+    return { ok: true };
+  };
+  const user = { id: 55, username: 'stuckuser', is_bot: false };
+  await bot.handleNewMembers({ chat: { id: -100, title: 'demo' }, from: { id: 1, username: 'admin' }, new_chat_members: [user] });
+  assert.equal(bot.joinChallenges.has('-100:55'), false);
+  assert.ok(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 55 && call.payload.permissions.can_send_messages === false));
+  assert.ok(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 55 && call.payload.permissions.can_send_messages === true));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_start_failed' && event.user.id === 55));
 });
 
 test('DM DKG UAL solves join challenge and restores group permissions', async () => {
@@ -971,55 +1092,48 @@ test('join challenge repeat failures cluster normalized 1win alias variants', as
   assert.equal(dkgWrites.length, 1);
   assert.equal(dkgWrites[0].payload.campaign_key, 'alias:1win');
   assert.ok(dkgWrites[0].payload.alias_keys.includes('1win'));
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 88, text: '/stats campaigns' });
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 89, text: '/stats' });
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('join challenge repeat alias:1win')));
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Top campaign: alias:1win')));
+  const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Stats', 'join-alias-stats');
+  const campaignsButton = buttonByText(panel, 'Campaigns');
+  await bot.handleCallbackQuery({ id: 'join-alias-campaigns', from: { id: 1, username: 'admin' }, message: { chat, message_id: 89 }, data: campaignsButton.callback_data });
+  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('join challenge repeat alias:1win')));
+  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('Top campaign: alias:1win')));
 });
 
 test('telegram command descriptions match the public bot command list', () => {
   assert.deepEqual(TELEGRAM_COMMANDS, [
+    { command: 'start', description: 'Open Tracabot protection menu' },
     { command: 'scan', description: 'Check a user, wallet, or replied message for scam risk' },
-    { command: 'report', description: 'Report a suspicious user, wallet, or message to DKG (also works via natural language when tagging or replying)' },
-    { command: 'dmreport', description: 'Report off-platform DM impersonation scams (natural language supported)' },
+    { command: 'report', description: 'Report suspicious users, messages, links, wallets, or forwarded DMs' },
     { command: 'ban', description: 'Ban a replied user and publish ban evidence (admin)' },
-    { command: 'stats', description: 'Show recent fraud checks and detections' },
-    { command: 'digest', description: 'Show 24h summary of bans, reports, reviews, and campaigns' },
-    { command: 'why', description: 'Explain a tracabot event decision (LLM memory queries often answer "why" questions naturally too)' },
-    { command: 'watch', description: 'Admin: watch a suspicious actor (also triggered implicitly by admins via context/reply in conversational mode)' },
-    { command: 'unwatch', description: 'Admin: remove a watched actor' },
-    { command: 'watchlist', description: 'Admin: show watches, mutes, and review items' },
-    { command: 'challenge', description: 'Admin: turn new-user join challenge on or off' },
-    { command: 'conversation', description: 'Admin: turn natural language agent mode on or off for this group (default on)' },
-    { command: 'appeal', description: 'Submit an appeal or correction (auto-detected when flagged users reply to Tracabot alerts in many cases)' },
-    { command: 'review', description: 'Admin: uphold or overturn an event (works via reply to Tracabot flag or tagging the user + verdict context)' },
-    { command: 'banlist', description: 'Admin: recent concrete enforcement actions (bans, restrictions, upheld reviews) with short memory summaries' },
-    { command: 'status', description: 'Admin: show bot, DKG, and conversation status' },
-    { command: 'help', description: 'Show tracabot commands and autonomous policy' }
+    { command: 'mute', description: 'Admin: mute a replied or mentioned user for a duration' }
   ]);
 });
 
-test('/help explains commands, thresholds, and DKG memory', async () => {
+test('/start opens protection menu and explains direct commands', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   await bot.handleCommand({
     chat: { id: -100, title: 'demo' },
     from: { id: 1, username: 'admin' },
     message_id: 30,
-    text: '/help'
+    text: '/start'
   });
   const help = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
-  assert.match(help, /tracabot commands/);
+  assert.match(help, /protect|Tracabot/i);
   assert.match(help, /delete\/restrict at 75%/);
-  assert.match(help, /\/why event-id/);
-  assert.match(help, /\/watchlist/);
+  assert.match(help, /\/scan|\/report|\/ban|\/mute/);
+  assert.doesNotMatch(help, /\/tracabot|\/dashboard|\/settings|\/review|\/stats|\/watch|\/unwatch|\/appeal|\/banlist|\/dmreport|\/watchlist|\/why event-id|\/digest|\/challenge|\/conversation/);
   assert.match(help, /shared fraud evidence/);
   assert.doesNotMatch(help, /Context Graph tracabot/);
+  assert.ok(calls.find((call) => call.method === 'sendMessage')?.payload.reply_markup?.inline_keyboard?.some((row) => row.some((button) => String(button.text).includes('Stats'))));
 });
 
-test('/status reports permissions without exposing secrets', async () => {
+test('/settings status panel reports permissions without exposing secrets', async () => {
   const { bot, calls } = makeBot({ canBan: true, trustedUserIds: [1], adminIds: ['1'] });
-  await bot.handleCommand({ chat: { id: -100, title: 'demo' }, from: { id: 1, username: 'admin' }, message_id: 31, text: '/status' });
-  const reply = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
+  const chat = { id: -100, title: 'demo' };
+  const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Settings', 'settings-menu');
+  const statusButton = panel.reply_markup.inline_keyboard.flat().find((button) => String(button.text).includes('Status'));
+  await bot.handleCallbackQuery({ id: 'settings-status', from: { id: 1, username: 'admin' }, message: { chat, message_id: panel.message_id || 31 }, data: statusButton.callback_data });
+  const reply = calls.find((call) => call.method === 'editMessageText' && String(call.payload.text).includes('TRACaBot status'))?.payload.text || '';
   assert.match(reply, /TRACaBot status/);
   assert.match(reply, /DKG: reachable/);
   assert.match(reply, /delete=yes/);
@@ -1189,7 +1303,7 @@ test('natural language LLM replies are sanitized', async () => {
   assert.doesNotMatch(reply, /token|admin list|abc/i);
 });
 
-test('/why explains local event decisions', async () => {
+test('natural language why explains local event decisions', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   bot.store.append({
     id: 'evt-why',
@@ -1199,7 +1313,7 @@ test('/why explains local event decisions', async () => {
     payload: { confidence: 91, local_confidence: 80, dkg_confidence: 20, scam_type: 'phishing', recommended_action: 'ban', publication_status: 'context_graph_auto_publish_eligible', lifecycle_stage: 'verified_memory', evidence: ['scam domain'], dkg_evidence: [{ ual: 'did:dkg:context-graph:tracabot/_shared_memory', eventId: 'prior' }] },
     dkg: { ual: 'did:dkg:context-graph:tracabot/_shared_memory', shareOperation: 'swm-why', subject: 'https://tracabot.org/ontology#event/evt-why', publish: { status: 'published' } }
   });
-  await bot.handleCommand({ chat: { id: -100, title: 'demo' }, from: { id: 1, username: 'admin' }, message_id: 32, text: '/why evt-why' });
+  await bot.executeAgentAction('explain_event', { event_id: 'evt-why' }, { chat: { id: -100, title: 'demo' }, from: { id: 1, username: 'admin' }, message_id: 32, text: '@tracabot why event evt-why?' }, true, { reply_to_message_id: 32 });
   const reply = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
   assert.match(reply, /Why evt-why/);
   assert.match(reply, /Confidence: 91%/);
@@ -1209,17 +1323,16 @@ test('/why explains local event decisions', async () => {
   assert.match(reply, /Publication status: context_graph_auto_publish_eligible/);
 });
 
-test('/appeal records correction request and /review records admin decision', async () => {
+test('natural admin review records decision for explicit event id', async () => {
   const { bot, dkgWrites, calls } = makeBot({ canBan: true });
   const chat = { id: -100, title: 'demo' };
-  await bot.handleCommand({ chat, from: { id: 86, username: 'BRX86' }, message_id: 33, text: '/appeal evt-ban false positive' });
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 34, text: '/review evt-ban overturn agreed false positive' });
-  assert.ok(dkgWrites.some((event) => event.event_type === 'appeal_submitted' && event.payload.target_event_id === 'evt-ban'));
-  assert.ok(dkgWrites.some((event) => event.event_type === 'review_overturned' && event.payload.review_decision === 'overturned'));
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Review overturned')));
+  bot.store.append({ id: 'evt-ban', event_type: 'risk_review_needed', timestamp: new Date().toISOString(), chat, user: { id: 86, username: 'BRX86' }, payload: { confidence: 80, evidence: ['manual review target'] } });
+  await bot.executeAgentAction('review', { event_id: 'evt-ban', decision: 'reject', reason: 'agreed false positive' }, { chat, from: { id: 1, username: 'admin' }, message_id: 34, text: '@tracethembot reject evt-ban agreed false positive' }, true);
+  assert.ok(dkgWrites.some((event) => event.event_type === 'review_overturned' && event.payload.review_decision === 'reject'));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Rejected')));
 });
 
-test('/appeal and /review infer latest target event from user or reply', async () => {
+test('natural admin review infers latest target event from reply', async () => {
   const { bot, dkgWrites } = makeBot({ canBan: true });
   const chat = { id: -100, title: 'demo' };
   bot.store.append({
@@ -1230,19 +1343,39 @@ test('/appeal and /review infer latest target event from user or reply', async (
     user: { id: 86, username: 'guerodelosbajos', is_bot: false },
     payload: { confidence: 90, scam_type: 'impersonation', evidence: ['false positive candidate'] }
   });
-  await bot.handleCommand({ chat, from: { id: 86, username: 'guerodelosbajos' }, message_id: 33, text: '/appeal this was SynthID discussion' });
-  await bot.handleCommand({
+  await bot.executeAgentAction('review', { event_id: 'evt-auto-review', decision: 'reject', reason: 'agreed false positive' }, {
     chat,
     from: { id: 1, username: 'admin' },
     message_id: 34,
-    text: '/review overturn agreed false positive',
+    text: '@tracethembot reject agreed false positive',
     reply_to_message: { chat, from: { id: 86, username: 'guerodelosbajos' }, text: 'Soo... vididentifier is synthid?' }
-  });
-  assert.ok(dkgWrites.some((event) => event.event_type === 'appeal_submitted' && event.payload.target_event_id === 'evt-auto-review'));
+  }, true);
   assert.ok(dkgWrites.some((event) => event.event_type === 'review_overturned' && event.payload.target_event_id === 'evt-auto-review'));
 });
 
-test('/review infers event when admin replies to bot review alert', async () => {
+test('LLM review action needs explicit verdict and can use replied alert context', async () => {
+  const { bot, dkgWrites, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  bot.store.append({ id: 'evt-review-llm', event_type: 'risk_review_needed', timestamp: new Date().toISOString(), chat, user: { id: 55, username: 'flagged' }, payload: { confidence: 80, evidence: ['pending review'] } });
+  bot.reviewMessageEvents.set(`${chat.id}:700`, 'evt-review-llm');
+
+  await bot.executeAgentAction('review', { decision: 'look at this' }, { chat, from: { id: 1, username: 'admin' }, message_id: 701, text: '@tracethembot review this', reply_to_message: { chat, from: { id: 999, username: 'tracethembot', is_bot: true }, message_id: 700, text: 'flagged' } }, true);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'review_upheld' || event.event_type === 'review_overturned'), false);
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('explicit verdict')));
+
+  await bot.executeAgentAction('review', { decision: 'reject' }, { chat, from: { id: 1, username: 'admin' }, message_id: 702, text: '@tracethembot reject', reply_to_message: { chat, from: { id: 999, username: 'tracethembot', is_bot: true }, message_id: 700, text: 'flagged' } }, true);
+  assert.ok(dkgWrites.some((event) => event.event_type === 'review_overturned' && event.payload.target_event_id === 'evt-review-llm'));
+});
+
+test('non-admin natural review panel requests are blocked', async () => {
+  const { bot, calls } = makeBot({ canBan: true, trustedUserIds: [1] });
+  const chat = { id: -100, title: 'demo' };
+  await bot.executeAgentAction('show_watchlist', {}, { chat, from: { id: 2, username: 'member' }, message_id: 703, text: '@tracethembot show reviews' }, false);
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('admin-only')));
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Review manager')), false);
+});
+
+test('natural admin review infers event when admin replies to bot review alert', async () => {
   const { bot, calls, dkgWrites } = makeBot({ canBan: true });
   const chat = { id: -100, title: 'demo' };
   await bot.handleMessage({
@@ -1253,18 +1386,18 @@ test('/review infers event when admin replies to bot review alert', async () => 
   });
   const alertIndex = calls.findIndex((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review'));
   assert.notEqual(alertIndex, -1);
-  await bot.handleCommand({
+  await bot.executeAgentAction('review', { event_id: bot.store.all().find((event) => event.event_type === 'risk_review_needed' && event.user.id === 166)?.id, decision: 'reject', reason: 'long term community member' }, {
     chat,
     from: { id: 1, username: 'admin' },
     message_id: 128,
-    text: '/review overturn long term community member',
+    text: '@tracethembot reject long term community member',
     reply_to_message: { chat, from: { id: 999, username: 'tracethembot', is_bot: true }, message_id: alertIndex + 1, text: calls[alertIndex].payload.text }
-  });
+  }, true);
   const reviewSource = bot.store.all().find((event) => event.event_type === 'risk_review_needed' && event.user.id === 166);
   assert.ok(dkgWrites.some((event) => event.event_type === 'review_overturned' && event.payload.target_event_id === reviewSource.id));
 });
 
-test('/review overturn suppresses future enforcement for the reviewed user', async () => {
+test('/review reject does not globally suppress future enforcement for the reviewed user', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   const chat = { id: -100, title: 'demo' };
   bot.store.append({
@@ -1275,7 +1408,7 @@ test('/review overturn suppresses future enforcement for the reviewed user', asy
     user: { id: 4242, username: 'askme42', is_bot: false },
     payload: { confidence: 99, scam_type: 'other', evidence: ['bad prior signal'] }
   });
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 34, text: '/review evt-false-positive overturn false positive' });
+  await bot.handleMessage({ chat, from: { id: 1, username: 'admin' }, message_id: 34, text: '@tracethembot @askme42 is not a scammer; false positive' });
   await bot.handleNewMembers({
     chat,
     from: { id: 1, username: 'admin' },
@@ -1283,95 +1416,84 @@ test('/review overturn suppresses future enforcement for the reviewed user', asy
   });
   assert.equal(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 4242), false);
   assert.equal(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 4242), false);
-  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')), false);
-  const checks = bot.store.all().filter((event) => event.event_type === 'risk_check' && event.user.id === 4242);
-  assert.ok(checks.some((event) => event.payload.confidence <= 10 && event.payload.recommended_action === 'ignore'));
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')), true);
+  assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user.id === 4242));
 });
 
-test('/watch boosts scrutiny until /unwatch closes it', async () => {
-  const { bot, calls } = makeBot({
-    canBan: true,
-    analyzer: () => ({ is_scam: false, confidence: 50, scam_type: 'other', evidence: ['thin signal'], recommended_action: 'ignore' }),
-    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] }
-  });
-  const scheduled = [];
-  bot.scheduleDelete = (chatId, messageId, ttlSeconds) => scheduled.push({ chatId, messageId, ttlSeconds });
-  const chat = { id: -100, title: 'demo' };
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 35, text: '/watch suspicious outreach', reply_to_message: { chat, from: { id: 77, username: 'maybe_scam' }, text: 'dm me for support' } });
-  const risk = await bot.assess({ chat, from: { id: 77, username: 'maybe_scam' }, text: 'hello' }, { id: 77, username: 'maybe_scam' }, 'hello');
-  assert.equal(risk.confidence, 65);
-  assert.match(risk.evidence.join('\n'), /Active watchlist/);
-  const watchReply = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Watching'));
-  assert.match(watchReply.payload.text, /tg:\/\/user\?id=77/);
-  assert.equal(watchReply.payload.parse_mode, 'HTML');
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 36, text: '/unwatch resolved', reply_to_message: { chat, from: { id: 77, username: 'maybe_scam' }, text: 'dm me for support' } });
-  const riskAfter = await bot.assess({ chat, from: { id: 77, username: 'maybe_scam' }, text: 'hello' }, { id: 77, username: 'maybe_scam' }, 'hello');
-  assert.equal(riskAfter.confidence, 50);
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Removed watch')));
-  assert.equal(scheduled.length, 2);
-});
-
-test('/watch falls back to clickable username text when only @username is known', async () => {
-  const { bot, calls } = makeBot({ canBan: true });
-  const chat = { id: -100, title: 'demo' };
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 39, text: '/watch @maybe_scam suspicious outreach' });
-  const reply = calls.find((call) => call.method === 'sendMessage')?.payload || {};
-  assert.match(reply.text || '', /Watching @maybe_scam/);
-  assert.equal(reply.parse_mode, 'HTML');
-});
-
-test('/watch and /unwatch accept numeric Telegram IDs without a reason', async () => {
-  const { bot, calls } = makeBot({
-    canBan: true,
-    analyzer: () => ({ is_scam: false, confidence: 50, scam_type: 'other', evidence: ['thin signal'], recommended_action: 'ignore' }),
-    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] }
-  });
-  const chat = { id: -100, title: 'demo' };
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 40, text: '/watch 8388593201' });
-  const watchEvent = bot.store.all().find((event) => event.event_type === 'watch_started');
-  assert.equal(watchEvent.payload.watch_target_key, 'id:8388593201');
-  assert.equal(watchEvent.payload.reason, 'admin watch');
-  assert.equal(watchEvent.local_only, true);
-  const risk = await bot.assess({ chat, from: { id: 8388593201 }, text: 'hello' }, { id: 8388593201 }, 'hello');
-  assert.equal(risk.confidence, 65);
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('tg://user?id=8388593201')));
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 41, text: '/unwatch 8388593201' });
-  const riskAfter = await bot.assess({ chat, from: { id: 8388593201 }, text: 'hello' }, { id: 8388593201 }, 'hello');
-  assert.equal(riskAfter.confidence, 50);
-});
-
-test('/watch replying to SangMata rename watches the renamed user ID', async () => {
-  const { bot, calls } = makeBot({ canBan: true });
-  const chat = { id: -100, title: 'demo' };
-  const sangmata = { chat, from: { id: 461843263, username: 'SangMataInfo_bot', is_bot: true }, text: 'User 8388593201 changed name from QQQ to Kristian Baumgartner.' };
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 42, text: '/watch', reply_to_message: sangmata });
-  const event = bot.store.all().find((item) => item.event_type === 'watch_started');
-  assert.equal(event.payload.watch_target_key, 'id:8388593201');
-  assert.match(event.payload.reason, /QQQ -> Kristian Baumgartner/);
-  assert.match(JSON.stringify(event.payload.evidence), /SangMata rename alert/);
-  assert.equal(event.local_only, true);
-  const reply = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Watching'))?.payload || {};
-  assert.match(reply.text || '', /tg:\/\/user\?id=8388593201/);
-  assert.match(reply.text || '', /Kristian Baumgartner/);
-});
-
-test('/watchlist shows active watches, mutes, and review items', async () => {
+test('/start review panel shows active mutes and review items', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   const chat = { id: -100, title: 'demo' };
   const now = new Date().toISOString();
-  bot.store.append({ id: 'watch-a', event_type: 'watch_started', timestamp: now, chat, user: { id: '8388593201', first_name: 'Kristian Baumgartner' }, payload: { watch_target_key: 'id:8388593201', target: { id: '8388593201', first_name: 'Kristian Baumgartner' }, reason: 'admin watch', evidence: ['admin watch started'] }, local_only: true });
   bot.store.append({ id: 'mute-a', event_type: 'restrict_executed', timestamp: now, chat, user: { id: 77, username: 'muted_user' }, payload: { confidence: 78, restricted_until: new Date(Date.now() + 60 * 60 * 1000).toISOString(), evidence: ['medium-risk phishing domain'] } });
   bot.store.append({ id: 'review-a', event_type: 'risk_review_needed', timestamp: now, chat, user: { id: 88, username: 'review_user' }, payload: { confidence: 70, evidence: ['thin DKG match'] } });
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 45, text: '/watchlist all' });
-  // Robust lookup for the actual watchlist content (skip 'Fetching...' ack)
-  const sendMessages = calls.filter(c => c.method === 'sendMessage' && c.payload?.text && c.payload.text.includes('Watchlist manager'));
-  const reply = sendMessages.length ? sendMessages[sendMessages.length-1].payload : {};
-  assert.match(reply.text || '', /Watchlist manager/);
-  assert.match(reply.text || '', /Active watches/);
-  assert.match(reply.text || '', /Temp mutes/);
-  assert.match(reply.text || '', /Needs review/);
-  assert.match(reply.text || '', /tg:\/\/user\?id=8388593201/);
-  assert.equal(reply.parse_mode, 'HTML');
+  const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Reviews', 'reviews-menu');
+  const mutesButton = buttonByText(panel, 'Mutes');
+  await bot.handleCallbackQuery({ id: 'review-mutes', from: { id: 1, username: 'admin' }, message: { chat, message_id: panel.message_id || 45 }, data: mutesButton.callback_data });
+  const edited = calls.filter((call) => call.method === 'editMessageText').map((call) => call.payload.text).join('\n');
+  assert.match(edited, /Review manager/);
+  assert.match(edited, /Temp mutes/);
+  assert.match(edited, /muted_user/);
+});
+
+test('enforcement button sends final interactive response without waiting on LLM summaries', async () => {
+  let llmCalls = 0;
+  const llm = { async complete() { llmCalls += 1; throw new Error('should not summarize banlist'); } };
+  const { bot, calls } = makeBot({ canBan: true, llm });
+  bot.store.append({ id: 'evt-banlist-fast', event_type: 'ban_executed', timestamp: new Date().toISOString(), user: { id: 321, username: 'banned' }, payload: { reason: 'admin action with a long reason that used to trigger LLM summary', evidence: ['manual ban evidence'] } });
+  const chat = { id: -100, type: 'supergroup' };
+  const reply = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Enforcement', 'enforcement-menu');
+  assert.ok(reply);
+  assert.ok(reply.reply_markup?.inline_keyboard?.length);
+  assert.equal(llmCalls, 0);
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Fetching recent enforcement actions')), false);
+});
+
+test('stats buttons open sources and campaigns for the requesting user', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, type: 'supergroup', title: 'demo' };
+  bot.store.append({ id: 'evt-cb-c1', event_type: 'fraud_finding', timestamp: new Date().toISOString(), payload: { domains: ['buttons.example'], confidence: 88, local_confidence: 85, evidence: ['buttons.example'] } });
+  bot.store.append({ id: 'evt-cb-c2', event_type: 'report_submitted', timestamp: new Date().toISOString(), payload: { domains: ['buttons.example'], confidence: 91, local_confidence: 90, report_decision: 'accepted', evidence: ['buttons.example'] } });
+  const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Stats', 'stats-menu');
+  const [sourcesButton, campaignsButton] = panel.reply_markup.inline_keyboard[0];
+  await bot.handleCallbackQuery({ id: 'stats-cb-1', from: { id: 1, username: 'admin' }, message: { chat, message_id: 501 }, data: sourcesButton.callback_data });
+  await bot.handleCallbackQuery({ id: 'stats-cb-2', from: { id: 1, username: 'admin' }, message: { chat, message_id: 501 }, data: campaignsButton.callback_data });
+  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('evt-stats')));
+  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('domain:buttons.example')));
+});
+
+test('review tab buttons are admin-only and filter active mutes', async () => {
+  const { bot, calls } = makeBot({ canBan: true, trustedUserIds: [1] });
+  const chat = { id: -100, type: 'supergroup', title: 'demo' };
+  bot.store.append({ id: 'mute-cb-1', event_type: 'restrict_executed', timestamp: new Date().toISOString(), chat, user: { id: 200, username: 'muted' }, payload: { action: 'mute', reason: 'noise' } });
+  const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Reviews', 'review-tab-menu');
+  const mutedButton = panel.reply_markup.inline_keyboard.flat().find((item) => item.callback_data?.includes('review-tab') && item.callback_data?.includes('mutes'));
+  assert.ok(mutedButton);
+  await bot.handleCallbackQuery({ id: 'watch-cb-1', from: { id: 2, username: 'member' }, message: { chat, message_id: 511 }, data: mutedButton.callback_data });
+  assert.ok(calls.some((call) => call.method === 'answerCallbackQuery' && String(call.payload.text).includes('Open your own panel')));
+  await bot.handleCallbackQuery({ id: 'watch-cb-2', from: { id: 1, username: 'admin' }, message: { chat, message_id: 511 }, data: mutedButton.callback_data });
+  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('muted')));
+});
+
+test('settings buttons update join challenge and conversation settings', async () => {
+  const { bot, calls } = makeBot({ canBan: true, configOverrides: { conversational: true } });
+  const chat = { id: -100, type: 'supergroup', title: 'demo' };
+  const challengePanel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Settings', 'settings-buttons');
+  await bot.handleCallbackQuery({ id: 'toggle-cb-1', from: { id: 1, username: 'admin' }, message: { chat, message_id: 521 }, data: challengePanel.reply_markup.inline_keyboard[0][0].callback_data });
+  assert.equal(bot.chatJoinChallengeEnabled(chat.id), true);
+  await bot.handleCallbackQuery({ id: 'toggle-cb-2', from: { id: 1, username: 'admin' }, message: { chat, message_id: 531 }, data: challengePanel.reply_markup.inline_keyboard[1][1].callback_data });
+  assert.equal(bot.chatConversationalEnabled(chat.id), false);
+  assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_setting_changed' && event.payload.enabled === true && event.local_only));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'conversational_setting_changed' && event.payload.enabled === false && event.local_only));
+});
+
+test('scan helper buttons explain risk and return to menu', async () => {
+  const { bot, calls } = makeBot({ canBan: true, analyzer: () => ({ is_scam: false, confidence: 20, scam_type: 'other', evidence: ['low risk'], recommended_action: 'ignore' }) });
+  const chat = { id: -100, type: 'supergroup', title: 'demo' };
+  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 54, text: '/scan @maybe_user' });
+  const panel = calls.find((call) => call.method === 'sendMessage' && call.payload.reply_markup)?.payload;
+  const whyButton = buttonByText(panel, 'Explain');
+  await bot.handleCallbackQuery({ id: 'scan-cb-2', from: { id: 1, username: 'admin' }, message: { chat, message_id: 541 }, data: whyButton.callback_data });
+  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('Why')));
 });
 
 test('/review with no args shows latest pending review items', async () => {
@@ -1381,44 +1503,38 @@ test('/review with no args shows latest pending review items', async () => {
   const chat = { id: -100, title: 'demo' };
   bot.store.append({ id: 'review-old', event_type: 'risk_review_needed', timestamp: new Date(Date.now() - 60_000).toISOString(), chat, user: { id: 87, username: 'old_review' }, payload: { confidence: 65, evidence: ['old signal'] } });
   bot.store.append({ id: 'review-new', event_type: 'report_review_needed', timestamp: new Date().toISOString(), chat, user: { id: 88, username: 'new_review' }, payload: { confidence: 70, evidence: ['new signal'] } });
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 45, text: '/review' });
-  const reply = calls.find((call) => call.method === 'sendMessage')?.payload || {};
+  const reply = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Reviews', 'review-no-args');
   assert.match(reply.text || '', /Latest pending review items/);
   assert.match(reply.text || '', /new_review/);
   assert.match(reply.text || '', /old_review/);
   assert.ok((reply.text || '').indexOf('new_review') < (reply.text || '').indexOf('old_review'));
   assert.equal(reply.parse_mode, 'HTML');
-  assert.equal(scheduled.length, 1);
-  assert.equal(scheduled[0].ttlSeconds, 60);
+  assert.equal(scheduled.length, 0);
 });
 
-test('/watchlist rejects non-admin requesters', async () => {
+test('settings callback rejects non-admin requesters', async () => {
   const { bot, calls } = makeBot({ canBan: true, trustedUserIds: [] });
-  await bot.handleCommand({ chat: { id: -100, title: 'demo' }, from: { id: 2, username: 'member' }, message_id: 46, text: '/watchlist' });
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('restricted')));
+  const chat = { id: -100, title: 'demo' };
+  const menu = await openMenu(bot, calls, chat, { id: 2, username: 'member' }, 46);
+  await bot.handleCallbackQuery({ id: 'settings-member', from: { id: 2, username: 'member' }, message: { chat, message_id: menu.message_id || 46 }, data: buttonByText(menu, 'Settings').callback_data });
+  assert.ok(calls.some((call) => call.method === 'answerCallbackQuery' && String(call.payload.text).includes('Admin only')));
 });
 
-test('/challenge lets admins toggle new-user join challenge per chat', async () => {
+test('/settings lets admins toggle new-user join challenge per chat', async () => {
   const { bot, calls } = makeBot({
     canBan: true,
     dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
     analyzer: () => ({ is_scam: false, confidence: 0, scam_type: 'other', evidence: [], recommended_action: 'ignore' })
   });
   const chat = { id: -100, title: 'demo' };
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 47, text: '/challenge on' });
+  const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Settings', 'settings-toggle');
+  await bot.handleCallbackQuery({ id: 'challenge-on', from: { id: 1, username: 'admin' }, message: { chat, message_id: 47 }, data: panel.reply_markup.inline_keyboard[0][0].callback_data });
   assert.equal(bot.chatJoinChallengeEnabled(chat.id), true);
   assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_setting_changed' && event.payload.enabled === true && event.local_only));
   await bot.handleNewMembers({ chat, from: { id: 1, username: 'admin' }, new_chat_members: [{ id: 9001, username: 'new_user', is_bot: false }] });
   assert.ok(calls.some((call) => call.method === 'sendMessage' && /quick check before posting/.test(call.payload.text)));
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 48, text: '/challenge off' });
+  await bot.handleCallbackQuery({ id: 'challenge-off', from: { id: 1, username: 'admin' }, message: { chat, message_id: 47 }, data: panel.reply_markup.inline_keyboard[0][1].callback_data });
   assert.equal(bot.chatJoinChallengeEnabled(chat.id), false);
-});
-
-test('/challenge rejects non-admin requesters', async () => {
-  const { bot, calls } = makeBot({ canBan: true, trustedUserIds: [] });
-  await bot.handleCommand({ chat: { id: -100, title: 'demo' }, from: { id: 2, username: 'member' }, message_id: 49, text: '/challenge on' });
-  assert.equal(bot.chatJoinChallengeEnabled(-100), false);
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('restricted')));
 });
 
 test('/scan replying to SangMata rename scans the renamed user ID', async () => {
@@ -1442,17 +1558,18 @@ test('/ban replying to SangMata rename bans the renamed user ID', async () => {
   assert.match(JSON.stringify(event.payload.evidence), /SangMata rename alert/);
 });
 
-test('/stats campaigns and /stats summarize local memory', async () => {
+test('stats menu campaigns and summary cover local memory', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   const timestamp = new Date().toISOString();
   bot.store.append({ id: 'evt-c1', event_type: 'fraud_finding', timestamp, payload: { domains: ['fake.example'], confidence: 80, local_confidence: 75, evidence: ['fake.example'] } });
   bot.store.append({ id: 'evt-c2', event_type: 'report_submitted', timestamp, payload: { domains: ['fake.example'], confidence: 90, local_confidence: 85, report_decision: 'accepted', evidence: ['fake.example'] } });
   const chat = { id: -100, title: 'demo' };
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 37, text: '/stats campaigns' });
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 38, text: '/stats' });
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('domain:fake.example')));
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('24h local')));
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Follow up')));
+  const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Stats', 'stats-local');
+  const campaignsButton = buttonByText(panel, 'Campaigns');
+  await bot.handleCallbackQuery({ id: 'stats-local-campaigns', from: { id: 1, username: 'admin' }, message: { chat, message_id: 381 }, data: campaignsButton.callback_data });
+  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('domain:fake.example')));
+  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('24h local')));
+  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('Follow up')));
 });
 
 test('campaign summaries include evidence roots and affected communities', async () => {
@@ -1539,7 +1656,7 @@ test('/scan with a plain name scans that name, not the command sender', async ()
   assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('@BRX86 looks clean')), false);
 });
 
-test('/report publishes wallet findings without attempting a Telegram ban', async () => {
+test('/report sends wallet findings to admin review without attempting a Telegram ban', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   await bot.handleCommand({
     chat: { id: -100, title: 'demo' },
@@ -1548,14 +1665,14 @@ test('/report publishes wallet findings without attempting a Telegram ban', asyn
     text: '/report 0x1111111111111111111111111111111111111111 fake airdrop wallet'
   });
   assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
-  assert.ok(bot.store.all().some((event) => event.event_type === 'report_submitted'));
-  assert.ok(bot.store.all().some((event) => event.event_type === 'fraud_finding'));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'report_review_needed'));
+  assert.equal(bot.store.all().some((event) => event.event_type === 'fraud_finding'), false);
   const reply = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
-  assert.match(reply, /saved the evidence to DKG fraud memory/);
+  assert.match(reply, /need stronger evidence|admin review/i);
   assert.doesNotMatch(reply, /UAL|did:dkg:context-graph|event ID/);
 });
 
-test('/report publishes suspicious DM support reports from non-admins without DKG history', async () => {
+test('/report keeps suspicious DM support reports from non-admins local without verifiable indicator', async () => {
   const { bot, calls, dkgWrites } = makeBot({
     canBan: true,
     analyzer: analyzeMessage,
@@ -1567,11 +1684,11 @@ test('/report publishes suspicious DM support reports from non-admins without DK
     message_id: 21,
     text: '/report @fake_helper DM me for help with your wallet issue'
   });
-  assert.ok(bot.store.all().some((event) => event.event_type === 'report_submitted'));
-  assert.ok(dkgWrites.some((event) => event.event_type === 'report_submitted'));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'report_review_needed'));
+  assert.equal(dkgWrites.some((event) => event.event_type === 'report_submitted'), false);
   assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
   const reply = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
-  assert.match(reply, /saved the evidence to DKG fraud memory/);
+  assert.match(reply, /need stronger evidence|admin review/i);
   assert.doesNotMatch(reply, /UAL|did:dkg:context-graph|event ID/);
 });
 
@@ -1591,16 +1708,17 @@ test('/report as a reply uses the replied fraudulent message without extra repor
       from: { id: 55, username: 'fake_helper', is_bot: false }
     }
   });
-  const report = dkgWrites.find((event) => event.event_type === 'report_submitted');
+  const report = bot.store.all().find((event) => event.event_type === 'report_review_needed');
   assert.ok(report);
   assert.equal(report.user.username, 'fake_helper');
-  assert.equal(report.payload.report_decision, 'accepted');
+  assert.equal(report.payload.report_decision, 'needs_admin_review');
   assert.equal(report.payload.confidence >= 80, true);
   assert.equal(report.payload.local_confidence >= 60, true);
-  assert.ok(bot.store.all().some((event) => event.event_type === 'reporter_reputation_update' && event.local_only));
+  assert.equal(dkgWrites.some((event) => event.event_type === 'report_submitted'), false);
+  assert.equal(bot.store.all().some((event) => event.event_type === 'reporter_reputation_update'), false);
 });
 
-test('/report mention uses recently observed target context without extra reporter text', async () => {
+test('/report mention with recently observed target context stays local without concrete indicator', async () => {
   const { bot, dkgWrites } = makeBot({
     canBan: true,
     analyzer: analyzeMessage,
@@ -1619,14 +1737,27 @@ test('/report mention uses recently observed target context without extra report
     message_id: 25,
     text: '/report @fake_helper'
   });
-  const report = dkgWrites.find((event) => event.event_type === 'report_submitted');
+  const report = bot.store.all().find((event) => event.event_type === 'report_review_needed');
   assert.ok(report);
   assert.match(report.payload.evidence.join('\n'), /recent observed message/);
-  assert.equal(report.payload.confidence >= 80, true);
-  assert.equal(report.payload.local_confidence >= 60, true);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'report_submitted'), false);
 });
 
-test('successful reporters can submit a bare target report for DKG review', async () => {
+test('natural language report queues mentioned target without DKG write', async () => {
+  const { bot, dkgWrites } = makeBot({
+    canBan: true,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] }
+  });
+  const chat = { id: -100, title: 'demo' };
+  await bot.handleMessage({ chat, from: { id: 55, username: 'fake_helper', is_bot: false }, message_id: 250, text: 'DM me for wallet support' });
+  await bot.executeAgentAction('report', { target: { username: 'fake_helper' }, reason: 'DM me for wallet support' }, { chat, from: { id: 86, username: 'BRX86' }, message_id: 251, text: '@tracethembot report @fake_helper DM me for wallet support' }, false);
+  const report = bot.store.all().find((event) => event.event_type === 'report_review_needed' && event.user?.username === 'fake_helper');
+  assert.ok(report);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'report_submitted' || event.event_type === 'fraud_campaign'), false);
+});
+
+test('successful reporters cannot bootstrap bare target reports into DKG review', async () => {
   const { bot, dkgWrites } = makeBot({
     canBan: true,
     analyzer: analyzeMessage,
@@ -1642,14 +1773,11 @@ test('successful reporters can submit a bare target report for DKG review', asyn
     message_id: 26,
     text: '/report @new_suspect'
   });
-  const report = dkgWrites.find((event) => event.event_type === 'report_submitted');
-  assert.ok(report);
-  assert.equal(report.payload.reporter_trusted, true);
-  assert.equal(report.payload.confidence >= 80, true);
-  assert.equal(report.payload.local_confidence >= 60, true);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'report_submitted'), false);
+  assert.ok(bot.store.all().some((event) => event.event_type === 'report_review_needed'));
 });
 
-test('/report publishes configured-admin impersonation reports from non-admins', async () => {
+test('/report keeps configured-admin impersonation reports local without concrete indicator', async () => {
   const { bot, dkgWrites } = makeBot({
     canBan: true,
     analyzer: analyzeMessage,
@@ -1662,11 +1790,11 @@ test('/report publishes configured-admin impersonation reports from non-admins',
     message_id: 22,
     text: '/report @brx86_support message me for private support'
   });
-  assert.ok(bot.store.all().some((event) => event.event_type === 'report_submitted'));
-  assert.ok(dkgWrites.some((event) => event.event_type === 'report_submitted'));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'report_review_needed'));
+  assert.equal(dkgWrites.some((event) => event.event_type === 'report_submitted'), false);
 });
 
-test('/dmreport publishes cross-community DM impersonation evidence without group target', async () => {
+test('/report keeps unbound forwarded DM impersonation evidence local-only', async () => {
   const { bot, calls, dkgWrites } = makeBot({
     canBan: true,
     analyzer: analyzeMessage,
@@ -1676,17 +1804,19 @@ test('/dmreport publishes cross-community DM impersonation evidence without grou
     chat: { id: -100, title: 'demo' },
     from: { id: 86, username: 'BRX86' },
     message_id: 221,
-    text: '/dmreport Branimir Rakic impersonator claiming CTO from OriginTrail is DMing users to connect wallet for support'
+    text: '/report Branimir Rakic impersonator claiming CTO from OriginTrail is DMing users to connect wallet for support',
+    forward_sender_name: 'Fake Branimir'
   });
-  const report = dkgWrites.find((event) => event.event_type === 'dm_scam_report');
+  const report = bot.store.all().find((event) => event.event_type === 'report_review_needed' && event.payload.scam_type === 'dm_impersonation');
   assert.ok(report);
   assert.equal(report.payload.reported_alias, 'Branimir Rakic');
   assert.match(report.payload.claimed_role, /cto/);
-  assert.equal(report.payload.report_decision, 'accepted');
+  assert.equal(report.payload.report_decision, 'weak');
+  assert.equal(report.local_only, true);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'report_submitted'), false);
   assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
   const reply = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
-  assert.match(reply, /DM scam report saved/);
-  assert.match(reply, /cross-community warnings/);
+  assert.match(reply, /need stronger details|need verifiable|logged this DM scam note/i);
 });
 
 test('private SangMata reports only process for configured bot owner', async () => {
@@ -1709,7 +1839,7 @@ test('private SangMata reports from non-owner do not flag DM sender', async () =
   assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('TRACaBot risk for @random_reporter')), false);
 });
 
-test('/dmreport accepts screenshot caption metadata but rejects screenshot-only reports', async () => {
+test('/report accepts screenshot caption metadata but rejects screenshot-only reports', async () => {
   const { bot, calls, dkgWrites } = makeBot({
     canBan: true,
     analyzer: analyzeMessage,
@@ -1719,29 +1849,30 @@ test('/dmreport accepts screenshot caption metadata but rejects screenshot-only 
     chat: { id: -100, title: 'demo' },
     from: { id: 86, username: 'BRX86' },
     message_id: 222,
-    text: '/dmreport',
+    text: '/report',
     caption: 'Fake founder DM asks to verify wallet for support',
     photo: [{ file_id: 'small' }, { file_id: 'large-screenshot' }]
   });
-  const accepted = dkgWrites.find((event) => event.event_type === 'dm_scam_report');
+  const accepted = bot.store.all().find((event) => event.event_type === 'report_review_needed' && event.payload.scam_type === 'dm_impersonation' && event.payload.screenshot_file_ids?.includes('large-screenshot'));
   assert.ok(accepted);
   assert.deepEqual(accepted.payload.screenshot_file_ids, ['large-screenshot']);
   assert.match(accepted.payload.claimed_role, /founder/);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'report_submitted' && event.payload.scam_type === 'dm_impersonation'), false);
 
   await bot.handleCommand({
     chat: { id: -100, title: 'demo' },
     from: { id: 87, username: 'reporter' },
     message_id: 223,
-    text: '/dmreport',
+    text: '/report',
     photo: [{ file_id: 'only-shot' }]
   });
   const weak = bot.store.all().find((event) => event.event_type === 'report_review_needed' && event.payload?.screenshot_file_ids?.includes('only-shot'));
   assert.ok(weak);
   assert.equal(weak.local_only, true);
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('need stronger details')));
+  assert.ok(weak);
 });
 
-test('bot mention can submit DM scam report without replying to random low-confidence chatter', async () => {
+test('bot mention keeps unbound DM scam report local without replying to random low-confidence chatter', async () => {
   const { bot, calls, dkgWrites } = makeBot({
     canBan: true,
     analyzer: analyzeMessage,
@@ -1753,8 +1884,9 @@ test('bot mention can submit DM scam report without replying to random low-confi
     message_id: 224,
     text: '@tracethembot report DM scam: fake CEO from another community is DMing people to validate wallet'
   });
-  assert.ok(dkgWrites.some((event) => event.event_type === 'dm_scam_report'));
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('DM scam report saved')));
+  assert.equal(dkgWrites.some((event) => event.event_type === 'report_submitted' && event.payload.scam_type === 'dm_impersonation'), false);
+  assert.ok(bot.store.all().some((event) => event.event_type === 'report_review_needed' && event.payload.scam_type === 'dm_impersonation'));
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('TRACaBot risk for @BRX86')), false);
 });
 
 test('/report without target evidence is local-only and does not pollute DKG', async () => {
@@ -1783,9 +1915,9 @@ test('/report duplicate from non-admin is rejected before DKG write', async () =
   await bot.handleCommand(message);
   await bot.handleCommand({ ...message, message_id: 18 });
   const reports = bot.store.all();
-  assert.ok(reports.some((event) => event.event_type === 'report_submitted'));
-  assert.ok(reports.some((event) => event.event_type === 'report_rejected' && event.local_only));
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('need stronger evidence')));
+  assert.ok(reports.some((event) => event.event_type === 'report_review_needed'));
+  assert.equal(reports.some((event) => event.event_type === 'report_submitted'), false);
+  assert.ok(reports.filter((event) => event.event_type === 'report_review_needed').length >= 1);
 });
 
 test('/ban bans replied user and publishes ban evidence', async () => {
@@ -1913,30 +2045,26 @@ test('normal messages are not logged with chat text', async () => {
   assert.equal(logs.some((line) => line.includes('normal private-looking chat text')), false);
 });
 
-test('/stats pulls DKG aggregate data', async () => {
+test('caption-only messages do not crash message handling', async () => {
   const { bot, calls } = makeBot({ canBan: true });
-  await bot.handleCommand({
-    chat: { id: -100, title: 'demo' },
-    from: { id: 1, username: 'admin' },
-    message_id: 13,
-    text: '/stats'
-  });
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('TRACaBot report (7d)')));
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('2 high-confidence signals from 3 DKG events')));
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('24h local')));
-  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('{"fraud_finding"')), false);
+  await bot.handleMessage({ chat: { id: -100, title: 'demo' }, from: { id: 3, username: 'member' }, message_id: 72, caption: 'Fake support says verify wallet now', photo: [{ file_id: 'caption-shot' }] });
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && /TypeError|crash/i.test(String(call.payload.text || ''))), false);
 });
 
-test('/digest returns 24h digest instead of stats dashboard', async () => {
+test('stats menu pulls DKG aggregate data', async () => {
   const { bot, calls } = makeBot({ canBan: true });
-  await bot.handleCommand({
-    chat: { id: -100, title: 'demo' },
-    from: { id: 1, username: 'admin' },
-    message_id: 130,
-    text: '/digest'
-  });
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('tracabot digest (24h)')));
-  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('TRACaBot report (7d)')), false);
+  const reply = await openMenuPanel(bot, calls, { id: -100, title: 'demo' }, { id: 1, username: 'admin' }, 'Stats', 'stats-dkg');
+  assert.match(reply.text, /TRACaBot report \(7d\)/);
+  assert.match(reply.text, /2 high-confidence signals from 3 DKG events/);
+  assert.match(reply.text, /24h local/);
+  assert.doesNotMatch(reply.text, /{"fraud_finding"/);
+});
+
+test('stats menu includes 24h digest section', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const reply = await openMenuPanel(bot, calls, { id: -100, title: 'demo' }, { id: 1, username: 'admin' }, 'Stats', 'stats-digest');
+  assert.match(reply.text, /tracabot digest \(24h\)/);
+  assert.match(reply.text, /TRACaBot report \(7d\)/);
 });
 
 test('/review list is compact and groups duplicate targets', async () => {
@@ -1944,17 +2072,42 @@ test('/review list is compact and groups duplicate targets', async () => {
   const timestamp = new Date().toISOString();
   bot.store.append({ id: 'evt-review-1', event_type: 'risk_review_needed', timestamp, user: { id: 1505519171, username: 'molociao' }, payload: { confidence: 99, evidence: ['Crypto lure terms: giveaway; Impersonation indicators: mod'] } });
   bot.store.append({ id: 'evt-review-2', event_type: 'risk_review_needed', timestamp, user: { id: 1505519171, username: 'molociao' }, payload: { confidence: 90, evidence: ['Urgency language: now; Impersonation indicators: admin'] } });
-  await bot.handleCommand({ chat: { id: -100, title: 'demo' }, from: { id: 1, username: 'admin' }, message_id: 15, text: '/review' });
-  // Find the substantial reply (not the 'Fetching...' ack)
-  const replies = calls.filter((call) => call.method === 'sendMessage' && call.payload.text && !call.payload.text.includes('Fetching'));
-  const reply = replies.length ? replies[replies.length-1].payload.text : '';
+  const panel = await openMenuPanel(bot, calls, { id: -100, title: 'demo' }, { id: 1, username: 'admin' }, 'Reviews', 'review-compact');
+  const reply = panel.text || '';
   assert.match(reply, /@molociao<\/a> \(ID 1505519171\)/);
   assert.match(reply, /\(\+1 more\)/);
-  assert.match(reply, /Actions: reply to a bot alert with \/review overturn reason/);
-  assert.doesNotMatch(reply, /evt-review-1 uphold reason/);
+  assert.match(reply, /Tap a button below to open a review item/);
+  assert.doesNotMatch(reply, /Who should I review\?/);
+  assert.doesNotMatch(reply, /1 is not a scammer/);
+  assert.doesNotMatch(reply, /evt-review-1 confirm reason/);
 });
 
-test('natural language false positive review overturns matching user queue', async () => {
+test('/review list explains long queues without overloading buttons', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const timestamp = new Date().toISOString();
+  for (let i = 1; i <= 7; i += 1) {
+    bot.store.append({ id: `evt-review-long-${i}`, event_type: 'risk_review_needed', timestamp, user: { id: 8000 + i, username: `review_${i}` }, payload: { confidence: 80, evidence: [`signal ${i}`] } });
+  }
+  const reply = await openMenuPanel(bot, calls, { id: -100, title: 'demo' }, { id: 1, username: 'admin' }, 'Reviews', 'review-long');
+  assert.match(reply.text || '', /Showing the first 5 targets/);
+  assert.equal(reply.reply_markup.inline_keyboard.filter((row) => row[0]?.callback_data?.includes('review-open')).length, 5);
+});
+
+test('/review list does not globally hide targets previously rejected by admin', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  const timestamp = new Date().toISOString();
+  bot.store.append({ id: 'evt-brx-pending', event_type: 'risk_review_needed', timestamp, user: { id: 1354777145, username: 'BRX86' }, payload: { confidence: 0, evidence: ['prior false positive suppressed enforcement'] } });
+  bot.store.append({ id: 'evt-rage-pending', event_type: 'risk_review_needed', timestamp, user: { id: 472024168, username: 'r4ge13' }, payload: { confidence: 75, evidence: ['Urgency language: now'] } });
+  bot.store.append({ id: 'evt-brx-reject', event_type: 'review_overturned', timestamp, user: { id: 1, username: 'admin' }, payload: { target_event_id: 'previous-brx', review_decision: 'reject', reviewed_target: { id: 1354777145, username: 'BRX86' }, reviewed_target_key: 'id:1354777145', evidence: ['admin rejected BRX flag'] } });
+
+  const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Reviews', 'review-not-hidden');
+  const reply = panel.text || '';
+  assert.match(reply, /BRX86/);
+  assert.match(reply, /r4ge13/);
+});
+
+test('natural language false positive review rejects matching user queue', async () => {
   const { bot, dkgWrites, calls } = makeBot({ canBan: true });
   const timestamp = new Date().toISOString();
   bot.store.append({ id: 'evt-review-1', event_type: 'risk_review_needed', timestamp, user: { id: 1505519171, username: 'molociao' }, payload: { confidence: 99, evidence: ['Crypto lure terms: giveaway'] } });
@@ -1963,6 +2116,111 @@ test('natural language false positive review overturns matching user queue', asy
   assert.equal(dkgWrites.filter((event) => event.event_type === 'review_overturned').length, 2);
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('cleared 2 pending reviews')));
   assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Processing false positive correction')), false);
+});
+
+test('natural admin review reply rejects all pending reviews for listed user', async () => {
+  const { bot, dkgWrites, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  const timestamp = new Date().toISOString();
+  bot.store.append({ id: 'evt-brx-1', event_type: 'risk_review_needed', timestamp, user: { id: 1354777145, username: 'BRX86' }, payload: { confidence: 0, evidence: ['prior false positive'] } });
+  bot.store.append({ id: 'evt-brx-2', event_type: 'risk_review_needed', timestamp, user: { id: 1354777145, username: 'BRX86' }, payload: { confidence: 10, evidence: ['thin signal'] } });
+  bot.store.append({ id: 'evt-other-1', event_type: 'risk_review_needed', timestamp, user: { id: 472024168, username: 'r4ge13' }, payload: { confidence: 75, evidence: ['Urgency language: now'] } });
+
+  await bot.handleMessage({ chat, from: { id: 1, username: 'admin' }, message_id: 21, text: '@tracethembot @BRX86 is not a scammer' });
+
+  const rejected = dkgWrites.filter((event) => event.event_type === 'review_overturned');
+  assert.equal(rejected.length, 2);
+  assert.ok(rejected.every((event) => event.payload.reviewed_target.username === 'BRX86'));
+  assert.ok(calls.some((call) => String(call.payload.text || '').includes('cleared 2 pending reviews')));
+  assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'BRX86'), false);
+  assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'r4ge13'), true);
+});
+
+test('non-admin review correction is logged as appeal', async () => {
+  const { bot, dkgWrites, calls } = makeBot({ canBan: true, trustedUserIds: [1] });
+  const chat = { id: -100, title: 'demo' };
+  bot.store.append({ id: 'evt-rage-review', event_type: 'risk_review_needed', timestamp: new Date().toISOString(), user: { id: 472024168, username: 'r4ge13' }, payload: { confidence: 75, evidence: ['Urgency language: now'] } });
+
+  await bot.executeAgentAction('appeal', { event_id: 'evt-rage-review', reason: '@r4ge13 is not a scammer' }, { chat, from: { id: 2, username: 'member' }, message_id: 31, text: '@tracethembot @r4ge13 is not a scammer' }, false);
+
+  const appeal = dkgWrites.find((event) => event.event_type === 'appeal_submitted');
+  assert.equal(appeal.payload.target_event_id, 'evt-rage-review');
+  assert.equal(appeal.payload.detection_method, 'llm_context_reply_to_flag');
+  assert.ok(calls.some((call) => String(call.payload.text || '').includes('Appeal recorded')));
+});
+
+test('natural language false positive reply uses flagged target instead of first word', async () => {
+  const { bot, dkgWrites, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  const timestamp = new Date().toISOString();
+  bot.store.append({ id: 'evt-coineazy-review', event_type: 'risk_review_needed', timestamp, user: { id: 4242, username: 'coineazy' }, payload: { confidence: 80, scam_type: 'phishing', evidence: ['Suspicious link or claim-link pattern'] } });
+  bot.reviewMessageEvents.set(`${chat.id}:900`, 'evt-coineazy-review');
+
+  await bot.handleMessage({
+    chat,
+    from: { id: 1, username: 'admin' },
+    message_id: 901,
+    text: 'Not a scam\n\nNot a scammer',
+    reply_to_message: { chat, message_id: 900, from: { id: 999, username: 'tracethembot', is_bot: true }, text: 'TRACaBot flagged @coineazy for admin review.' }
+  });
+
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'review_overturned').length, 1);
+  const reply = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
+  assert.match(reply, /@coineazy/);
+  assert.doesNotMatch(reply, /@Not\b/);
+});
+
+test('LLM admin alert reply needs explicit verdict before final review write', async () => {
+  const llmCalls = [];
+  const llm = { async complete(input) { llmCalls.push(input); return { ok: true, text: JSON.stringify({ intent: 'admin_review', decision: 'reject', target_event_id: 'evt-coineazy-llm', reason: 'admin says not a scammer', confidence: 94, user_reply: 'Rejected the scam flag for @coineazy.' }) }; } };
+  const { bot, dkgWrites, calls } = makeBot({ canBan: true, conversational: true, llm });
+  const chat = { id: -100, title: 'demo' };
+  const timestamp = new Date().toISOString();
+  bot.store.append({ id: 'evt-coineazy-llm', event_type: 'risk_review_needed', timestamp, user: { id: 4242, username: 'coineazy' }, payload: { confidence: 80, scam_type: 'phishing', evidence: ['Suspicious link or claim-link pattern'] } });
+  bot.reviewMessageEvents.set(`${chat.id}:902`, 'evt-coineazy-llm');
+
+  await bot.handleMessage({
+    chat,
+    from: { id: 1, username: 'admin' },
+    message_id: 903,
+    text: 'Looks odd, can you check?',
+    reply_to_message: { chat, message_id: 902, from: { id: 999, username: 'tracethembot', is_bot: true }, text: 'TRACaBot flagged @coineazy for admin review.' }
+  });
+
+  assert.equal(llmCalls.length, 1);
+  assert.match(llmCalls[0].system, /confirm\/reject language|confirm means confirm/);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'review_overturned'), false);
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('explicit verdict')));
+});
+
+test('LLM classifies admin alert reply confirm as confirmed scam flag', async () => {
+  const llm = { async complete() { return { ok: true, text: JSON.stringify({ intent: 'admin_review', decision: 'confirm', target_event_id: 'evt-confirm-llm', reason: 'admin confirms scam', confidence: 91, user_reply: 'Confirmed the scam flag for @badlink.' }) }; } };
+  const { bot, dkgWrites, calls } = makeBot({ canBan: true, conversational: true, llm });
+  const chat = { id: -100, title: 'demo' };
+  bot.store.append({ id: 'evt-confirm-llm', event_type: 'risk_review_needed', timestamp: new Date().toISOString(), user: { id: 5150, username: 'badlink' }, payload: { confidence: 82, scam_type: 'phishing', evidence: ['claim link'] } });
+  bot.reviewMessageEvents.set(`${chat.id}:904`, 'evt-confirm-llm');
+
+  await bot.handleMessage({ chat, from: { id: 1, username: 'admin' }, message_id: 905, text: 'Confirm scam', reply_to_message: { chat, message_id: 904, from: { id: 999, username: 'tracethembot', is_bot: true }, text: 'TRACaBot flagged @badlink for admin review.' } });
+
+  const review = dkgWrites.find((event) => event.event_type === 'review_upheld');
+  assert.equal(review.payload.review_decision, 'confirm');
+  assert.equal(review.payload.detection_method, 'llm_alert_reply_classifier');
+  assert.ok(calls.some((call) => String(call.payload.text || '').includes('Confirmed the scam flag')));
+});
+
+test('LLM classifies non-admin alert reply dispute as appeal', async () => {
+  const llm = { async complete() { return { ok: true, text: JSON.stringify({ intent: 'appeal', decision: 'reject', target_event_id: 'evt-appeal-llm', reason: 'user disputes flag', confidence: 88, user_reply: 'Appeal logged for @coineazy.' }) }; } };
+  const { bot, dkgWrites, calls } = makeBot({ canBan: true, trustedUserIds: [1], conversational: true, llm });
+  const chat = { id: -100, title: 'demo' };
+  bot.store.append({ id: 'evt-appeal-llm', event_type: 'risk_review_needed', timestamp: new Date().toISOString(), user: { id: 4242, username: 'coineazy' }, payload: { confidence: 80, scam_type: 'phishing', evidence: ['claim link'] } });
+  bot.reviewMessageEvents.set(`${chat.id}:906`, 'evt-appeal-llm');
+
+  await bot.handleMessage({ chat, from: { id: 2, username: 'member' }, message_id: 907, text: 'This is not a scam', reply_to_message: { chat, message_id: 906, from: { id: 999, username: 'tracethembot', is_bot: true }, text: 'TRACaBot flagged @coineazy for admin review.' } });
+
+  const appeal = dkgWrites.find((event) => event.event_type === 'appeal_submitted');
+  assert.equal(appeal.payload.target_event_id, 'evt-appeal-llm');
+  assert.equal(appeal.payload.detection_method, 'llm_alert_reply_classifier');
+  assert.ok(calls.some((call) => String(call.payload.text || '').includes('Appeal logged')));
 });
 
 test('natural language false positive review clears all matching pending reviews', async () => {
@@ -1979,16 +2237,14 @@ test('natural language false positive review clears all matching pending reviews
   assert.equal(replies.some((text) => text.includes('Processing false positive correction')), false);
 });
 
-test('/stats sources returns DKG event receipts', async () => {
+test('stats sources button returns DKG event receipts', async () => {
   const { bot, calls } = makeBot({ canBan: true });
-  await bot.handleCommand({
-    chat: { id: -100, title: 'demo' },
-    from: { id: 1, username: 'admin' },
-    message_id: 14,
-    text: '/stats sources'
-  });
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Stats sources from DKG graph tracabot')));
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('evt-stats')));
+  const chat = { id: -100, title: 'demo' };
+  const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Stats', 'stats-sources-panel');
+  const sourcesButton = buttonByText(panel, 'Sources');
+  await bot.handleCallbackQuery({ id: 'stats-sources', from: { id: 1, username: 'admin' }, message: { chat, message_id: 14 }, data: sourcesButton.callback_data });
+  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('Stats sources from DKG graph tracabot')));
+  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('evt-stats')));
 });
 
 test('proactive cross-group warning (Option A) creates event, surfaces in-chat alert and records artefact when history present', async () => {

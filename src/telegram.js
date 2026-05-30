@@ -1,28 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { canAutonomouslyEscalate, combineRisk, displayName, formatBanReply, formatDkgReference, formatReportReply, formatReviewNeededSummary, formatRiskAssessment, formatScanReply, formatStatsReply, formatStatsSourcesReply, isObviousLocalScam } from './risk-engine.js';
 import { extractDomains, extractPatterns, extractWallets } from './dkg-client.js';
-import { buildAgentIntentPrompt, buildGeneralPrompt, buildSafetyPrompt, fallbackSafetyReply, isOnTopicDirectAddress, isSafetyQuestion, offTopicRedirect, sanitizeGeneralReply, sanitizeSafetyReply, shouldConversationallyReply } from './conversation.js';
+import { buildAgentIntentPrompt, buildAlertReplyClassifierPrompt, buildGeneralPrompt, buildSafetyPrompt, fallbackSafetyReply, isOnTopicDirectAddress, isSafetyQuestion, offTopicRedirect, sanitizeGeneralReply, sanitizeSafetyReply, shouldConversationallyReply } from './conversation.js';
 import { redactedOpenClawStatus } from './openclaw-config.js';
 import { TracabotSkillService } from './skill-service.js';
 
 export const TELEGRAM_COMMANDS = [
+  { command: 'start', description: 'Open Tracabot protection menu' },
   { command: 'scan', description: 'Check a user, wallet, or replied message for scam risk' },
-  { command: 'report', description: 'Report a suspicious user, wallet, or message to DKG (also works via natural language when tagging or replying)' },
-  { command: 'dmreport', description: 'Report off-platform DM impersonation scams (natural language supported)' },
+  { command: 'report', description: 'Report suspicious users, messages, links, wallets, or forwarded DMs' },
   { command: 'ban', description: 'Ban a replied user and publish ban evidence (admin)' },
-  { command: 'stats', description: 'Show recent fraud checks and detections' },
-  { command: 'digest', description: 'Show 24h summary of bans, reports, reviews, and campaigns' },
-  { command: 'why', description: 'Explain a tracabot event decision (LLM memory queries often answer "why" questions naturally too)' },
-  { command: 'watch', description: 'Admin: watch a suspicious actor (also triggered implicitly by admins via context/reply in conversational mode)' },
-  { command: 'unwatch', description: 'Admin: remove a watched actor' },
-  { command: 'watchlist', description: 'Admin: show watches, mutes, and review items' },
-  { command: 'challenge', description: 'Admin: turn new-user join challenge on or off' },
-  { command: 'conversation', description: 'Admin: turn natural language agent mode on or off for this group (default on)' },
-  { command: 'appeal', description: 'Submit an appeal or correction (auto-detected when flagged users reply to Tracabot alerts in many cases)' },
-  { command: 'review', description: 'Admin: uphold or overturn an event (works via reply to Tracabot flag or tagging the user + verdict context)' },
-  { command: 'banlist', description: 'Admin: recent concrete enforcement actions (bans, restrictions, upheld reviews) with short memory summaries' },
-  { command: 'status', description: 'Admin: show bot, DKG, and conversation status' },
-  { command: 'help', description: 'Show tracabot commands and autonomous policy' }
+  { command: 'mute', description: 'Admin: mute a replied or mentioned user for a duration' }
 ];
 
 const MAX_TEXT_CHARS = 4096;
@@ -45,25 +33,84 @@ const PRIVATE_INFO_RE = /\b(?:status|config|token|secret|env|endpoint|admin list
 const DIGEST_INTENT_RE = /\b(?:digest|daily summary|24h summary|what happened today|what's happening|whats happening)\b/i;
 const STATS_INTENT_RE = /\b(?:stats?|statistics|metrics|activity|report|summary)\b/i;
 const REVIEW_QUEUE_INTENT_RE = /\b(?:pending reviews?|review queue|anything to review|needs review|items to review)\b/i;
-const WATCHLIST_INTENT_RE = /\b(?:watchlist|watch list|active watches?|muted|mutes)\b/i;
+const WATCHLIST_INTENT_RE = /\b(?:muted|mutes)\b/i;
 const CAMPAIGN_INTENT_RE = /\b(?:campaigns?|repeated patterns?|repeated domains?|scam wave|clusters?)\b/i;
 const HELP_INTENT_RE = /\b(?:help|commands?|what can you do|who are you|what are you|purpose|hello|hi|are you alive)\b/i;
+const BOT_REPLY_CONTEXT_TTL_MS = 2 * 60 * 1000;
 
 function boundedText(value = '', max = MAX_TEXT_CHARS) {
   return String(value || '').slice(0, max);
 }
 
+function entityUrls(message = {}) {
+  return [...(message.entities || []), ...(message.caption_entities || [])]
+    .map((entity) => entity?.url)
+    .filter(Boolean);
+}
+
 function messageText(message = {}) {
-  return boundedText([message.text, message.caption].filter(Boolean).join('\n'));
+  return boundedText([message.text, message.caption, ...entityUrls(message)].filter(Boolean).join('\n'));
 }
 
 function repliedText(message = {}) {
   const reply = message.reply_to_message || {};
-  return boundedText([reply.text, reply.caption].filter(Boolean).join('\n'));
+  return boundedText([reply.text, reply.caption, ...entityUrls(reply)].filter(Boolean).join('\n'));
+}
+
+function isCommand(text = '', command = '') {
+  return new RegExp(`^/${command}(?:@\\w+)?(?:\\s|$)`, 'i').test(String(text || ''));
+}
+
+function callbackData(action = '', ...parts) {
+  return ['tc', 'v1', action, ...parts].map((part) => encodeURIComponent(String(part || ''))).join(':').slice(0, 64);
+}
+
+function parseCallbackData(data = '') {
+  const parts = String(data || '').split(':').map((part) => decodeURIComponent(part));
+  if (parts[0] !== 'tc' || parts[1] !== 'v1') return null;
+  return { action: parts[2] || '', parts: parts.slice(3) };
+}
+
+function inlineKeyboard(rows = []) {
+  return { inline_keyboard: rows };
+}
+
+function button(text, data) {
+  return { text, callback_data: data };
+}
+
+function parseDurationSeconds(text = '') {
+  const value = String(text || '').toLowerCase();
+  const match = value.match(/\b(\d+)\s*(minutes?|mins?|m|hours?|hrs?|h|days?|d)\b/i);
+  if (!match) return 24 * 60 * 60;
+  const amount = Math.max(1, Number(match[1]) || 1);
+  const unit = match[2];
+  if (/^m/.test(unit)) return amount * 60;
+  if (/^h/.test(unit)) return amount * 60 * 60;
+  return amount * 24 * 60 * 60;
+}
+
+function humanDuration(seconds = 24 * 60 * 60) {
+  if (seconds % (24 * 60 * 60) === 0) return `${seconds / (24 * 60 * 60)} day${seconds === 24 * 60 * 60 ? '' : 's'}`;
+  if (seconds % (60 * 60) === 0) return `${seconds / (60 * 60)} hour${seconds === 60 * 60 ? '' : 's'}`;
+  if (seconds % 60 === 0) return `${seconds / 60} minute${seconds === 60 ? '' : 's'}`;
+  return `${seconds} seconds`;
 }
 
 function evidenceText(message = {}) {
   return boundedText([messageText(message), repliedText(message)].filter(Boolean).join('\n'));
+}
+
+function forwardedEvidenceText(message = {}) {
+  const forward = [
+    message.forward_from?.username ? `forwarded_from_username: @${message.forward_from.username}` : '',
+    message.forward_from?.id ? `forwarded_from_id: ${message.forward_from.id}` : '',
+    message.forward_sender_name ? `forwarded_sender_name: ${message.forward_sender_name}` : '',
+    message.forward_from_chat?.username ? `forwarded_from_chat: @${message.forward_from_chat.username}` : '',
+    message.forward_from_chat?.title ? `forwarded_chat_title: ${message.forward_from_chat.title}` : '',
+    message.forward_date ? `forwarded_date: ${message.forward_date}` : ''
+  ].filter(Boolean).join('\n');
+  return boundedText([forward, evidenceText(message)].filter(Boolean).join('\n'));
 }
 
 function screenshotFileIds(message = {}) {
@@ -79,7 +126,7 @@ function screenshotFileIds(message = {}) {
 
 function cleanDmReportText(text = '') {
   return String(text || '')
-    .replace(/^\/dmreport(?:@\w+)?\s*/i, '')
+    .replace(/^\/(?:report|dmreport)(?:@\w+)?\s*/i, '')
     .replace(/@(?:tracabot|tracethembot)\b/ig, ' ')
     .replace(/^\s*(?:report|warn|alert|heads?\s*up)\s*(?:dm\s*)?(?:scam|impersonator|impersonation)?\s*[:\-]?\s*/i, '')
     .trim();
@@ -232,7 +279,7 @@ function plural(count, singular, pluralWord = `${singular}s`) {
 }
 
 function shortId(id = '') {
-  return String(id || '').slice(0, 8) || 'unknown';
+  return String(id || '').slice(0, 16) || 'unknown';
 }
 
 function ageLabel(timestamp = '') {
@@ -317,11 +364,11 @@ function isCampaignRootEvent(event = {}) {
 
 function formatDmReportReply(event, decision = {}) {
   if (!decision.accepted) {
-    return '⚠️ I logged this DM scam note locally, but need stronger details before sharing it to DKG: impersonated name/role, the request they made, wallet/link, or screenshot caption.';
+    return '⚠️ I logged this DM scam note for admin review, but stronger details help: impersonated name/role, the request they made, wallet/link, or screenshot caption.';
   }
   const alias = event.payload?.reported_alias || event.payload?.reportedAlias || 'reported DM impersonator';
   const role = event.payload?.claimed_role ? ` (${event.payload.claimed_role})` : '';
-  return `⚠️ DM scam report saved: ${alias}${role}. I saved the evidence to DKG fraud memory for cross-community warnings. Warn users not to trust unsolicited DMs; verify through official channels.`;
+  return `⚠️ DM scam report saved: ${alias}${role}. I added it to the admin review queue. Warn users not to trust unsolicited DMs; verify through official channels.`;
 }
 
 export class TelegramShieldBot {
@@ -338,12 +385,13 @@ export class TelegramShieldBot {
     this.joinChallenges = new Map();
     this.solvedJoinChallenges = new Map();
     this.reviewMessageEvents = new Map();
-    this.lastPendingReviewsByChat = new Map(); // chatId -> array of recent pending review targets for follow-up corrections
+    this.lastPendingReviewsByChat = new Map(); // chatId -> displayed review groups for natural follow-up corrections
     this._reviewCache = { pending: null, watches: null, lastUpdate: 0 };
     this.nextProactiveScanAt = Date.now() + this.config.proactiveScanMinutes * 60 * 1000;
     this.conversationLastReply = new Map();
     this.naturalLanguageLastReply = new Map();
     this.conversationHistory = new Map();
+    this.lastBotReplyByThread = new Map();
     this.lastCrossGroupWarningAt = new Map(); // chatId:targetKey -> timestamp for rate limiting proactive cross-group alerts
     this.skillService = null;
     this.seenChats = new Map();
@@ -381,15 +429,26 @@ export class TelegramShieldBot {
 
   async send(chatId, text, extra = {}) {
     try {
-      return await this.call('sendMessage', { chat_id: chatId, text, ...extra });
+      const sent = await this.call('sendMessage', { chat_id: chatId, text, ...extra });
+      this.rememberBotReply(chatId, sent, text, extra);
+      return sent;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (extra.reply_to_message_id && /message to be replied not found/i.test(message)) {
         const { reply_to_message_id, ...fallbackExtra } = extra;
-        return this.call('sendMessage', { chat_id: chatId, text, ...fallbackExtra });
+        const sent = await this.call('sendMessage', { chat_id: chatId, text, ...fallbackExtra });
+        this.rememberBotReply(chatId, sent, text, fallbackExtra);
+        return sent;
       }
       throw error;
     }
+  }
+
+  rememberBotReply(chatId, sent = {}, text = '', extra = {}) {
+    if (!sent?.message_id) return;
+    const key = `${chatId}:${extra.reply_to_message_id || '*'}`;
+    this.lastBotReplyByThread.set(key, { chatId, messageId: sent.message_id, text: String(text || '').slice(0, 500), timestamp: Date.now() });
+    this.lastBotReplyByThread.set(`${chatId}:*`, { chatId, messageId: sent.message_id, text: String(text || '').slice(0, 500), timestamp: Date.now() });
   }
 
   async sendTyping(chatId) {
@@ -418,6 +477,40 @@ export class TelegramShieldBot {
 
   async sendCommandReply(chatId, text, extra = {}, ttlSeconds = this.config.botMessageTtlSeconds || 60) {
     return this.sendEphemeral(chatId, text, extra, ttlSeconds);
+  }
+
+  async sendInteractiveReply(chatId, text, rows = [], extra = {}) {
+    return this.sendCommandReply(chatId, text, { ...extra, reply_markup: inlineKeyboard(rows) });
+  }
+
+  async menuIntro(message = {}) {
+    if (this.llm && this.chatConversationalEnabled(message?.chat?.id)) {
+      const reply = await this.generalConversationReply({ ...message, text: message.text || 'Open the Tracabot protection menu.' }).catch(() => '');
+      if (reply && reply.length > 5) return reply;
+    }
+    return 'I’m here to help protect the group. Choose an action below, or use /scan, /report, /ban, or /mute as a reply when you need a direct action.';
+  }
+
+  async sendMenu(message = {}, extra = {}) {
+    const chatId = message.chat?.id;
+    const requester = message.from?.id || message.from?.username || '';
+    const text = await this.menuIntro(message);
+    return this.sendInteractiveReply(chatId, text, this.dashboardKeyboard(requester), { reply_to_message_id: message.message_id, ...extra });
+  }
+
+  async editInteractiveMessage(chatId, messageId, text, rows = [], extra = {}) {
+    return this.call('editMessageText', {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      ...extra,
+      reply_markup: inlineKeyboard(rows)
+    });
+  }
+
+  async answerCallback(callbackId, text = '') {
+    if (!callbackId) return null;
+    return this.call('answerCallbackQuery', { callback_query_id: callbackId, text }).catch(() => null);
   }
 
   async sendPersistentCommandReply(chatId, text, extra = {}) {
@@ -476,6 +569,31 @@ export class TelegramShieldBot {
     });
   }
 
+  async muteMember(chatId, userId, untilDate = Math.floor(Date.now() / 1000) + 24 * 60 * 60) {
+    return this.call('restrictChatMember', {
+      chat_id: chatId,
+      user_id: userId,
+      until_date: untilDate,
+      use_independent_chat_permissions: true,
+      permissions: {
+        can_send_messages: false,
+        can_send_audios: false,
+        can_send_documents: false,
+        can_send_photos: false,
+        can_send_videos: false,
+        can_send_video_notes: false,
+        can_send_voice_notes: false,
+        can_send_polls: false,
+        can_send_other_messages: false,
+        can_add_web_page_previews: false,
+        can_change_info: false,
+        can_invite_users: false,
+        can_pin_messages: false,
+        can_manage_topics: false
+      }
+    });
+  }
+
   async restoreMemberPermissions(chatId, userId) {
     return this.call('restrictChatMember', {
       chat_id: chatId,
@@ -504,11 +622,7 @@ export class TelegramShieldBot {
   async groupAccessLink(chat = {}) {
     if (chat.username) return `https://t.me/${String(chat.username).replace(/^@/, '')}`;
     if (chat.invite_link) return chat.invite_link;
-    try {
-      return await this.call('exportChatInviteLink', { chat_id: chat.id });
-    } catch {
-      return '';
-    }
+    return '';
   }
 
   async botUsername() {
@@ -659,6 +773,8 @@ export class TelegramShieldBot {
     const mentions = [...String(message.text || '').matchAll(/@([A-Za-z0-9_]{3,32})/g)].map((match) => match[1]);
     const username = mentions.find((candidate) => !/^(tracabot|tracethembot)$/i.test(candidate));
     if (!username) return null;
+    const observed = this.observedUserForName(message.chat, username);
+    if (observed) return observed;
     return { id: '', username, kind: 'user' };
   }
 
@@ -740,7 +856,7 @@ export class TelegramShieldBot {
   }
 
   commandText(message, command) {
-    return boundedText(message.text || '').replace(new RegExp(`^/${command}(?:@\\w+)?\\s*`, 'i'), '').trim();
+    return boundedText(message.text || '').replace(new RegExp(`^/${command}(?:@\\w+)?(?:\\s+|$)`, 'i'), '').trim();
   }
 
   resolveCommandTarget(message, command) {
@@ -791,7 +907,7 @@ export class TelegramShieldBot {
         ? 'TRACaBot flagged this for admin review.'
         : 'TRACaBot needs an admin review.',
       riskLine,
-      'If this is wrong, reply with /appeal and an optional reason.'
+      'Reply naturally: admins can say “confirm scam” or “reject as not a scam”; non-admin replies are logged as appeals.'
       // No longer duplicating the full original message as "Context:" — we reply directly to it (see below)
     ].filter(Boolean).join('\n');
 
@@ -813,29 +929,18 @@ export class TelegramShieldBot {
     const restrict = this.config.restrictThreshold ?? 75;
     const ban = this.config.banThreshold ?? this.config.actionThreshold ?? 85;
     return [
-      'tracabot commands:',
-      '/scan <user|id|wallet|message> - check risk using local analysis + DKG shared memory. Reply to SangMata alerts works. Natural language ("scan this") also supported when addressing me.',
-      '/report <user|wallet|text> - submit suspicious evidence to DKG when it has independent signal. Natural language reports (tagging or replying) are parsed into structured memory.',
-      '/dmreport <name/role/request> - report DM impersonators who are not in the group. Captions/screenshots can be attached. Natural language supported.',
+      '🛡️ Tracabot protection menu',
+      '/start opens this interactive menu. Use the buttons for stats, reviews, settings, enforcement, and explanations.',
+      '/scan <user|id|wallet|message> - check risk using local analysis + DKG shared memory. Best used as a reply to the exact message/user.',
+      '/report <user|wallet|text> - report suspicious evidence for admin review. Reply to a message, forward a DM, include @username when available, and add as much detail as possible.',
       '/ban - admin-only; reply to a user to ban and publish evidence.',
-      '/stats - combined DKG stats, local digest, review queue counts, and recommended follow-up. Use /stats sources for receipts.',
-      '/why event-id - explain local + DKG evidence behind a decision (many "why" questions can also be answered naturally via memory queries).',
-      '/watch - admin-only; reply to a user or SangMata alert. Also works as /watch <telegram-id> or /watch @user. In conversational mode, admins can often trigger via context/reply without the exact word.',
-      '/unwatch - admin-only; reply to a user or SangMata alert. Also works as /unwatch <telegram-id> or /unwatch @user. Soft language used in resulting records.',
-      '/watchlist - admin-only; show active watches, temp mutes, and review items. Use /watchlist muted or /watchlist review.',
-      '/challenge on|off|status - admin-only; turn the new-user join challenge on or off for this chat.',
-      '/appeal [reason] - submit a correction. I often auto-detect appeals when a flagged user replies to my alert (even without saying the word).',
-      '/review [@user|event-id] uphold|overturn reason - admin-only. Works by replying to a Tracabot flag message or tagging the user + giving verdict context (I detect "false positive", "real", "overturn", "confirm" etc.).',
-      '/banlist - admin-only; recent concrete enforcement actions (bans, restrictions, upheld reviews) with short summarized reasons pulled from memory.',
-      '/stats campaigns - show repeated domains, wallets, patterns, or text fingerprints.',
-      '/conversation on|off|status - admin-only; toggle natural language agent mode per group (default on).',
-      '/status - admin-only; show DKG, Telegram permission, and conversational mode status.',
-      '/help - show this command guide.',
+      '/mute [duration] - admin-only; reply to or mention a user to mute. Examples: /mute 5 minutes, /mute 1 day. Default is 24 hours.',
+      'Ask naturally for explanations: “why was this flagged?” or “explain event <id>”. Non-admin replies to flags are logged as appeals automatically.',
       '',
       `Autonomous policy: warn/log at ${warn}%, delete/restrict at ${restrict}%, delete/ban at ${ban}%.`,
       'DKG memory: reads and writes shared fraud evidence for cross-community protection.',
       `Join challenge default: ${this.config.joinChallenge ? `new users verify with a Knowledge Asset address within ${this.config.joinChallengeTtlSeconds || 60}s` : 'off'}.`,
-      'Conversational / agent mode (per group, default on): mention me or reply and speak naturally. The LLM agent parses your intent, can use Context Graph memory/tools when relevant, and answers directly. Short rate limit between rapid direct questions. Use /conversation to toggle per chat.',
+      'Conversational / agent mode (per group, default on): mention me or reply and speak naturally. The LLM agent parses your intent, can use Context Graph memory/tools when relevant, and answers directly. Admins can toggle it from Settings in this menu.',
       'Safeguards: no auto-action against Telegram admins or bot accounts; weak reports stay local. Privileged actions still require explicit commands or admin confirmation.',
       'Testing note: Bot message auto-deletion is limited to /help responses and join challenge flows only. Normal conversations and most commands no longer auto-delete their replies.'
     ].join('\n');
@@ -898,12 +1003,29 @@ export class TelegramShieldBot {
       event.local_only = true;
     }
     this.store.append(event);
+    if (['risk_review_needed', 'risk_action_suppressed', 'report_review_needed', 'review_upheld', 'review_overturned', 'ban_executed'].includes(eventType)) {
+      this._reviewCache = { pending: null, watches: null, lastUpdate: 0 };
+    }
     return event;
   }
 
   findEvent(eventId = '') {
     if (!eventId) return null;
-    return this.store.all().find((event) => event.id === eventId || event.payload?.report_event_id === eventId || event.payload?.target_event_id === eventId) || null;
+    const id = String(eventId);
+    const exact = this.store.all().find((event) => event.id === id || event.payload?.report_event_id === id || event.payload?.target_event_id === id);
+    if (exact) return exact;
+    if (id.length < 12) return null;
+    const matches = this.store.all().filter((event) => event.id?.startsWith(id));
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  reviewResolutionFor(eventId = '') {
+    if (!eventId) return null;
+    return this.store.all().find((event) => ['review_upheld', 'review_overturned', 'ban_executed'].includes(event.event_type) && (event.payload?.target_event_id === eventId || event.payload?.report_event_id === eventId)) || null;
+  }
+
+  isPendingReviewEvent(event = {}) {
+    return Boolean(event?.id && ['risk_review_needed', 'risk_action_suppressed', 'report_review_needed', 'ban_requested_no_reply', 'ban_requested_no_rights', 'proactive_cross_group_warning'].includes(event.event_type) && !this.reviewResolutionFor(event.id));
   }
 
   findAppealableEvent(message, target = {}) {
@@ -978,19 +1100,25 @@ export class TelegramShieldBot {
     return items;
   }
 
-  falsePositiveReviewFor(target = {}) {
+  falsePositiveReviewFor(target = {}, text = '', dkgIntel = {}) {
     const key = targetKey(target);
     const id = target.id ? String(target.id) : '';
     const username = target.username ? String(target.username).replace(/^@/, '').toLowerCase() : '';
     if (!key && !id && !username) return null;
     return this.store.all().find((event) => {
       if (event.event_type !== 'review_overturned') return false;
+      if (eventAgeMs(event) > 7 * 24 * 60 * 60 * 1000) return false;
       const reviewed = event.payload?.reviewed_target || {};
       const reviewedKey = event.payload?.reviewed_target_key || targetKey(reviewed);
+      const original = this.findEvent(event.payload?.target_event_id || '');
+      const originalText = [original?.payload?.message_text, original?.payload?.evidence?.join('\n'), original?.text].filter(Boolean).join('\n');
+      const originalFingerprint = textFingerprint(originalText);
+      const currentFingerprint = textFingerprint(text);
+      if (!originalFingerprint || !currentFingerprint || originalFingerprint !== currentFingerprint) return false;
+      if ((dkgIntel.wallets || []).length || (dkgIntel.domains || []).length || (dkgIntel.evidence || []).length) return false;
       if (key && reviewedKey === key) return true;
       if (id && reviewed.id && String(reviewed.id) === id) return true;
       if (username && reviewed.username && String(reviewed.username).replace(/^@/, '').toLowerCase() === username) return true;
-      const original = this.findEvent(event.payload?.target_event_id || '');
       return Boolean(original && targetKey(original.user || {}) === key);
     }) || null;
   }
@@ -999,14 +1127,14 @@ export class TelegramShieldBot {
     const target = event.payload?.target || event.user || {};
     const reason = event.payload?.reason || event.payload?.evidence?.[0] || event.payload?.report_reason || 'watching';
     const key = event.payload?.watch_target_key || targetKey(target) || 'unknown';
-    return `${index}. ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}\n   ${ageLabel(event.timestamp)} | Event ${shortId(event.id)} | ${escapeHtml(reason)}\n   Actions: /scan ${escapeHtml(String(target.id || target.username || key))} | /unwatch ${escapeHtml(String(target.id || target.username || key))} | /why ${event.id}`;
+    return `${index}. ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}\n   ${ageLabel(event.timestamp)} | Event ${shortId(event.id)} | ${escapeHtml(reason)}\n   Actions: /scan ${escapeHtml(String(target.id || target.username || key))} | ask “why event ${event.id}?”`;
   }
 
   formatRestrictionItem(event, index) {
     const target = event.user || {};
     const until = event.payload?.restricted_until ? `until ${event.payload.restricted_until.replace(/\.\d{3}Z$/, 'Z')}` : 'expiry unknown';
     const evidence = event.payload?.evidence?.slice(-2).join('; ') || event.payload?.scam_type || 'restriction';
-    return `${index}. ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}\n   ${ageLabel(event.timestamp)} | ${until} | Event ${shortId(event.id)}\n   ${escapeHtml(evidence)}\n   Actions: /scan ${escapeHtml(String(target.id || target.username || ''))} | /why ${event.id}`;
+    return `${index}. ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}\n   ${ageLabel(event.timestamp)} | ${until} | Event ${shortId(event.id)}\n   ${escapeHtml(evidence)}\n   Actions: /scan ${escapeHtml(String(target.id || target.username || ''))} | ask “why event ${event.id}?”`;
   }
 
   reviewSummary(event = {}) {
@@ -1025,24 +1153,27 @@ export class TelegramShieldBot {
   }
 
   formatWatchlist(filter = '') {
-    const watches = this.activeWatches();
     const restrictions = this.recentRestrictions();
     const reviews = this.pendingReviewItems();
-    const sections = [`👀 Watchlist manager`, `${watches.length} active watches | ${restrictions.length} active mutes | ${reviews.length} review items`];
+    const sections = [`🛡️ Review manager`, `${restrictions.length} active mutes | ${reviews.length} review items`];
     const addSection = (title, items, formatter) => {
       if (!items.length) return;
       sections.push('', title, ...items.slice(0, 8).map((event, index) => formatter.call(this, event, index + 1)));
     };
-    if (!filter || filter === 'all' || filter === 'active') addSection('Active watches', watches, this.formatWatchItem);
     if (!filter || filter === 'all' || filter === 'muted' || filter === 'mutes') addSection('Temp mutes', restrictions, this.formatRestrictionItem);
     if (!filter || filter === 'all' || filter === 'review') addSection('Needs review', reviews, this.formatReviewItem);
-    if (sections.length === 2) sections.push('', 'Nothing matching that filter. Try /watchlist all, /watchlist muted, or /watchlist review.');
+    if (sections.length === 2) sections.push('', 'Nothing matching that filter. Use the buttons to switch between reviews and mutes.');
     return sections.join('\n');
   }
 
-  formatPendingReviews() {
+  formatReviewPanel(filter = 'flags') {
+    if (filter === 'mutes') return this.formatWatchlist('muted');
+    if (filter === 'all') return this.formatWatchlist('all');
+    return this.formatPendingReviews();
+  }
+
+  pendingReviewGroups() {
     const reviews = this.pendingReviewItems();
-    if (!reviews.length) return 'No pending review items.';
     const groups = new Map();
     for (const event of reviews) {
       const target = event.user || event.payload?.target || {};
@@ -1050,21 +1181,85 @@ export class TelegramShieldBot {
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(event);
     }
-    const lines = [...groups.values()].slice(0, 5).map((events, index) => {
+    return [...groups.values()];
+  }
+
+  formatPendingReviews() {
+    const reviews = this.pendingReviewItems();
+    if (!reviews.length) return 'No pending review items.';
+    const groups = this.pendingReviewGroups();
+    const visibleCount = Math.min(groups.length, 5);
+    const lines = groups.slice(0, 5).map((events, index) => {
       const suffix = events.length > 1 ? ` (+${events.length - 1} more)` : '';
       return `${this.formatReviewItem(events[0], index + 1)}${suffix}`;
     });
+    const queueNote = groups.length > visibleCount ? `Showing the first ${visibleCount} targets. Clear a few and reopen the review panel to continue through the queue.` : 'Tap a button below to open a review item.';
     return [
       `Latest pending review items (${reviews.length})`,
       ...lines,
       '',
-      'Actions: reply to a bot alert with /review overturn reason or /review uphold reason. Or use /review event-id overturn reason. For false positives, admins can say “@user is not a scammer”. Cross-group warnings (prior admin actions elsewhere) are shown with ⚠️.'
+      queueNote
+    ].join('\n');
+  }
+
+  pendingReviewsKeyboard(requesterId) {
+    const groups = this.pendingReviewGroups().slice(0, 5);
+    const rows = groups.flatMap((events, index) => {
+      const event = events[0];
+      const label = `🔎 ${index + 1}. ${displayName(event.user || event.payload?.target || {})}`.slice(0, 28);
+      return [[button(label, callbackData('review-open', requesterId, shortId(event.id)))]];
+    });
+    rows.push(...this.mainNavKeyboard(requesterId, { includeReview: false }));
+    return rows;
+  }
+
+  reviewPanelKeyboard(requesterId, filter = 'flags') {
+    const rows = [[
+      button('🚨 Reviews', callbackData('review-tab', requesterId, 'flags')),
+      button('🔇 Mutes', callbackData('review-tab', requesterId, 'mutes'))
+    ]];
+    if (filter === 'flags') rows.push(...this.pendingReviewsKeyboard(requesterId).filter((row) => row[0]?.callback_data?.includes('review-open')));
+    rows.push(...this.mainNavKeyboard(requesterId, { includeReview: false }));
+    return rows;
+  }
+
+  reviewActionKeyboard(requesterId, eventId) {
+    return [
+      [
+        button('🚫 Confirm scam', callbackData('review-confirm', requesterId, shortId(eventId))),
+        button('✅ Reject flag', callbackData('review-reject', requesterId, shortId(eventId)))
+      ],
+      [button('↩️ Back to queue', callbackData('review-list', requesterId))]
+    ];
+  }
+
+  async sendPendingReviews(message, extra = {}) {
+    const requesterId = message.from?.id || message.from?.username || '';
+    const text = this.formatPendingReviews();
+    const rows = this.pendingReviewsKeyboard(requesterId);
+    const sent = await this.sendInteractiveReply(message.chat.id, text, rows, { reply_to_message_id: message.message_id, parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
+    this.lastPendingReviewsByChat.set(String(message.chat.id), this.pendingReviewGroups().slice(0, 15));
+    return sent;
+  }
+
+  formatReviewDetail(event) {
+    const target = event.user || event.payload?.target || {};
+    const evidence = (event.payload?.evidence || []).slice(0, 5).map((item) => `- ${escapeHtml(item)}`).join('\n') || '- No evidence recorded.';
+    return [
+      `Review ${shortId(event.id)}`,
+      `${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}`,
+      `Confidence: ${event.payload?.confidence ?? 0}% | Type: ${escapeHtml(event.payload?.scam_type || event.event_type)}`,
+      '',
+      'Evidence:',
+      evidence,
+      '',
+      'Choose the final admin decision below.'
     ].join('\n');
   }
 
   formatWhy(eventId = '') {
     const event = this.findEvent(eventId);
-    if (!event) return `No local tracabot event found for ${eventId}. Try /stats sources for recent DKG receipts.`;
+    if (!event) return `No local tracabot event found for ${eventId}. Open Stats > Sources for recent DKG receipts.`;
     const risk = event.payload || {};
     const evidence = risk.evidence?.length ? risk.evidence.slice(0, 8).map((item) => `- ${item}`).join('\n') : '- No evidence recorded.';
     const dkgRefs = risk.dkg_evidence?.length ? risk.dkg_evidence.slice(0, 4).map((item) => `- ${item.ual || 'DKG'}${item.eventId ? ` event ${item.eventId}` : ''}`).join('\n') : '- No DKG source refs on this event.';
@@ -1115,25 +1310,88 @@ export class TelegramShieldBot {
       const actionType = ev.event_type === 'ban_executed' ? 'BAN' : ev.event_type === 'restrict_executed' ? 'RESTRICT' : 'UPHELD REVIEW';
       const reason = (ev.payload?.reason || ev.payload?.evidence?.[0] || 'admin action').slice(0, 120);
 
-      let summary = reason;
-      // Optional LLM one-line neutral summary for better readability
-      if (this.llm && reason.length > 20) {
-        try {
-          const llmResp = await this.llm.complete({
-            system: 'You are a neutral moderator log summarizer. Output ONE short, factual, non-alarmist sentence (max 110 chars) describing the reason for the action.',
-            user: `Action: ${actionType} on ${name}. Original reason/evidence: ${reason}`
-          }).catch(() => null);
-          if (llmResp?.text) summary = String(llmResp.text).trim().slice(0, 110);
-        } catch {}
-      }
+      const summary = reason;
 
       const time = ageLabel(ev.timestamp);
       const eventId = shortId(ev.id);
       lines.push(`• ${actionType} ${name} — ${summary} (${time}, ${eventId})`);
     }
 
-    lines.push('\nUse /why <event-id> or ask me naturally for more details on any item.');
+    lines.push('\nAsk me naturally for details, for example: “why event <id>?”.');
     return lines.join('\n');
+  }
+
+  statsKeyboard(requesterId) {
+    return [
+      [button('📎 Sources', callbackData('stats-sources', requesterId)), button('🧬 Campaigns', callbackData('campaigns', requesterId)), button('👮 Enforcement', callbackData('banlist', requesterId))],
+      ...this.mainNavKeyboard(requesterId)
+    ];
+  }
+
+  banlistKeyboard(requesterId) {
+    return [
+      [button('🛡️ Pending reviews', callbackData('review-list', requesterId)), button('🔇 Mutes', callbackData('review-tab', requesterId, 'mutes'))],
+      ...this.mainNavKeyboard(requesterId)
+    ];
+  }
+
+  toggleKeyboard(requesterId, action) {
+    return [
+      [button('🟢 On', callbackData(action, requesterId, 'on')), button('⚪ Off', callbackData(action, requesterId, 'off')), button('ℹ️ Status', callbackData(action, requesterId, 'status'))],
+      ...this.mainNavKeyboard(requesterId)
+    ];
+  }
+
+  scanKeyboard(requesterId, target = {}, eventId = '') {
+    const rows = [[button('📊 Stats', callbackData('stats', requesterId))]];
+    if (target.id || target.username) rows.push([button('❔ Explain', callbackData('why', requesterId, shortId(eventId)))]);
+    rows.push(...this.mainNavKeyboard(requesterId));
+    return rows;
+  }
+
+  mainNavKeyboard(requesterId, options = {}) {
+    const includeReview = options.includeReview !== false;
+    const rows = [[
+      button('🏠 Menu', callbackData('dashboard', requesterId)),
+      button('📊 Stats', callbackData('stats', requesterId)),
+      ...(includeReview ? [button('🛡️ Reviews', callbackData('review-list', requesterId))] : [])
+    ]];
+    rows.push([button('⚙️ Settings', callbackData('settings', requesterId)), button('✖️ Close', callbackData('close', requesterId))]);
+    return rows;
+  }
+
+  dashboardText() {
+    return [
+      '🛡️ Tracabot protection menu',
+      'Choose an action below. For direct message/user actions, use /scan, /report, /ban, or /mute as a reply to the exact message.'
+    ].join('\n');
+  }
+
+  dashboardKeyboard(requesterId) {
+    return [
+      [button('📊 Stats', callbackData('stats', requesterId)), button('🛡️ Reviews', callbackData('review-list', requesterId))],
+      [button('🔎 Scan help', callbackData('help-scan', requesterId)), button('🧾 Explain event', callbackData('why', requesterId))],
+      [button('👮 Enforcement', callbackData('banlist', requesterId)), button('⚙️ Settings', callbackData('settings', requesterId))],
+      [button('✖️ Close', callbackData('close', requesterId))]
+    ];
+  }
+
+  settingsText(chatId) {
+    return [
+      '⚙️ Tracabot settings',
+      `Join challenge: ${this.chatJoinChallengeEnabled(chatId) ? 'on' : 'off'}`,
+      `Natural language mode: ${this.chatConversationalEnabled(chatId) ? 'on' : 'off'}`,
+      'Sensitive values like tokens, endpoints, admin IDs, and API keys cannot be edited from Telegram.'
+    ].join('\n');
+  }
+
+  settingsKeyboard(requesterId) {
+    return [
+      [button('🚪 Challenge on', callbackData('challenge-set', requesterId, 'on')), button('🚪 Challenge off', callbackData('challenge-set', requesterId, 'off'))],
+      [button('🧠 Language on', callbackData('conversation-set', requesterId, 'on')), button('🧠 Language off', callbackData('conversation-set', requesterId, 'off'))],
+      [button('🩺 Status', callbackData('status', requesterId))],
+      ...this.mainNavKeyboard(requesterId)
+    ];
   }
 
   recentEvents(ms = 24 * 60 * 60 * 1000) {
@@ -1280,7 +1538,6 @@ export class TelegramShieldBot {
     const campaigns = [...this.campaignSummary(24 * 60 * 60 * 1000), ...this.challengeFailureSummary(24 * 60 * 60 * 1000)];
     const challengeFailures = this.challengeFailureSummary(24 * 60 * 60 * 1000);
     const high = events.filter((event) => Number(event.payload?.confidence || 0) >= 80).length;
-    const watches = this.activeWatches();
     const restrictions = this.recentRestrictions();
     const reviews = this.pendingReviewItems();
     return [
@@ -1292,15 +1549,14 @@ export class TelegramShieldBot {
       `- ${plural(count(['appeal_submitted']), 'appeal')}; ${plural(count(['review_upheld', 'review_overturned']), 'review decision')}`,
       `- ${plural(challengeFailures.length, 'repeated join-challenge failure cluster')}`,
       '',
-      'Watchlist',
-      `- ${plural(watches.length, 'active watch')}; ${plural(restrictions.length, 'active temp mute')}; ${plural(reviews.length, 'pending review item')}`,
+      'Review queue',
+      `- ${plural(restrictions.length, 'active temp mute')}; ${plural(reviews.length, 'pending review item')}`,
       campaigns.length ? `- Top campaign: ${campaigns[0].key} across ${campaigns[0].events.length} events` : '- No repeated campaign cluster in the last 24h',
       '',
       'Recommended follow-up',
-      '- /watchlist review',
-      '- /watchlist muted',
-      '- /stats sources',
-      '- /why event-id'
+      '- Open the review panel from /start',
+      '- Use Stats > Sources for receipts',
+      '- Ask naturally: “why was this flagged?”'
     ].join('\n');
   }
 
@@ -1315,10 +1571,12 @@ export class TelegramShieldBot {
       formatStatsReply(stats),
       '',
       `24h local: ${plural(events.length, 'event')}, ${plural(high, 'high-risk signal')}, ${plural(count(['report_submitted']), 'accepted report')}, ${plural(count(['review_upheld', 'review_overturned']), 'review decision')}.`,
-      `Queue: ${plural(reviews.length, 'pending review')}, ${plural(this.activeWatches().length, 'watch')}, ${plural(restrictions.length, 'active mute')}.`,
+      `Queue: ${plural(reviews.length, 'pending review')}, ${plural(restrictions.length, 'active mute')}.`,
       campaigns.length ? `Top campaign: ${campaigns[0].key} (${campaigns[0].events.length} events): ${(campaigns[0].labels || campaigns[0].patterns || campaigns[0].domains || []).slice(0, 3).join(', ') || 'repeated signal'}` : 'No repeated campaign cluster in the last 24h.',
       '',
-      reviews.length ? 'Follow up: /review to list queue, reply to a bot alert with /review overturn reason, or say “@user is not a scammer”.' : 'Follow up: /scan suspicious users, /report evidence, /stats sources for receipts.'
+      this.formatDigest(),
+      '',
+      reviews.length ? 'Follow up: open Reviews from /start, or reply to a bot alert with “confirm scam” or “reject as not a scam”.' : 'Follow up: use /scan for suspicious users, /report for evidence, or Stats > Sources for receipts.'
     ].join('\n');
   }
 
@@ -1334,11 +1592,40 @@ export class TelegramShieldBot {
   isNaturalFalsePositiveReview(message) {
     const text = messageText(message);
     const correctionLanguage = /\b(?:not\s+(?:a\s+)?scammer|not\s+(?:a\s+)?scam|not a (?:bad|risky) (?:actor|guy|person)|legit(?:imate)?|trusted|safe|false positive|long[- ]term community member|community member|innocent|mistake)\b/i.test(text);
-    return this.isDirectlyAddressed(message) && correctionLanguage;
+    return (this.isDirectlyAddressed(message) || this.numberedReviewSelection(message)) && correctionLanguage;
+  }
+
+  numberedReviewSelection(message = {}) {
+    const match = messageText(message).match(/^\s*#?(\d{1,2})\b/);
+    if (!match) return null;
+    const groups = this.lastPendingReviewsByChat.get(String(message.chat?.id)) || [];
+    const group = groups[Number(match[1]) - 1];
+    if (!group?.length) return null;
+    return group;
   }
 
   async handleNaturalFalsePositiveReview(message) {
-    if (!await this.isTrustedModerator(message)) return false;
+    const trusted = await this.isTrustedModerator(message);
+    const selectedGroup = this.numberedReviewSelection(message);
+
+    if (!trusted) {
+      if (!selectedGroup?.length) return false;
+      const reviewedEvent = selectedGroup[0];
+      const reviewedTarget = reviewedEvent?.user || reviewedEvent?.payload?.target || {};
+      const reason = messageText(message).replace(/@(?:tracabot|tracethembot)\b/ig, '').trim() || 'natural-language appeal from review list';
+      const event = await this.record('appeal_submitted', message, {
+        target_event_id: reviewedEvent.id,
+        reason,
+        appellant: actorFromMessage(message),
+        reviewed_target: reviewedTarget,
+        reviewed_target_key: targetKey(reviewedTarget),
+        implicit_detection: true,
+        detection_method: 'numbered_review_list_reply',
+        evidence: [`non-admin review-list reply logged as appeal for ${reviewedEvent.id}: ${reason}`]
+      });
+      await this.sendCommandReply(message.chat.id, `📝 Appeal logged for ${userMention(reviewedTarget)} as ${event.id}. Admins can confirm or reject the scam flag.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
+      return true;
+    }
 
     this.sendTyping(message.chat.id);
 
@@ -1350,7 +1637,9 @@ export class TelegramShieldBot {
       if (storedEventId) extraEvent = this.findEvent(storedEventId);
     }
 
-    let target = this.targetFromMention(message) || this.resolveCommandTarget(message, 'review').target;
+    // Natural verdicts like "Not a scammer" are not command arguments. Do not
+    // treat their first word as a username (the old path produced @Not).
+    let target = this.targetFromMention(message) || selectedGroup?.[0]?.user || selectedGroup?.[0]?.payload?.target || extraEvent?.user || extraEvent?.payload?.target || null;
 
     // If we don't have a strong target from the current message, try to resolve from recent context the bot just showed
     if (!target || !target.username) {
@@ -1358,12 +1647,16 @@ export class TelegramShieldBot {
       // Try to find a username mentioned in the correction text inside the recent list
       const mentioned = (messageText(message).match(/@([A-Za-z0-9_]{3,32})/) || [])[1];
       if (mentioned) {
-        const match = recent.find(u => normalizedLookup(u.username || u.label || '') === normalizedLookup(mentioned));
+        const matchGroup = recent.find(group => {
+          const candidate = group?.[0]?.user || group?.[0]?.payload?.target || {};
+          return normalizedLookup(candidate.username || candidate.label || '') === normalizedLookup(mentioned);
+        });
+        const match = matchGroup?.[0]?.user || matchGroup?.[0]?.payload?.target;
         if (match) target = { ...match, kind: 'user' };
       }
     }
 
-    let targetEvents = this.pendingReviewItems().filter((event) => eventMatchesTarget(event, target));
+    let targetEvents = selectedGroup?.length ? selectedGroup : target ? this.pendingReviewItems().filter((event) => eventMatchesTarget(event, target)) : [];
 
     if (extraEvent && !targetEvents.some(e => e.id === extraEvent.id)) {
       targetEvents = [extraEvent, ...targetEvents];
@@ -1372,21 +1665,22 @@ export class TelegramShieldBot {
     if (!targetEvents.length) return false;
     const reason = messageText(message).replace(/@(?:tracabot|tracethembot)\b/ig, '').trim() || 'natural-language false positive review';
     const reviewed = targetEvents;
+    const displayTarget = reviewed[0]?.user || reviewed[0]?.payload?.target || target;
     const artifactWrites = await Promise.all(reviewed.map(async (reviewedEvent) => {
       const reviewedTarget = reviewedEvent?.user || reviewedEvent?.payload?.target || target;
       const event = await this.record('review_overturned', message, {
         target_event_id: reviewedEvent.id,
-        review_decision: 'overturned',
+        review_decision: 'reject',
         reason,
         reviewer: actorFromMessage(message),
         reviewed_target: reviewedTarget,
         reviewed_target_key: targetKey(reviewedTarget),
         false_positive_reason: reason,
-        evidence: [`natural language admin review overturned ${reviewedEvent.id}: ${reason}`]
+        evidence: [`natural language admin rejected scam flag ${reviewedEvent.id}: ${reason}`]
       });
       return { reviewedEvent, event };
     }));
-    await this.sendCommandReply(message.chat.id, `✅ Marked ${userMention(target)} as false positive and cleared ${reviewed.length} pending review${reviewed.length === 1 ? '' : 's'}.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
+    await this.sendCommandReply(message.chat.id, `✅ Marked ${userMention(displayTarget)} as false positive and cleared ${reviewed.length} pending review${reviewed.length === 1 ? '' : 's'}.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
     for (const { reviewedEvent, event } of artifactWrites) {
       this.recordConversationArtifact(message, { risk: { confidence: 80, local_confidence: 80, scam_type: 'false_positive', evidence: [`false positive correction for ${reviewedEvent.id}: ${reason}`] }, text: reason, artifactKind: 'false_positive_signal', conversationRole: 'moderator', sourceEventIds: [reviewedEvent.id, event.id], operatorNote: reason, forceDkg: true })
         .catch((error) => console.error(`False positive artifact write failed after review ${event.id}: ${error instanceof Error ? error.message : String(error)}`));
@@ -1418,7 +1712,7 @@ export class TelegramShieldBot {
     if ((risk.patterns || extractPatterns(text)).length) score += 15;
     if ((risk.dkg_evidence || []).length) score += 20;
     if (/report|warn|alert|fake|impersonat|phish|scam|wallet|airdrop|support|admin/i.test(text)) score += 10;
-    if (/false positive|not scam|legit|overturn|appeal/i.test(text) || artifactKind === 'false_positive_signal') score += 20;
+    if (/false positive|not scam|legit|reject|overturn|appeal/i.test(text) || artifactKind === 'false_positive_signal') score += 20;
     if (artifactKind === 'benign_conversation_flow') score += 45;
     return Math.min(100, score);
   }
@@ -1551,9 +1845,20 @@ export class TelegramShieldBot {
     return /@(?:tracabot|tracethembot)\b/i.test(messageText(message)) || this.isReplyToBot(message);
   }
 
+  isBareBotMention(message = {}) {
+    return /^@tracethembot$/i.test(String(messageText(message) || '').trim());
+  }
+
+  isRecentBotNearReply(message = {}) {
+    if (message.text?.startsWith('/')) return false;
+    const recent = this.lastBotReplyByThread.get(`${message.chat?.id}:*`);
+    if (!recent || Date.now() - recent.timestamp > BOT_REPLY_CONTEXT_TTL_MS) return false;
+    return message.from?.is_bot !== true;
+  }
+
   shouldHandleNaturalLanguage(message) {
     if (!this.chatConversationalEnabled(message?.chat?.id)) return false;
-    return this.isDirectlyAddressed(message);
+    return this.isDirectlyAddressed(message) || this.isRecentBotNearReply(message);
   }
 
   naturalLanguageRateLimited(message = {}) {
@@ -1569,41 +1874,40 @@ export class TelegramShieldBot {
   async handleDeterministicNaturalLanguage(text = '', message = {}, trusted = false, replyOptions = {}) {
     const chatId = message.chat.id;
     if (PRIVATE_INFO_RE.test(text)) {
-      await this.sendEphemeral(chatId, trusted && /\bstatus\b/i.test(text) ? 'Use /status.' : 'I do not share private details.', replyOptions);
+      await this.sendEphemeral(chatId, trusted && /\bstatus\b/i.test(text) ? 'Open /start and use Settings > Status.' : 'I do not share private details.', replyOptions);
       return true;
     }
     if (DIGEST_INTENT_RE.test(text)) {
-      await this.sendCommandReply(chatId, this.formatDigest(), replyOptions);
+      const stats = await this.dkg.getStats(7);
+      await this.sendInteractiveReply(chatId, this.formatStatsDashboard(stats), this.statsKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
       return true;
     }
     if (CAMPAIGN_INTENT_RE.test(text)) {
-      await this.sendCommandReply(chatId, this.formatCampaigns(), replyOptions);
+      await this.sendInteractiveReply(chatId, this.formatCampaigns(), this.statsKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
       return true;
     }
     if (REVIEW_QUEUE_INTENT_RE.test(text)) {
       if (!trusted) await this.sendEphemeral(chatId, 'Pending reviews / review queue is admin-only. You can still ask me to scan specific users or explain events.', replyOptions);
       else {
-        await this.sendCommandReply(chatId, this.formatPendingReviews(), { ...replyOptions, parse_mode: 'HTML', disable_web_page_preview: true });
-        const recent = this.pendingReviewItems().slice(0, 15).map(ev => ev.user || ev.payload?.target || {});
-        this.lastPendingReviewsByChat.set(String(chatId), recent);
+        await this.sendPendingReviews(message, replyOptions);
       }
       return true;
     }
     if (WATCHLIST_INTENT_RE.test(text)) {
-      if (!trusted) await this.sendEphemeral(chatId, 'Detailed watchlist is admin-only. I can still check scam risk for you.', replyOptions);
-      else await this.sendCommandReply(chatId, this.formatWatchlist('all'), { ...replyOptions, parse_mode: 'HTML', disable_web_page_preview: true });
+      if (!trusted) await this.sendEphemeral(chatId, 'Mutes and review details are admin-only. I can still check scam risk for you.', replyOptions);
+      else await this.sendInteractiveReply(chatId, this.formatReviewPanel('mutes'), this.reviewPanelKeyboard(message.from?.id || message.from?.username || '', 'mutes'), { ...replyOptions, parse_mode: 'HTML', disable_web_page_preview: true });
       return true;
     }
     if (STATS_INTENT_RE.test(text)) {
       const stats = await this.dkg.getStats(7);
-      await this.sendCommandReply(chatId, this.formatStatsDashboard(stats), replyOptions);
+      await this.sendInteractiveReply(chatId, this.formatStatsDashboard(stats), this.statsKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
       return true;
     }
     if (HELP_INTENT_RE.test(text) && !/\b(?:scan|report|watch|review|appeal|ban)\b/i.test(text)) {
       const reply = this.llm && !this.naturalLanguageRateLimited(message)
         ? await this.generalConversationReply(message).catch(() => '')
         : '';
-      await this.sendEphemeral(chatId, reply || 'I am the community anti-scam bodyguard: I scan users, take reports, explain evidence, and use verifiable cross-community memory to spot repeat threats.', replyOptions);
+      await this.sendInteractiveReply(chatId, reply || 'I am the community anti-scam bodyguard: I scan users, take reports, explain evidence, and use verifiable cross-community memory to spot repeat threats.', this.dashboardKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
       return true;
     }
     if (!isOnTopicDirectAddress(message)) {
@@ -1615,6 +1919,10 @@ export class TelegramShieldBot {
 
   async handleNaturalLanguageRequest(message) {
     const rawText = messageText(message);
+    if (this.isBareBotMention(message)) {
+      await this.sendMenu(message);
+      return true;
+    }
     const mentionsBot = /@(?:tracabot|tracethembot)\b/i.test(rawText);
     const safetyLike = isSafetyQuestion(message) || /\b(?:safe|unsafe|legit(?:imate)?|real|fake|scam(?:mer|ming)?|fraud(?:ster)?|risky?|trusted|trustworthy|blacklisted|flagged|suspicious|sus|dangerous|malicious)\b/i.test(rawText);
     if (safetyLike) return false;
@@ -1631,8 +1939,11 @@ export class TelegramShieldBot {
     // Let the LLM agent handle the vast majority of direct addresses (greetings, purpose, help, queries, implicit actions, etc.)
 
     // Primary agentic path (LLM interprets the request and chooses the right capability)
-    if (this.isDirectlyAddressed(message)) {
-      if (this.naturalLanguageRateLimited(message)) return true;
+    if (this.isDirectlyAddressed(message) || this.isRecentBotNearReply(message)) {
+      if (this.naturalLanguageRateLimited(message)) {
+        await this.sendInteractiveReply(message.chat.id, 'I’m here. Pick an action below, or use /scan and /report as replies when you need to check or report a specific message.', this.dashboardKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
+        return true;
+      }
       this.sendTyping(message.chat.id).catch(() => {});
       this.rememberConversationTurn(message, 'user', rawText);
 
@@ -1658,7 +1969,7 @@ export class TelegramShieldBot {
         if (!responded) {
           const generalReply = await this.generalConversationReply(message);
           if (generalReply && generalReply.length > 3) {
-            await this.sendEphemeral(chatId, generalReply, replyOptions);
+            await this.sendInteractiveReply(chatId, generalReply, this.dashboardKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
             responded = true;
           }
         }
@@ -1667,7 +1978,7 @@ export class TelegramShieldBot {
         console.error('Natural language agent path error:', err);
         const errorFallback = await this.generalConversationReply(message).catch(() => null);
         if (errorFallback && errorFallback.length > 3) {
-          await this.sendEphemeral(message.chat.id, errorFallback, replyOptions);
+          await this.sendInteractiveReply(message.chat.id, errorFallback, this.dashboardKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
           responded = true;
         }
       }
@@ -1675,7 +1986,7 @@ export class TelegramShieldBot {
       // Absolute guarantee: if we still haven't responded to a direct address, send a clear helpful message.
       // This keeps the bot in bodyguard mode instead of opening a general chat loop.
       if (!responded) {
-        await this.sendEphemeral(message.chat.id, offTopicRedirect(), replyOptions);
+        await this.sendInteractiveReply(message.chat.id, offTopicRedirect(), this.dashboardKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
       }
 
       return true;
@@ -1730,6 +2041,130 @@ export class TelegramShieldBot {
     return fallback;
   }
 
+  alertReplyContext(message = {}) {
+    const repliedMsgId = message.reply_to_message?.message_id;
+    const eventId = repliedMsgId ? this.reviewMessageEvents.get(`${message.chat?.id}:${repliedMsgId}`) : '';
+    const event = this.findEvent(eventId);
+    if (!event) return null;
+    const target = event.user || event.payload?.target || {};
+    return {
+      event,
+      eventId: event.id,
+      target,
+      eventType: event.event_type,
+      summary: this.reviewSummary(event)
+    };
+  }
+
+  senderMatchesTarget(message = {}, target = {}) {
+    const actor = actorFromMessage(message);
+    if (actor.id && target.id && String(actor.id) === String(target.id)) return true;
+    const actorUsername = normalizedLookup(actor.username || '');
+    const targetUsername = normalizedLookup(target.username || '');
+    return Boolean(actorUsername && targetUsername && actorUsername === targetUsername);
+  }
+
+  async classifyAlertReply(message, context, trusted) {
+    if (!this.llm || !this.chatConversationalEnabled(message?.chat?.id)) return null;
+    const prompt = buildAlertReplyClassifierPrompt({
+      message,
+      alert: context,
+      senderTrusted: trusted,
+      senderIsFlagged: this.senderMatchesTarget(message, context?.target || {}),
+      maxChars: this.config.conversationMaxChars || 700
+    });
+    const response = await this.llm.complete(prompt).catch(() => ({ ok: false, text: '' }));
+    try {
+      const raw = String(response.text || '').replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return null;
+      const intent = ['admin_review', 'appeal', 'clarify', 'ignore'].includes(parsed.intent) ? parsed.intent : 'clarify';
+      const decision = ['confirm', 'reject'].includes(parsed.decision) ? parsed.decision : null;
+      return {
+        intent,
+        decision,
+        target_event_id: String(parsed.target_event_id || context?.eventId || ''),
+        reason: String(parsed.reason || messageText(message) || '').slice(0, 500),
+        confidence: Math.max(0, Math.min(100, Number(parsed.confidence || 0))),
+        user_reply: String(parsed.user_reply || '').slice(0, this.config.conversationMaxChars || 700)
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async handleAlertReply(message) {
+    const context = this.alertReplyContext(message);
+    if (!context) return false;
+    const chatId = message.chat.id;
+    const replyOptions = { reply_to_message_id: message.message_id };
+    const trusted = await this.isTrustedModerator(message).catch(() => false);
+    const explicitAdminDecision = /\b(confirm(?:ed)?\s+(?:scam|flag)|uphold(?:ed)?\s+(?:scam|flag)|reject(?:ed)?\s+(?:flag|as\s+not\s+(?:a\s+)?scam)|overturn(?:ed)?|false\s+positive|not\s+(?:a\s+)?scam)\b/i.test(messageText(message));
+    const classified = await this.classifyAlertReply(message, context, trusted);
+    if (!classified) return false;
+    const reason = classified.reason || messageText(message).trim() || 'natural reply to TRACaBot alert';
+    const targetEvent = context.event;
+    const reviewedTarget = targetEvent?.user || targetEvent?.payload?.target || context.target || {};
+
+    if (trusted && classified.intent === 'admin_review' && classified.decision && explicitAdminDecision) {
+      const eventType = classified.decision === 'reject' ? 'review_overturned' : 'review_upheld';
+      const event = await this.record(eventType, message, {
+        target_event_id: targetEvent.id,
+        review_decision: classified.decision,
+        reason,
+        reviewer: actorFromMessage(message),
+        reviewed_target: reviewedTarget,
+        reviewed_target_key: targetKey(reviewedTarget),
+        false_positive_reason: classified.decision === 'reject' ? reason : '',
+        implicit_detection: true,
+        detection_method: 'llm_alert_reply_classifier',
+        llm_intent: classified.intent,
+        llm_confidence: classified.confidence,
+        original_flag_event: targetEvent.id,
+        evidence: [`LLM classified admin alert reply as ${classified.decision} for ${targetEvent.id}: ${reason}`]
+      });
+      if (classified.decision === 'reject') {
+        this.recordConversationArtifact(message, { risk: { confidence: 80, local_confidence: 80, scam_type: 'false_positive', evidence: [`false positive correction for ${targetEvent.id}: ${reason}`] }, text: reason, artifactKind: 'false_positive_signal', conversationRole: 'moderator', sourceEventIds: [targetEvent.id, event.id], operatorNote: reason, forceDkg: true })
+          .catch((error) => console.error(`False positive artifact write failed after alert reply ${event.id}: ${error instanceof Error ? error.message : String(error)}`));
+      }
+      const verb = classified.decision === 'reject' ? 'Rejected' : 'Confirmed';
+      const suffix = classified.user_reply ? escapeHtml(classified.user_reply) : `${verb} the scam flag for ${userMention(reviewedTarget)}. Event: ${escapeHtml(event.id)}.`;
+      await this.sendCommandReply(chatId, `✅ ${suffix}`, { ...replyOptions, parse_mode: 'HTML' });
+      return true;
+    }
+
+    if (trusted && classified.intent === 'admin_review' && classified.decision && !explicitAdminDecision) {
+      await this.sendEphemeral(chatId, 'I need an explicit verdict before writing review memory. Reply “confirm scam” or “reject flag” to this alert, or open Reviews from /start.', replyOptions);
+      return true;
+    }
+
+    if (!trusted && (classified.intent === 'appeal' || classified.decision === 'reject')) {
+      const event = await this.record('appeal_submitted', message, {
+        target_event_id: targetEvent.id,
+        reason,
+        appellant: actorFromMessage(message),
+        reviewed_target: reviewedTarget,
+        reviewed_target_key: targetKey(reviewedTarget),
+        implicit_detection: true,
+        detection_method: 'llm_alert_reply_classifier',
+        llm_intent: classified.intent,
+        llm_confidence: classified.confidence,
+        original_flag_event: targetEvent.id,
+        evidence: [`LLM classified non-admin alert reply as appeal for ${targetEvent.id}: ${reason}`]
+      });
+      await this.sendCommandReply(chatId, classified.user_reply ? escapeHtml(classified.user_reply) : `📝 Appeal logged for ${userMention(reviewedTarget)} as ${escapeHtml(event.id)}. Admins can confirm or reject the scam flag.`, { ...replyOptions, parse_mode: 'HTML' });
+      return true;
+    }
+
+    if (classified.intent === 'clarify') {
+      await this.sendEphemeral(chatId, classified.user_reply ? escapeHtml(classified.user_reply) : (trusted ? 'Do you want me to confirm this as a scam or reject it as not a scam?' : 'I can log an appeal if you think this flag is wrong. What should admins review?'), replyOptions);
+      return true;
+    }
+
+    if (classified.intent === 'ignore') return true;
+    return false;
+  }
+
   async executeAgentAction(action, parameters, message, trusted, replyOptions) {
     const chatId = message.chat.id;
 
@@ -1743,24 +2178,27 @@ export class TelegramShieldBot {
       if (!trusted) {
         await this.sendEphemeral(chatId, 'Pending reviews / review queue is admin-only. You can still ask me to scan specific users or explain events.', replyOptions);
       } else {
-        await this.sendCommandReply(chatId, this.formatPendingReviews(), { ...replyOptions, parse_mode: 'HTML', disable_web_page_preview: true });
-        // Remember the targets we just showed so follow-up corrections like "@user is not a scammer" can match them
-        const recent = this.pendingReviewItems().slice(0, 15).map(ev => ev.user || ev.payload?.target || {});
-        this.lastPendingReviewsByChat.set(String(chatId), recent);
+        await this.sendPendingReviews(message, replyOptions);
       }
       return { handled: true };
     }
 
+    if (action === 'settings') {
+      if (!trusted) await this.sendEphemeral(chatId, 'Settings are admin-only.', replyOptions);
+      else await this.sendInteractiveReply(chatId, this.settingsText(chatId), this.settingsKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
+      return { handled: true };
+    }
+
     if (action === 'show_watchlist') {
-      const filter = parameters.filter || 'all';
+      const filter = parameters.filter === 'muted' ? 'mutes' : parameters.filter === 'mutes' ? 'mutes' : 'all';
       const svc = getSkillService();
       if (svc && trusted) {
         svc.getWatchlist({ filter });
       }
-      if (!trusted && filter !== 'all') {
-        await this.sendEphemeral(chatId, 'Detailed watchlist is admin-only. I can still check scam risk for you.', replyOptions);
+      if (!trusted) {
+        await this.sendEphemeral(chatId, 'Review details and mutes are admin-only. I can still check scam risk for you.', replyOptions);
       } else {
-        await this.sendCommandReply(chatId, this.formatWatchlist(filter), { ...replyOptions, parse_mode: 'HTML', disable_web_page_preview: true });
+        await this.sendInteractiveReply(chatId, this.formatReviewPanel(filter), this.reviewPanelKeyboard(message.from?.id || message.from?.username || '', filter), { ...replyOptions, parse_mode: 'HTML', disable_web_page_preview: true });
       }
       return { handled: true };
     }
@@ -1771,12 +2209,8 @@ export class TelegramShieldBot {
         // Prefer skill for consistency (even though get_digest is mostly local)
         svc.getDigest();
       }
-      if (action === 'get_digest' || action === 'digest') {
-        await this.sendCommandReply(chatId, this.formatDigest(), replyOptions);
-      } else {
-        const stats = await this.dkg.getStats(7);
-        await this.sendCommandReply(chatId, this.formatStatsDashboard(stats), replyOptions);
-      }
+      const stats = await this.dkg.getStats(7);
+      await this.sendInteractiveReply(chatId, this.formatStatsDashboard(stats), this.statsKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
       return { handled: true };
     }
 
@@ -1785,13 +2219,13 @@ export class TelegramShieldBot {
         await this.sendEphemeral(chatId, 'Banlist / recent enforcement actions are admin-only.', replyOptions);
       } else {
         const bl = await this.formatBanlist();
-        await this.sendCommandReply(chatId, bl, { ...replyOptions, parse_mode: 'HTML' });
+        await this.sendInteractiveReply(chatId, bl, this.banlistKeyboard(message.from?.id || message.from?.username || ''), { ...replyOptions, parse_mode: 'HTML' });
       }
       return { handled: true };
     }
 
     if (action === 'show_campaigns' || action === 'memory_query') {
-      await this.sendCommandReply(chatId, this.formatCampaigns(), replyOptions);
+      await this.sendInteractiveReply(chatId, this.formatCampaigns(), this.statsKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
       return { handled: true };
     }
 
@@ -1801,7 +2235,7 @@ export class TelegramShieldBot {
       if (svc && eventId) {
         svc.explainEvent({ eventId });
       }
-      await this.sendCommandReply(chatId, this.formatWhy(eventId), replyOptions);
+      await this.sendInteractiveReply(chatId, this.formatWhy(eventId), this.mainNavKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
       return { handled: true };
     }
 
@@ -1809,35 +2243,61 @@ export class TelegramShieldBot {
       // Delegate to the general conversational LLM so the agent actually answers intelligently
       const generalReply = await this.generalConversationReply(message);
       if (generalReply && generalReply.length > 5) {
-        await this.sendEphemeral(chatId, generalReply, replyOptions);
+        await this.sendInteractiveReply(chatId, generalReply, this.dashboardKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
       } else {
         const greeting = action === 'greeting' ? 'Hi. ' : '';
-        await this.sendEphemeral(chatId, `${greeting}I am the community anti-scam bodyguard: I scan users, take reports, explain evidence, and use verifiable cross-community memory to spot repeat threats.`, replyOptions);
+        await this.sendInteractiveReply(chatId, `${greeting}I am the community anti-scam bodyguard: I scan users, take reports, explain evidence, and use verifiable cross-community memory to spot repeat threats.`, this.dashboardKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
       }
       return { handled: true };
     }
 
-    if (action === 'false_positive_review' || action === 'overturn' || this.isNaturalFalsePositiveReview(message)) {
+    if (action === 'report') {
+      const text = [parameters.target?.username ? `@${parameters.target.username}` : '', parameters.reason, parameters.details, messageText(message).replace(/@(?:tracabot|tracethembot)\b/ig, '').replace(/\breport\b/i, '').trim()].filter(Boolean).join(' ');
+      const target = parameters.target?.username || parameters.target?.id
+        ? { id: parameters.target.id || '', username: parameters.target.username || '', is_bot: false }
+        : null;
+      if (target) {
+        const risk = await this.assess({ ...message, from: target, text }, target, text);
+        const event = await this.record('report_review_needed', { ...message, from: target }, {
+          ...risk,
+          reporter: actorFromMessage(message),
+          target_key: targetKey(target),
+          report_decision: 'needs_admin_review',
+          report_reason: 'natural language report queued for admin review',
+          evidence: [...(risk.evidence || []), `manual Telegram report submitted by ${actorFromMessage(message).username || actorFromMessage(message).id}`]
+        }, { writeDkg: false });
+        await this.recordConversationArtifact({ ...message, from: target }, { risk, text, artifactKind: 'report_review_observation', conversationRole: 'reporter', sourceEventIds: [event.id] });
+        await this.sendCommandReply(chatId, '✅ Reported. I added this to the admin review queue. Admins can review it from the Tracabot menu.', replyOptions);
+        return { handled: true };
+      }
+      await this.handleCommand({ ...message, text: `/report ${text || message.text || ''}`.trim(), reply_to_message: target ? { chat: message.chat, from: target, text: parameters.reason || parameters.details || text } : message.reply_to_message });
+      return { handled: true };
+    }
+
+    if (action === 'false_positive_review' || action === 'reject' || action === 'overturn' || (!['review', 'appeal'].includes(action) && this.isNaturalFalsePositiveReview(message))) {
       if (trusted) {
         const didOverturn = await this.handleNaturalFalsePositiveReview(message);
         if (didOverturn) return { handled: true };
 
         // Give explicit helpful feedback instead of silence
-        await this.sendEphemeral(chatId, 'I understood you want to mark that as a false positive. I couldn\'t match it to a current pending review item for that user. Reply to one of the specific items in the list or tell me the event id.', replyOptions);
+        await this.sendEphemeral(chatId, 'I understood you want to mark that as a false positive. I could not match it to a current pending review item for that user. Open Reviews from /start or tell me the event id.', replyOptions);
       } else {
-        await this.sendEphemeral(chatId, 'Only admins can overturn reviews. If you are an admin, make sure you are recognized in /status.', replyOptions);
+        await this.sendEphemeral(chatId, 'Only admins can reject scam flags. If you are an admin, open Settings from /start to verify admin recognition.', replyOptions);
       }
       return { handled: true };
     }
 
     // For actions that require more interaction (scan, report, etc.), give clear guidance
     // Phase 8: many of these are now also handled implicitly via context in the cases below.
-    if (['scan', 'report', 'review', 'watch', 'appeal'].includes(action)) {
+    if (action === 'mute') {
+      if (!trusted) await this.sendEphemeral(chatId, 'Admin-only. I can scan or report suspicious users, but muting requires a trusted moderator.', replyOptions);
+      else await this.handleMuteCommand({ ...message, text: `/mute ${parameters.duration || ''} ${parameters.reason || ''}`.trim() });
+      return { handled: true };
+    }
+
+    if (action === 'scan') {
       const hint = action === 'scan' ? 'Reply to a user or message and ask me to scan them, or use /scan.'
-        : action === 'report' ? 'Reply to suspicious evidence with /report or describe it and ask me to report.'
-        : action === 'review' ? (trusted ? 'Use /review as admin on a pending item (or just reply to my flag with your verdict).' : 'Admin-only.')
-        : action === 'watch' ? (trusted ? 'Reply to the user and ask me to watch them (or just give context that you want them watched).' : 'Admin-only.')
-        : 'Use /appeal with an event id (or simply reply to my alert if you are the flagged person).';
+        : 'Reply to suspicious evidence with /report, forward a suspicious DM, or describe it and include the @username when available.';
       await this.sendEphemeral(chatId, `Understood. ${hint}`, replyOptions);
       return { handled: true };
     }
@@ -1855,7 +2315,7 @@ export class TelegramShieldBot {
         const result = await svc.scanTarget(scanInput);
         const risk = result.risk || {};
         const target = result.target || { username: parameters.target?.username };
-        await this.sendCommandReply(chatId, formatScanReply({ target, risk, eventId: '', findingId: '' }), replyOptions);
+        await this.sendInteractiveReply(chatId, formatScanReply({ target, risk, eventId: '', findingId: '' }), this.scanKeyboard(message.from?.id || message.from?.username || '', target, ''), replyOptions);
       } else {
         await this.sendEphemeral(chatId, 'I can run a risk scan for you. Reply to the user/message and say “scan this”.', replyOptions);
       }
@@ -1868,38 +2328,11 @@ export class TelegramShieldBot {
       return { handled: true };
     }
 
-    // Phase 8: Basic implicit action routing (full handler integration in next steps)
-    // These will be expanded to call the real watch/appeal/review logic with implicit metadata.
-    if (action === 'watch' && trusted) {
-      // Phase 8: Real implicit watch from LLM context
-      const target = parameters.target || { id: parameters.target?.id, username: parameters.target?.username };
-      const reason = parameters.reason || 'watched via natural language / admin context';
-      if (!target || (!target.id && !target.username)) {
-        await this.sendEphemeral(chatId, 'Understood you want to watch someone — please specify the user (mention, ID, or reply to them).', replyOptions);
-        return { handled: true };
-      }
-
-      const evidence = ['admin watch (implicit via LLM context): ' + reason];
-      const event = await this.record('watch_started', { ...message, from: target }, {
-        watch_target_key: targetKey(target),
-        target,
-        reason,
-        moderator: actorFromMessage(message),
-        evidence,
-        implicit_detection: true,
-        detection_method: 'llm_context'
-      }, { writeDkg: false });
-
-      const softMsg = `👀 Watching ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}. This increases scrutiny only. Event: ${event.id}. Reason: ${escapeHtml(reason)}.`;
-      await this.sendCommandReply(chatId, softMsg, { ...replyOptions, parse_mode: 'HTML' });
-      return { handled: true };
-    }
-
     if (action === 'appeal') {
       // Phase 8: Real implicit appeal detection when the speaker replies to one of our recent flags
       const repliedMsgId = message.reply_to_message?.message_id;
       const key = repliedMsgId ? `${chatId}:${repliedMsgId}` : null;
-      const targetEventId = key ? this.reviewMessageEvents.get(key) : null;
+      const targetEventId = (parameters.event_id || parameters.eventId || parameters.target_event_id || (key ? this.reviewMessageEvents.get(key) : null));
 
       if (targetEventId) {
         // This is a reply to one of our alerts — treat as implicit appeal
@@ -1916,26 +2349,33 @@ export class TelegramShieldBot {
       }
 
       // Fallback for explicit or less clear cases
-      await this.sendEphemeral(chatId, 'I understand this may be an appeal or correction. Please use /appeal [reason] or reply directly to the specific flag message.', replyOptions);
+      await this.sendEphemeral(chatId, 'I understand this may be an appeal or correction. Reply directly to the specific flag message with what is wrong, or ask an admin to say confirm/reject.', replyOptions);
       return { handled: true };
     }
 
     if (action === 'review' && trusted) {
-      // Phase 8: Real implicit review (uphold/overturn) from admin context after flag
-      const eventId = parameters.event_id || parameters.eventId || parameters.target_event_id;
+      // Phase 8: Real implicit review (confirm/reject) from admin context after flag
+      const repliedMsgId = message.reply_to_message?.message_id;
+      const key = repliedMsgId ? `${chatId}:${repliedMsgId}` : null;
+      const eventId = parameters.event_id || parameters.eventId || parameters.target_event_id || (key ? this.reviewMessageEvents.get(key) : null);
       const decisionRaw = (parameters.decision || parameters.verdict || '').toLowerCase();
-      const isOverturn = decisionRaw.includes('overturn') || decisionRaw.includes('false') || decisionRaw.includes('fake') || decisionRaw.includes('not');
-      const isUphold = decisionRaw.includes('uphold') || decisionRaw.includes('confirm') || decisionRaw.includes('real') || decisionRaw.includes('yes');
+      const isReject = decisionRaw.includes('reject') || decisionRaw.includes('overturn') || decisionRaw.includes('false') || decisionRaw.includes('fake') || decisionRaw.includes('not');
+      const isConfirm = decisionRaw.includes('confirm') || decisionRaw.includes('uphold') || decisionRaw.includes('real') || decisionRaw.includes('yes');
 
       if (!eventId) {
         await this.sendEphemeral(chatId, 'Understood — you want to review. Please include the event ID or reply directly to the flag message.', replyOptions);
         return { handled: true };
       }
 
-      const decision = isOverturn ? 'overturn' : (isUphold ? 'uphold' : 'uphold');
+      if (!isReject && !isConfirm) {
+        await this.sendEphemeral(chatId, 'I need an explicit verdict before recording a review. Say “confirm scam” or “reject as not a scam”.', replyOptions);
+        return { handled: true };
+      }
+
+      const decision = isReject ? 'reject' : 'confirm';
       const reason = parameters.reason || `implicit review decision via LLM context: ${decisionRaw || 'admin verdict'}`;
 
-      const reviewEventType = decision === 'overturn' ? 'review_overturned' : 'review_upheld';
+      const reviewEventType = decision === 'reject' ? 'review_overturned' : 'review_upheld';
       const event = await this.record(reviewEventType, message, {
         target_event_id: eventId,
         review_decision: decision,
@@ -1945,9 +2385,9 @@ export class TelegramShieldBot {
         moderator: actorFromMessage(message)
       });
 
-      const msg = decision === 'overturn' 
-        ? `Review overturned for ${shortId(eventId)}. Correction recorded. Event: ${event.id}.`
-        : `Review upheld for ${shortId(eventId)}. Event: ${event.id}.`;
+      const msg = decision === 'reject'
+        ? `Rejected the scam flag for ${shortId(eventId)}. Correction recorded. Event: ${event.id}.`
+        : `Confirmed the scam flag for ${shortId(eventId)}. Event: ${event.id}.`;
       await this.sendEphemeral(chatId, msg, replyOptions);
       return { handled: true };
     }
@@ -2005,10 +2445,12 @@ export class TelegramShieldBot {
     const wallets = extractWallets(text);
     const patterns = ['dm-impersonation', claimedRole ? 'role-impersonation' : '', scamRequest ? 'solicitation-lure' : '', files.length ? 'screenshot-evidence' : ''].filter(Boolean);
     const hasRole = ROLE_RE.test(text) || Boolean(claimedRole);
-    const hasDmContext = DM_REPORT_RE.test(contextText) || /^\/dmreport/i.test(commandText) || /\b(?:impersonat|pretend|fake|unsolicited)\b/i.test(text);
+    const hasDmContext = DM_REPORT_RE.test(contextText) || Boolean(message.forward_from || message.forward_sender_name || message.forward_from_chat) || /\b(?:impersonat|pretend|fake|unsolicited)\b/i.test(text);
     const hasRequest = DM_SCAM_REQUEST_RE.test(text) || Boolean(wallets.length || domains.length || scamRequest);
     const hasAlias = Boolean(reportedAlias);
     const trusted = await this.isTrustedModerator(message).catch(() => false);
+    const boundIdentity = Boolean(message.forward_from?.id || message.forward_from?.username || /@\w{3,32}/.test(text));
+    const verifiableIndicator = Boolean(wallets.length || domains.length || message.forward_from?.id || message.forward_from?.username);
     let confidence = 35;
     if (hasDmContext) confidence += 15;
     if (hasAlias) confidence += 15;
@@ -2017,8 +2459,8 @@ export class TelegramShieldBot {
     if (files.length) confidence += 10;
     if (trusted) confidence += 10;
     confidence = Math.min(95, confidence);
-    const accepted = confidence >= 75 && hasDmContext && (hasAlias || hasRole) && (hasRequest || files.length || trusted);
-    const reason = accepted ? 'dm impersonation evidence accepted' : 'needs stronger dm impersonation evidence';
+    const accepted = confidence >= 75 && hasDmContext && (hasAlias || hasRole) && (hasRequest || files.length || trusted) && (trusted || (boundIdentity && verifiableIndicator));
+    const reason = accepted ? 'dm impersonation evidence accepted' : boundIdentity ? 'needs stronger dm impersonation evidence' : 'needs verifiable Telegram username, user id, wallet, link, or admin review before DKG sharing';
     const evidence = [
       reportedAlias ? `reported alias: ${reportedAlias}` : '',
       claimedRole ? `claimed role/title: ${claimedRole}` : '',
@@ -2047,11 +2489,19 @@ export class TelegramShieldBot {
         dm_platform: 'telegram_dm',
         screenshot_file_ids: files,
         screenshot_caption: boundedText([message.caption, message.reply_to_message?.caption].filter(Boolean).join('\n'), MAX_CONTEXT_CHARS),
+        forwarded_from_id: message.forward_from?.id || '',
+        forwarded_from_username: message.forward_from?.username || '',
+        forwarded_sender_name: message.forward_sender_name || '',
+        forwarded_from_chat: message.forward_from_chat?.username || message.forward_from_chat?.title || '',
+        identity_bound: boundIdentity,
+        verifiable_indicator: verifiableIndicator,
+        allegation_only: !accepted,
+        admin_verified: trusted,
         has_telegram_username: /@\w{3,32}/.test(text),
         report_decision: accepted ? 'accepted' : 'weak',
         report_reason: reason,
         report_outcome: accepted && confidence >= 80 ? 'high_confidence_dm_report' : accepted ? 'accepted_dm_report' : 'local_dm_review',
-        source: 'dm_scam_report',
+        source: 'telegram_report',
         domains,
         wallets,
         patterns,
@@ -2062,9 +2512,8 @@ export class TelegramShieldBot {
 
   async handleDmReport(message, explicitText = '') {
     const report = await this.buildDmReport(message, explicitText);
-    const eventType = report.accepted ? 'dm_scam_report' : 'report_review_needed';
-      const event = await this.record(eventType, message, report.payload, { writeDkg: report.accepted });
-      if (!report.accepted) await this.recordConversationArtifact(message, { risk: report.payload, text: explicitText || evidenceText(message), artifactKind: 'weak_dm_report_observation', conversationRole: 'reporter', sourceEventIds: [event.id] });
+    const event = await this.record('report_review_needed', message, report.payload, { writeDkg: false });
+      await this.recordConversationArtifact(message, { risk: report.payload, text: explicitText || evidenceText(message), artifactKind: 'dm_report_observation', conversationRole: 'reporter', sourceEventIds: [event.id] });
       if (report.accepted) await this.maybeRecordCampaign({ ...message, text: report.payload.evidence.join('\n') }, report.payload);
     await this.send(message.chat.id, formatDmReportReply(event, report), { reply_to_message_id: message.message_id });
     return event;
@@ -2114,7 +2563,7 @@ export class TelegramShieldBot {
     }
     const adminUsernames = (await this.adminIdentities(message.chat.id)).filter((id) => !/^\d+$/.test(id));
     const renameCopycat = this.adminRenameCopycat(message.chat, targetUser, adminUsernames);
-    const falsePositiveReview = this.falsePositiveReviewFor(targetUser);
+    const falsePositiveReview = this.falsePositiveReviewFor(targetUser, bounded, dkgIntel);
     const effectiveIntel = falsePositiveReview ? { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [], artifactEvidence: [] } : dkgIntel;
     const analysis = this.analyzer({ text: bounded, user: { ...targetUser, adminUsernames, adminRenameCopycat: Boolean(renameCopycat) }, globalIntel: effectiveIntel });
     if (renameCopycat) {
@@ -2157,7 +2606,7 @@ export class TelegramShieldBot {
     });
     const accepted = reports.filter((event) => event.payload?.report_decision === 'accepted').length;
     const rejected = reports.filter((event) => event.payload?.report_decision === 'rejected').length;
-    const successful = reports.filter((event) => event.payload?.report_outcome === 'context_graph_published' || event.payload?.report_outcome === 'high_confidence_dkg_report' || Number(event.payload?.confidence || 0) >= 80).length;
+    const successful = reports.filter((event) => event.payload?.admin_verified === true || event.payload?.review_confirmed === true).length;
     const weak = reports.filter((event) => event.payload?.report_decision === 'weak').length;
     const reporterScore = accepted + rejected + weak
       ? Math.max(0, Math.min(100, Math.round(((accepted * 70) + (successful * 30) - (weak * 15) - (rejected * 35)) / Math.max(accepted + rejected + weak, 1))))
@@ -2170,7 +2619,7 @@ export class TelegramShieldBot {
       weak,
       successful,
       reporterScore,
-      trustedReporter: successful >= 2 || reporterScore >= 75
+      trustedReporter: successful >= 2
     };
   }
 
@@ -2182,8 +2631,9 @@ export class TelegramShieldBot {
     const hasTargetReference = target.kind === 'wallet' || Boolean(target.username || target.id || target.label);
     const suppliedEvidence = Boolean(message.reply_to_message?.text) || targetText.replace(/^@\w+\s*/, '').trim().length >= 16 || risk.wallets.length > 0 || (targetOnlyReport && hasTargetReference);
     const reportWorthyLocalPattern = risk.local_confidence >= 40 && ['impersonation', 'phishing', 'giveaway'].includes(risk.scam_type) && (risk.evidence?.length || 0) > 0;
-    const trustedReporterEvidence = history.trustedReporter && hasTargetReference;
-    const independentEvidence = risk.local_confidence >= 60 || reportWorthyLocalPattern || trustedReporterEvidence || risk.wallets.length > 0 || risk.patterns.length >= 1;
+    const concreteEvidence = Boolean(message.reply_to_message?.text || message.reply_to_message?.caption) || risk.wallets.length > 0 || risk.domains.length > 0 || risk.patterns.length >= 1 || /https?:\/\/|\b(?:[a-z0-9-]+\.)+[a-z]{2,}/i.test(targetText);
+    const trustedReporterEvidence = false;
+    const independentEvidence = risk.local_confidence >= 60 || reportWorthyLocalPattern || risk.wallets.length > 0 || risk.patterns.length >= 1 || risk.domains.length > 0;
     const selfReportWithoutEvidence = actorKey(reporter) && actorKey(reporter) === actorKey(target) && !suppliedEvidence;
     if (!isAdmin && history.recentCount >= 3) {
       return { accepted: false, decision: 'rejected', reason: 'report rate limit reached for this reporter', history, suppliedEvidence, independentEvidence, reportWorthyLocalPattern };
@@ -2197,7 +2647,7 @@ export class TelegramShieldBot {
     if (!suppliedEvidence) {
       return { accepted: false, decision: 'rejected', reason: 'report needs a replied message, wallet, link, or suspicious text', history, suppliedEvidence, independentEvidence, reportWorthyLocalPattern };
     }
-    if (!independentEvidence && !isAdmin) {
+    if ((!independentEvidence || !concreteEvidence) && !isAdmin) {
       return { accepted: true, decision: 'weak', reason: 'stored locally for review because no scam pattern, wallet, link, or DKG match was strong enough', history, suppliedEvidence, independentEvidence, reportWorthyLocalPattern };
     }
     const reason = trustedReporterEvidence && !reportWorthyLocalPattern ? 'trusted reporter target submitted for DKG review' : reportWorthyLocalPattern ? 'local scam pattern detected' : 'independent evidence present';
@@ -2279,214 +2729,56 @@ export class TelegramShieldBot {
     return review;
   }
 
+  async handleMuteCommand(message) {
+    const chatId = message.chat.id;
+    const replyOptions = { reply_to_message_id: message.message_id };
+    if (!await this.isTrustedModerator(message)) {
+      await this.sendEphemeral(chatId, '⚠️ /mute is restricted to configured admins or Telegram chat admins.', replyOptions);
+      return;
+    }
+    if (!await this.hasRestrictRights(chatId)) {
+      await this.sendEphemeral(chatId, 'I can advise and log, but I need Telegram admin restrict rights before I can mute users in this group.', replyOptions);
+      return;
+    }
+    const argText = this.commandText(message, 'mute');
+    const { target } = this.resolveCommandTarget(message, 'mute');
+    const replyUser = target?.id ? target : message.reply_to_message?.from;
+    if (!replyUser?.id) {
+      await this.sendEphemeral(chatId, 'Reply to the user you want muted, mention them after /mute, or use a Telegram ID. Example: /mute 5 minutes.', replyOptions);
+      return;
+    }
+    if (replyUser.is_bot === true || await this.isTelegramChatAdmin(chatId, replyUser.id)) {
+      await this.sendEphemeral(chatId, 'I will not mute bot accounts or Telegram chat admins.', replyOptions);
+      return;
+    }
+    const seconds = parseDurationSeconds(argText);
+    const untilDate = Math.floor(Date.now() / 1000) + seconds;
+    const reason = argText.replace(/\b\d+\s*(minutes?|mins?|m|hours?|hrs?|h|days?|d)\b/i, '').replace(/^@?\w{3,32}\s*/, '').trim() || `admin mute for ${humanDuration(seconds)}`;
+    await this.muteMember(chatId, replyUser.id, untilDate);
+    const event = await this.record('restrict_executed', { ...message, from: replyUser }, {
+      reason,
+      moderator: actorFromMessage(message),
+      target: replyUser,
+      target_key: targetKey(replyUser),
+      restricted_until: new Date(untilDate * 1000).toISOString(),
+      action_duration_seconds: seconds,
+      action: 'mute',
+      admin_verified: true,
+      publication_status: 'shared_memory',
+      lifecycle_stage: 'shared_memory',
+      evidence: [`admin muted ${replyUser.username || replyUser.id} for ${humanDuration(seconds)}: ${reason}`]
+    }, { writeDkg: true });
+    await this.sendCommandReply(chatId, `🔇 Muted ${userMention(replyUser)} for ${humanDuration(seconds)}. Event: ${event.id}.`, { ...replyOptions, parse_mode: 'HTML' });
+  }
+
   async handleCommand(message) {
     const text = message.text || '';
     const chatId = message.chat.id;
-    if (text.startsWith('/status')) {
-      if (!await this.isTrustedModerator(message)) {
-        await this.sendEphemeral(chatId, '⚠️ /status is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
-        return;
-      }
-      await this.sendCommandReply(chatId, await this.formatStatus(message), { reply_to_message_id: message.message_id });
+    if (isCommand(text, 'start')) {
+      await this.sendInteractiveReply(chatId, this.formatHelp(), this.dashboardKeyboard(message.from?.id || message.from?.username || ''), { reply_to_message_id: message.message_id });
       return;
     }
-    if (text.startsWith('/stats')) {
-      this.sendTyping(chatId);
-      await this.sendEphemeral(chatId, 'Gathering stats…', { reply_to_message_id: message.message_id });
-
-      if (/\bcampaigns?\b/i.test(text)) {
-        await this.sendCommandReply(chatId, this.formatCampaigns(), { reply_to_message_id: message.message_id });
-        return;
-      }
-      const stats = await this.dkg.getStats(7);
-      const wantsSources = /\b(source|sources|evidence|receipts)\b/i.test(text);
-      await this.sendCommandReply(chatId, wantsSources ? formatStatsSourcesReply(stats) : this.formatStatsDashboard(stats), { reply_to_message_id: message.message_id });
-      return;
-    }
-    if (text.startsWith('/help') || text.startsWith('/start')) {
-      // /help responses should auto-delete (as requested)
-      await this.sendCommandReply(chatId, this.formatHelp(), { reply_to_message_id: message.message_id, autoDelete: true });
-      return;
-    }
-    if (text.startsWith('/why')) {
-      const eventId = this.commandText(message, 'why').split(/\s+/)[0] || '';
-      await this.sendCommandReply(chatId, this.formatWhy(eventId), { reply_to_message_id: message.message_id });
-      return;
-    }
-    if (text.startsWith('/digest')) {
-      this.sendTyping(chatId);
-      await this.sendEphemeral(chatId, 'Building digest…', { reply_to_message_id: message.message_id });
-
-      await this.sendCommandReply(chatId, this.formatDigest(), { reply_to_message_id: message.message_id });
-      return;
-    }
-    if (text.startsWith('/banlist')) {
-      if (!await this.isTrustedModerator(message)) {
-        await this.sendEphemeral(chatId, '⚠️ /banlist is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
-        return;
-      }
-      this.sendTyping(chatId);
-      await this.sendEphemeral(chatId, 'Fetching recent enforcement actions…', { reply_to_message_id: message.message_id });
-      const banlist = await this.formatBanlist();
-      await this.sendCommandReply(chatId, banlist, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
-      return;
-    }
-    if (text.startsWith('/watchlist')) {
-      if (!await this.isTrustedModerator(message)) {
-        await this.sendEphemeral(chatId, '⚠️ /watchlist is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
-        return;
-      }
-      // this.sendTyping(chatId);
-      // await this.sendEphemeral(chatId, 'Fetching watchlist…', { reply_to_message_id: message.message_id });
-
-      const filter = this.commandText(message, 'watchlist').split(/\s+/)[0]?.toLowerCase() || '';
-      await this.sendCommandReply(chatId, this.formatWatchlist(filter), { reply_to_message_id: message.message_id, parse_mode: 'HTML', disable_web_page_preview: true });
-      return;
-    }
-    if (text.startsWith('/challenge')) {
-      if (!await this.isTrustedModerator(message)) {
-        await this.sendEphemeral(chatId, '⚠️ /challenge is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
-        return;
-      }
-      const arg = this.commandText(message, 'challenge').split(/\s+/)[0]?.toLowerCase() || 'status';
-      if (!['on', 'off', 'status'].includes(arg)) {
-        await this.sendEphemeral(chatId, 'Usage: /challenge on, /challenge off, or /challenge status', { reply_to_message_id: message.message_id });
-        return;
-      }
-      if (arg === 'status') {
-        await this.sendCommandReply(chatId, `Join challenge is ${this.chatJoinChallengeEnabled(chatId) ? 'on' : 'off'} for this chat. Use /challenge on or /challenge off to change it.`, { reply_to_message_id: message.message_id });
-        return;
-      }
-      const enabled = arg === 'on';
-      await this.record('join_challenge_setting_changed', message, {
-        enabled,
-        moderator: actorFromMessage(message),
-        evidence: [`admin turned new-user join challenge ${enabled ? 'on' : 'off'} for this chat`]
-      }, { writeDkg: false });
-      await this.sendCommandReply(chatId, `Join challenge is now ${enabled ? 'on' : 'off'} for this chat.`, { reply_to_message_id: message.message_id });
-      return;
-    }
-    if (text.startsWith('/conversation')) {
-      if (!await this.isTrustedModerator(message)) {
-        await this.sendEphemeral(chatId, '⚠️ /conversation is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
-        return;
-      }
-      const arg = this.commandText(message, 'conversation').split(/\s+/)[0]?.toLowerCase() || 'status';
-      if (!['on', 'off', 'status'].includes(arg)) {
-        await this.sendEphemeral(chatId, 'Usage: /conversation on, /conversation off, or /conversation status', { reply_to_message_id: message.message_id });
-        return;
-      }
-      if (arg === 'status') {
-        await this.sendCommandReply(chatId, `Natural language agent mode is ${this.chatConversationalEnabled(chatId) ? 'on' : 'off'} for this chat. Use /conversation on or /conversation off to change it (default on).`, { reply_to_message_id: message.message_id });
-        return;
-      }
-      const enabled = arg === 'on';
-      await this.record('conversational_setting_changed', message, {
-        enabled,
-        moderator: actorFromMessage(message),
-        evidence: [`admin turned conversational agent mode ${enabled ? 'on' : 'off'} for this chat`]
-      }, { writeDkg: false });
-      await this.sendCommandReply(chatId, `Natural language agent mode is now ${enabled ? 'on' : 'off'} for this chat.`, { reply_to_message_id: message.message_id });
-      return;
-    }
-    if (text.startsWith('/watch')) {
-      if (!await this.isTrustedModerator(message)) {
-        await this.sendEphemeral(chatId, '⚠️ /watch is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
-        return;
-      }
-      const { target } = this.resolveCommandTarget(message, 'watch');
-      const reason = this.commandReason(message, 'watch', 'admin watch');
-      const evidence = ['admin watch started: ' + reason, target.sangmata?.evidence, target.id && target.source === 'telegram_id' ? `Telegram user ID watched: ${target.id}` : ''].filter(Boolean);
-      const event = await this.record('watch_started', { ...message, from: target }, {
-        watch_target_key: targetKey(target),
-        target,
-        reason,
-        moderator: actorFromMessage(message),
-        evidence
-      }, { writeDkg: false });
-      await this.sendCommandReply(chatId, `👀 Watching ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}. Event: ${event.id}. Reason: ${escapeHtml(reason)}. This increases scrutiny only; it will not ban by itself.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML', autoDelete: true });
-      return;
-    }
-    if (text.startsWith('/unwatch')) {
-      if (!await this.isTrustedModerator(message)) {
-        await this.sendEphemeral(chatId, '⚠️ /unwatch is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
-        return;
-      }
-      const { target } = this.resolveCommandTarget(message, 'unwatch');
-      const reason = this.commandReason(message, 'unwatch', 'admin unwatch');
-      const evidence = ['admin watch ended: ' + reason, target.sangmata?.evidence].filter(Boolean);
-      const event = await this.record('watch_ended', { ...message, from: target }, {
-        watch_target_key: targetKey(target),
-        target,
-        reason,
-        moderator: actorFromMessage(message),
-        evidence
-      }, { writeDkg: false });
-      await this.sendCommandReply(chatId, `✅ Removed watch for ${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}. Event: ${event.id}. Reason: ${escapeHtml(reason)}.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML', autoDelete: true });
-      return;
-    }
-    if (text.startsWith('/appeal')) {
-      const argText = this.commandText(message, 'appeal');
-      const [firstToken, ...rest] = argText.split(/\s+/);
-      const explicitEvent = this.findEvent(firstToken || '');
-      const target = this.resolveCommandTarget(message, 'appeal').target;
-      const reviewedEvent = explicitEvent || this.findAppealableEvent(message, target);
-      const reason = (explicitEvent ? rest.join(' ') : argText).trim() || 'appeal submitted';
-      const event = await this.record('appeal_submitted', message, {
-        target_event_id: reviewedEvent?.id || firstToken || '',
-        reason,
-        appellant: actorFromMessage(message),
-        reviewed_target: reviewedEvent?.user || target,
-        reviewed_target_key: targetKey(reviewedEvent?.user || target),
-        evidence: [`appeal submitted for ${reviewedEvent?.id || firstToken || 'latest matching event'}: ${reason}`]
-      });
-      await this.sendCommandReply(chatId, `📝 Appeal logged to DKG as ${event.id}. Admins can reply with /review overturn reason or /review uphold reason.`, { reply_to_message_id: message.message_id });
-      return;
-    }
-    if (text.startsWith('/review')) {
-      if (!await this.isTrustedModerator(message)) {
-        await this.sendEphemeral(chatId, '⚠️ /review is restricted to configured admins or Telegram chat admins.', { reply_to_message_id: message.message_id });
-        return;
-      }
-      // Immediate feedback — this command can be slow
-      // Temporarily disabled to stabilize tests while we complete other plan items.
-      // this.sendTyping(chatId);
-      // await this.sendEphemeral(chatId, 'Fetching review queue…', { reply_to_message_id: message.message_id });
-
-      const parts = this.commandText(message, 'review').split(/\s+/).filter(Boolean);
-      if (!parts.length) {
-        await this.sendCommandReply(chatId, this.formatPendingReviews(), { reply_to_message_id: message.message_id, parse_mode: 'HTML', disable_web_page_preview: true, autoDelete: true });
-        return;
-      }
-      const decisionIndex = parts.findIndex((part) => /^(uphold|upheld|overturn|overturned|reject)$/i.test(part));
-      const eventOrTarget = decisionIndex > 0 ? parts.slice(0, decisionIndex).join(' ') : '';
-      const decisionRaw = decisionIndex >= 0 ? parts[decisionIndex] : '';
-      const reasonParts = decisionIndex >= 0 ? parts.slice(decisionIndex + 1) : [];
-      const decision = /^(uphold|upheld)$/i.test(decisionRaw || '') ? 'upheld' : /^(overturn|overturned|reject)$/i.test(decisionRaw || '') ? 'overturned' : '';
-      const target = eventOrTarget ? this.resolveCommandTarget({ ...message, text: `/review ${eventOrTarget}` }, 'review').target : this.resolveCommandTarget(message, 'review').target;
-      const reviewedEvent = this.findEvent(eventOrTarget) || this.findAppealableEvent(message, target);
-      if (!reviewedEvent || !decision) {
-        await this.sendEphemeral(chatId, 'Usage: /review [@user|event-id] uphold reason or /review [@user|event-id] overturn reason. Reply to a user message also works.', { reply_to_message_id: message.message_id });
-        return;
-      }
-      const reason = reasonParts.join(' ').trim() || `review ${decision}`;
-      const eventType = decision === 'upheld' ? 'review_upheld' : 'review_overturned';
-      const reviewedTarget = reviewedEvent?.user || reviewedEvent?.payload?.target || {};
-      const event = await this.record(eventType, message, {
-        target_event_id: reviewedEvent.id,
-        review_decision: decision,
-        reason,
-        reviewer: actorFromMessage(message),
-        reviewed_target: reviewedTarget,
-        reviewed_target_key: targetKey(reviewedTarget),
-        false_positive_reason: decision === 'overturned' ? reason : '',
-        evidence: [`admin review ${decision} ${reviewedEvent.id}: ${reason}`]
-      });
-      if (decision === 'overturned') await this.recordConversationArtifact(message, { risk: { confidence: 80, local_confidence: 80, scam_type: 'false_positive', evidence: [`false positive correction for ${reviewedEvent.id}: ${reason}`] }, text: reason, artifactKind: 'false_positive_signal', conversationRole: 'moderator', sourceEventIds: [reviewedEvent.id, event.id], operatorNote: reason, forceDkg: true });
-      await this.sendCommandReply(chatId, `✅ Review ${decision}. I saved the review decision to DKG fraud memory. Reason: ${reason}.`, { reply_to_message_id: message.message_id });
-      return;
-    }
-    if (text.startsWith('/scan')) {
+    if (isCommand(text, 'scan')) {
       if (await this.rejectNonOwnerPrivateReport(message)) return;
       const { target, text: targetText } = this.resolveCommandTarget(message, 'scan');
       const risk = await this.assess({ ...message, from: target, text: targetText }, target, targetText);
@@ -2494,16 +2786,17 @@ export class TelegramShieldBot {
       await this.recordConversationArtifact({ ...message, from: target }, { risk, text: targetText || message.text, artifactKind: 'safety_question', conversationRole: 'questioner', sourceEventIds: [event.id] });
       const finding = risk.confidence >= 80 ? await this.publishHighConfidenceFinding({ ...message, from: target, text: targetText }, risk) : null;
       await this.maybeRecordCampaign({ ...message, from: target, text: targetText }, risk);
-      await this.sendCommandReply(chatId, formatScanReply({ target, risk, eventId: event.id, findingId: finding?.id }), { reply_to_message_id: message.message_id });
+      await this.sendInteractiveReply(chatId, formatScanReply({ target, risk, eventId: event.id, findingId: finding?.id }), this.scanKeyboard(message.from?.id || message.from?.username || '', target, event.id), { reply_to_message_id: message.message_id });
       return;
     }
-    if (text.startsWith('/dmreport')) {
+    if (isCommand(text, 'report')) {
       if (await this.rejectNonOwnerPrivateReport(message)) return;
-      await this.handleDmReport(message, this.commandText(message, 'dmreport') || evidenceText(message));
-      return;
-    }
-    if (text.startsWith('/report')) {
-      if (await this.rejectNonOwnerPrivateReport(message)) return;
+      const reportEvidence = forwardedEvidenceText(message);
+      const reportText = [this.commandText(message, 'report'), reportEvidence].filter(Boolean).join('\n');
+      if (screenshotFileIds(message).length || message.forward_from || message.forward_sender_name || message.forward_from_chat || (DM_REPORT_RE.test(reportEvidence) && /\b(?:impersonat|pretend|fake|unsolicited|support|admin)\b/i.test(reportEvidence))) {
+        await this.handleDmReport(message, reportText);
+        return;
+      }
       const { target, text: targetText, observedContext } = this.resolveReportTarget(message);
       const risk = await this.assess({ ...message, from: target, text: targetText }, target, targetText);
       const reportDecision = this.evaluateReport({ message, target, targetText, risk });
@@ -2523,7 +2816,8 @@ export class TelegramShieldBot {
         local_confidence: reportLocalConfidence,
         reporter: actorFromMessage(message),
         target_key: targetKey(target),
-        report_decision: reportDecision.decision,
+        report_decision: 'needs_admin_review',
+        original_report_decision: reportDecision.decision,
         report_reason: reportDecision.reason,
         report_outcome: reportDecision.decision === 'accepted' && reportConfidence >= 80 ? 'high_confidence_dkg_report' : reportDecision.decision,
         reporter_trusted: reportDecision.history.trustedReporter,
@@ -2534,7 +2828,7 @@ export class TelegramShieldBot {
           ...risk.evidence,
           observedContext ? `recent observed message used as report context: ${boundedText(observedContext, MAX_CONTEXT_CHARS)}` : '',
           `manual Telegram report submitted by ${actorFromMessage(message).username || actorFromMessage(message).id}`,
-          `report decision: ${reportDecision.decision} (${reportDecision.reason})`
+          `report decision: needs_admin_review (original ${reportDecision.decision}: ${reportDecision.reason})`
         ].filter(Boolean)
       };
       if (!reportDecision.accepted || reportDecision.decision !== 'accepted') {
@@ -2544,20 +2838,17 @@ export class TelegramShieldBot {
         await this.sendCommandReply(chatId, formatReportReply(event, reportDecision), { reply_to_message_id: message.message_id });
         return;
       }
-      const event = await this.record('report_submitted', { ...message, from: target }, reportPayload);
-      await this.recordReporterReputation(message, target, event, reportDecision);
+      const event = await this.record('report_review_needed', { ...message, from: target }, reportPayload, { writeDkg: false });
       await this.maybeRecordCampaign({ ...message, from: target, text: targetText }, reportPayload);
-      const trustedReporter = await this.isTrustedModerator(message);
-      const canEscalate = trustedReporter && reportLocalConfidence >= 60 && reportConfidence >= this.config.actionThreshold;
-      if (canEscalate && target.id && target.kind !== 'wallet') {
-        await this.applyRiskAction({ ...message, from: target, text: targetText }, reportPayload);
-      } else if (reportLocalConfidence >= 60 && reportConfidence >= this.config.actionThreshold) {
-        await this.publishHighConfidenceFinding({ ...message, from: target, text: targetText }, reportPayload);
-      }
+      await this.recordConversationArtifact({ ...message, from: target }, { risk: reportPayload, text: targetText || evidenceText(message), artifactKind: 'report_review_observation', conversationRole: 'reporter', sourceEventIds: [event.id] });
       await this.sendCommandReply(chatId, formatReportReply(event, reportDecision), { reply_to_message_id: message.message_id });
       return;
     }
-    if (text.startsWith('/ban')) {
+    if (isCommand(text, 'mute')) {
+      await this.handleMuteCommand(message);
+      return;
+    }
+    if (isCommand(text, 'ban')) {
       this.sendTyping(chatId);
       await this.sendEphemeral(chatId, 'Processing ban request…', { reply_to_message_id: message.message_id });
 
@@ -2608,7 +2899,8 @@ export class TelegramShieldBot {
         replied_message_id: replyMessageId || '',
         replied_message_deleted: repliedMessageDeleted,
         replied_message_delete_error: repliedMessageDeleteError,
-        confidence: Math.max(100, risk.confidence),
+        confidence: Math.max(risk.confidence, this.config.actionThreshold || 85),
+        admin_verified: true,
         scam_type: risk.scam_type || 'admin_action',
         evidence: [...risk.evidence, reason, replyUser.sangmata?.evidence || '', repliedMessageDeleted ? 'replied scam message deleted' : replyMessageId ? 'replied scam message deletion unavailable' : '', 'manual /ban command'].filter(Boolean)
       });
@@ -2693,11 +2985,28 @@ export class TelegramShieldBot {
     }
     const expiresAt = Date.now() + (this.config.joinChallengeTtlSeconds || 60) * 1000;
     const key = this.challengeKey(chatId, member.id);
-    const canRestrict = true;
-    await this.restrict(chatId, member.id, Math.floor(expiresAt / 1000)).catch(() => null);
     const qa = this.selectJoinChallengeQa(chatId, member);
-    const sent = await this.send(chatId, await this.challengeText(chatId, member), { parse_mode: 'HTML', disable_web_page_preview: true });
-    this.joinChallenges.set(key, { chat: message.chat, user: member, startedAt: Date.now(), expiresAt, messageId: sent?.message_id || '', attempts: 0, mode: qa ? 'qa' : 'ual', qa });
+    const challenge = { chat: message.chat, user: member, startedAt: Date.now(), expiresAt, messageId: '', attempts: 0, mode: qa ? 'qa' : 'ual', qa, restricted: false };
+    this.joinChallenges.set(key, challenge);
+    let restricted = false;
+    try {
+      await this.restrict(chatId, member.id, Math.floor(expiresAt / 1000));
+      restricted = true;
+      challenge.restricted = true;
+      const sent = await this.send(chatId, await this.challengeText(chatId, member), { parse_mode: 'HTML', disable_web_page_preview: true });
+      challenge.messageId = sent?.message_id || '';
+    } catch (error) {
+      this.joinChallenges.delete(key);
+      if (restricted) await this.restoreMemberPermissions(chatId, member.id).catch(() => null);
+      await this.record('join_challenge_start_failed', { ...message, from: member }, {
+        target: member,
+        target_key: targetKey(member),
+        error: error instanceof Error ? error.message : String(error),
+        restricted_text_only: restricted,
+        evidence: ['join challenge could not be started safely; restrictions were not left without an active challenge']
+      }, { writeDkg: false });
+      return false;
+    }
     await this.record('join_challenge_started', { ...message, from: member }, {
       target: member,
       target_key: targetKey(member),
@@ -2705,7 +3014,7 @@ export class TelegramShieldBot {
       challenge_type: qa ? 'dkg_asset_qa' : 'dkg_ual',
       challenge_id: qa?.id || '',
       ttl_seconds: this.config.joinChallengeTtlSeconds || 60,
-      restricted_text_only: Boolean(canRestrict),
+      restricted_text_only: restricted,
       evidence: [qa ? 'new user asked to answer a DKG Knowledge Asset question' : 'new user asked to verify with a DKG Knowledge Asset UAL']
     }, { writeDkg: false });
   }
@@ -2949,13 +3258,160 @@ export class TelegramShieldBot {
     return true;
   }
 
+  async handleCallbackQuery(query = {}) {
+    const parsed = parseCallbackData(query.data || '');
+    if (!parsed) return false;
+    const message = query.message || {};
+    const chatId = message.chat?.id;
+    const from = query.from || {};
+    const requester = parsed.parts[0] || '';
+    const eventId = parsed.parts[1] || '';
+    const callbackMessage = { chat: message.chat, from, message_id: message.message_id, text: '' };
+    const trusted = await this.isTrustedModerator(callbackMessage).catch(() => false);
+    if (requester && String(from.id || from.username || '') !== String(requester)) {
+      await this.answerCallback(query.id, 'Open your own panel to use these buttons.');
+      return true;
+    }
+    if (!trusted && parsed.action.startsWith('review-')) {
+      await this.answerCallback(query.id, 'Admin only');
+      return true;
+    }
+    await this.answerCallback(query.id);
+
+    if (parsed.action === 'close') {
+      await this.call('deleteMessage', { chat_id: chatId, message_id: message.message_id }).catch(async () => {
+        await this.editInteractiveMessage(chatId, message.message_id, 'Closed.', [], {});
+      });
+      return true;
+    }
+
+    if (parsed.action === 'dashboard') {
+      await this.editInteractiveMessage(chatId, message.message_id, this.dashboardText(), this.dashboardKeyboard(requester));
+      return true;
+    }
+
+    if (parsed.action === 'settings') {
+      if (!trusted) {
+        await this.answerCallback(query.id, 'Admin only');
+        return true;
+      }
+      await this.editInteractiveMessage(chatId, message.message_id, this.settingsText(chatId), this.settingsKeyboard(requester));
+      return true;
+    }
+
+    if (parsed.action === 'review-list') {
+      await this.editInteractiveMessage(chatId, message.message_id, this.formatReviewPanel('flags'), this.reviewPanelKeyboard(requester, 'flags'), { parse_mode: 'HTML', disable_web_page_preview: true });
+      return true;
+    }
+    if (parsed.action === 'review-tab') {
+      if (!trusted) {
+        await this.answerCallback(query.id, 'Admin only');
+        return true;
+      }
+      const filter = parsed.parts[1] || 'flags';
+      await this.editInteractiveMessage(chatId, message.message_id, this.formatReviewPanel(filter), this.reviewPanelKeyboard(requester, filter), { parse_mode: 'HTML', disable_web_page_preview: true });
+      return true;
+    }
+    if (['stats', 'stats-sources', 'campaigns', 'banlist', 'status', 'challenge-set', 'conversation-set', 'help-scan', 'why'].includes(parsed.action)) {
+      if (requester && String(from.id || from.username || '') !== String(requester)) {
+        await this.answerCallback(query.id, 'Open your own panel to use these buttons.');
+        return true;
+      }
+      if (parsed.action === 'stats' || parsed.action === 'stats-sources') {
+        const stats = await this.dkg.getStats(7);
+        const text = parsed.action === 'stats-sources' ? formatStatsSourcesReply(stats) : this.formatStatsDashboard(stats);
+        await this.editInteractiveMessage(chatId, message.message_id, text, this.statsKeyboard(requester));
+        return true;
+      }
+      if (parsed.action === 'campaigns') {
+        await this.editInteractiveMessage(chatId, message.message_id, this.formatCampaigns(), this.statsKeyboard(requester));
+        return true;
+      }
+      if (parsed.action === 'banlist') {
+        if (!trusted) {
+          await this.answerCallback(query.id, 'Admin only');
+          return true;
+        }
+        await this.editInteractiveMessage(chatId, message.message_id, await this.formatBanlist(), this.banlistKeyboard(requester), { parse_mode: 'HTML', disable_web_page_preview: true });
+        return true;
+      }
+      if (parsed.action === 'status') {
+        if (!trusted) {
+          await this.answerCallback(query.id, 'Admin only');
+          return true;
+        }
+        await this.editInteractiveMessage(chatId, message.message_id, await this.formatStatus(callbackMessage), this.settingsKeyboard(requester));
+        return true;
+      }
+      if (parsed.action === 'challenge-set' || parsed.action === 'conversation-set') {
+        if (!trusted) {
+          await this.answerCallback(query.id, 'Admin only');
+          return true;
+        }
+        const value = parsed.parts[1] || 'status';
+        const setting = parsed.action === 'challenge-set' ? 'join_challenge_setting_changed' : 'conversational_setting_changed';
+        if (value === 'on' || value === 'off') {
+          await this.record(setting, callbackMessage, { enabled: value === 'on', moderator: from, evidence: [`admin turned ${parsed.action === 'challenge-set' ? 'new-user join challenge' : 'conversation mode'} ${value}`] }, { writeDkg: false });
+        }
+        await this.editInteractiveMessage(chatId, message.message_id, this.settingsText(chatId), this.settingsKeyboard(requester));
+        return true;
+      }
+      if (parsed.action === 'help-scan') {
+        await this.editInteractiveMessage(chatId, message.message_id, '🔎 To scan: reply to a user/message with /scan, use /scan @username, or ask me naturally “scan this”.', this.dashboardKeyboard(requester));
+        return true;
+      }
+      if (parsed.action === 'why') {
+        await this.editInteractiveMessage(chatId, message.message_id, this.formatWhy(parsed.parts[1] || ''), this.statsKeyboard(requester));
+        return true;
+      }
+    }
+    if (parsed.action === 'review-open') {
+      const event = this.findEvent(eventId);
+      if (!event) {
+        await this.answerCallback(query.id, 'Review item not found');
+        return true;
+      }
+      if (!this.isPendingReviewEvent(event)) {
+        await this.answerCallback(query.id, 'Already reviewed or expired');
+        return true;
+      }
+      await this.editInteractiveMessage(chatId, message.message_id, this.formatReviewDetail(event), this.reviewActionKeyboard(requester, event.id), { parse_mode: 'HTML', disable_web_page_preview: true });
+      return true;
+    }
+    if (parsed.action === 'review-confirm' || parsed.action === 'review-reject') {
+      const event = this.findEvent(eventId);
+      if (!event) return true;
+      if (!this.isPendingReviewEvent(event)) {
+        await this.answerCallback(query.id, 'Already reviewed or expired');
+        return true;
+      }
+      const finalDecision = parsed.action === 'review-confirm' ? 'confirm' : 'reject';
+      const reason = finalDecision === 'confirm' ? 'admin confirmed scam flag' : 'admin rejected scam flag as false positive';
+      const reviewEvent = await this.record(finalDecision === 'confirm' ? 'review_upheld' : 'review_overturned', callbackMessage, {
+        target_event_id: event.id,
+        review_decision: finalDecision === 'confirm' ? 'confirmed' : 'rejected',
+        reason,
+        reviewer: from,
+        reviewed_target: event.user || event.payload?.target || {},
+        reviewed_target_key: targetKey(event.user || event.payload?.target || {}),
+        admin_verified: true,
+        false_positive_reason: finalDecision === 'reject' ? reason : '',
+        evidence: [`admin callback ${finalDecision === 'confirm' ? 'confirmed scam flag' : 'rejected scam flag'} ${event.id}: ${reason}`]
+      });
+      await this.editInteractiveMessage(chatId, message.message_id, `${finalDecision === 'confirm' ? '🚫 Confirmed scam.' : '✅ Rejected flag as false positive.'}\n\nSaved review event: ${reviewEvent.id}`, [[button('↩️ Back to queue', callbackData('review-list', requester)), button('❔ Explain', callbackData('why', requester, shortId(reviewEvent.id))), button('✖️ Close', callbackData('close', requester))]], { parse_mode: 'HTML' });
+      return true;
+    }
+    return false;
+  }
+
   async handleMessage(message) {
     this.rememberSeenChat(message.chat || {});
     if (message.new_chat_members?.length) {
       await this.handleNewMembers(message);
       return;
     }
-    if (!message.text) return;
+    const fullMessageText = messageText(message);
+    if (!fullMessageText && !(message.forward_from || message.forward_sender_name || message.forward_from_chat)) return;
     if (message.chat?.type === 'private' && /^\/start\s+verify_/i.test(message.text)) {
       await this.sendJoinChallengeDmIntro(message);
       return;
@@ -2966,7 +3422,7 @@ export class TelegramShieldBot {
       await this.handleJoinChallengeMessage(message, challenge);
       return;
     }
-    if (message.text.startsWith('/')) {
+    if (String(message.text || '').startsWith('/')) {
       await this.handleCommand(message);
       return;
     }
@@ -2975,6 +3431,7 @@ export class TelegramShieldBot {
       await this.handleDmReport(message, evidenceText(message));
       return;
     }
+    if (await this.handleAlertReply(message)) return;
     if (this.isNaturalFalsePositiveReview(message) && await this.handleNaturalFalsePositiveReview(message)) return;
     if (await this.handleNaturalLanguageRequest(message)) return;
     if (this.isRiskQuery(message)) {
@@ -2986,7 +3443,8 @@ export class TelegramShieldBot {
         return;
       }
       const target = this.targetFromMention(message) || explicitNamedTarget || sangmataTargetFromText(targetMessage.text || '') || actorFromMessage(targetMessage);
-      const risk = await this.assess({ ...message, from: target }, target, `${message.text}\n${targetMessage.text || ''}`);
+      const targetEvidenceText = [fullMessageText, messageText(targetMessage)].filter(Boolean).join('\n');
+      const risk = await this.assess({ ...message, from: target, text: targetEvidenceText }, target, targetEvidenceText);
       const event = await this.record('risk_query', { ...message, from: target }, risk);
       await this.recordConversationArtifact({ ...message, from: target }, { risk, text: `${message.text}\n${targetMessage.text || ''}`, artifactKind: 'safety_question', conversationRole: 'questioner', sourceEventIds: [event.id] });
       const finding = this.canPublishFindingFromRisk(risk) ? await this.publishHighConfidenceFinding({ ...message, from: target }, risk) : null;
@@ -3017,7 +3475,7 @@ export class TelegramShieldBot {
     }
     if (message.chat?.type === 'private') return;
     const user = actorFromMessage(message);
-    const risk = await this.assess(message, user, message.text);
+      const risk = await this.assess({ ...message, text: fullMessageText }, user, fullMessageText);
     if (risk.confidence < this.config.actionThreshold) {
       await this.record('risk_check', message, risk);
 
@@ -3183,10 +3641,11 @@ export class TelegramShieldBot {
     const updates = await this.call('getUpdates', {
       offset: this.offset,
       timeout: 25,
-      allowed_updates: ['message', 'chat_member', 'my_chat_member']
+      allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member']
     });
     for (const update of updates) {
       this.offset = update.update_id + 1;
+      if (update.callback_query) await this.handleCallbackQuery(update.callback_query);
       if (update.message) await this.handleMessage(update.message);
       if (update.chat_member) await this.handleChatMemberUpdate(update.chat_member);
     }
@@ -3273,8 +3732,8 @@ export class TelegramShieldBot {
     const alertText = [
       '⚠️ CROSS-GROUP WARNING',
       `${mention} has prior admin action(s) in the Tracabot Context Graph from another community (${priorCount} recorded).`,
-      `Current risk: ${riskConf}%. Admins: use /review or /watchlist review to inspect and act.`,
-      `Event: ${shortId(warningEvent.id)} — /why ${warningEvent.id}`
+      `Current risk: ${riskConf}%. Admins: open Reviews from /start to inspect and act.`,
+      `Event: ${shortId(warningEvent.id)} — ask “why event ${warningEvent.id}?”`
     ].join('\n');
 
     let sent = null;
@@ -3317,7 +3776,7 @@ export class TelegramShieldBot {
 
   async dropPendingUpdates() {
     if (this.config.dropPendingUpdatesOnStart === false) return;
-    const updates = await this.call('getUpdates', { offset: -1, limit: 1, timeout: 0, allowed_updates: ['message', 'chat_member', 'my_chat_member'] });
+    const updates = await this.call('getUpdates', { offset: -1, limit: 1, timeout: 0, allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member'] });
     if (updates.length) this.offset = updates[0].update_id + 1;
   }
 

@@ -51,6 +51,11 @@ function commitReceiptId({ artifactKind = '', quality = 0, risk = {}, sourceEven
   return `commit:${randomUUID().slice(0, 8)}:${Buffer.from(basis).toString('base64url').slice(0, 16)}`;
 }
 
+function writeTokenValid(input = {}, config = {}, env = process.env) {
+  const expected = env.TRACABOT_SKILL_WRITE_TOKEN || config.skillWriteToken || '';
+  return Boolean(expected && input.writeToken && String(input.writeToken) === String(expected));
+}
+
 function targetFromInput(input = {}) {
   return {
     id: input.telegramUserId || input.userId || input.id || '',
@@ -191,6 +196,7 @@ export class TracabotSkillService {
   }
 
   async reviewEvent(input = {}) {
+    if (!writeTokenValid(input, this.config)) throw new Error('review_event requires authorized write token');
     const decision = /overturn/i.test(input.decision || '') ? 'overturned' : 'upheld';
     const event = {
       id: randomUUID(),
@@ -288,7 +294,7 @@ export class TracabotSkillService {
     const risk = combineRisk({ analysis: local, dkgIntel, threshold: this.config.actionThreshold });
     const unsafe = Boolean(risk.is_scam || risk.confidence >= 60 || ['phishing', 'impersonation', 'giveaway', 'investment_scam'].includes(risk.scam_type));
     if (!unsafe) return { tool: 'monitor_chat_event', monitored: false, risk, writesDkg: false };
-    const adminVerified = Boolean(input.adminVerified || input.verifiedByAdmin);
+    const adminVerified = writeTokenValid(input, this.config) && Boolean(input.adminVerified || input.verifiedByAdmin);
     const highConfidence = Number(risk.confidence || 0) >= 95 && Number(risk.local_confidence || 0) >= 80;
     const event = {
       id: randomUUID(),
@@ -325,7 +331,7 @@ export class TracabotSkillService {
     const dkgIntel = await this.dkg.queryRiskIndicators({ username: target.username, userId: target.id, aliases: actorAliases(target), text });
     const local = this.analyzer({ text, user: { ...target, adminUsernames: [...this.config.adminIds].filter((id) => !/^\d+$/.test(id)) }, globalIntel: dkgIntel });
     const risk = combineRisk({ analysis: local, dkgIntel, threshold: this.config.actionThreshold });
-    const adminVerified = Boolean(input.adminVerified || input.verifiedByAdmin);
+    const adminVerified = writeTokenValid(input, this.config) && Boolean(input.adminVerified || input.verifiedByAdmin);
     const quality = artifactQuality({ risk, text, adminVerified });
     const writeDkg = adminVerified || quality >= 70 || (input.shareLowConfidence === true && quality >= 40);
     const sourceEventIds = input.sourceEventIds || [];

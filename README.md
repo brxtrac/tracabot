@@ -32,43 +32,33 @@ Telegram is one of the most active social surfaces for many Web3 and AI communit
 
 ## Commands
 
+- `/start` opens the inline Tracabot protection menu for stats, reviews, explanations, enforcement history, and settings.
 - `/scan` checks a user, Telegram ID, wallet, replied user, or replied SangMata rename alert against local heuristics and DKG Shared Memory, then returns a friendly risk verdict.
-- `/report` accepts replied reports and bare `@username` reports, analyzes replied or recently observed Telegram context for scam patterns like support-DM lures and admin impersonation, applies duplicate/rate-limit/reporter checks, and writes accepted reports to DKG Shared Memory.
-- `/dmreport` records off-platform Telegram DM impersonation scams when the suspect has not joined the group or has no `@username`. Use it with a name, claimed role/title, community/project, request made, wallet/link, or screenshot caption; accepted reports are written to DKG Shared Memory for cross-community warnings.
+- `/report` queues suspicious replied messages, usernames, wallets, links, forwarded DMs, screenshots, or natural-language report evidence for admin review. Reports do not directly write fraud memory or trigger enforcement before review.
 - `/ban` is restricted to configured admins or Telegram chat admins; it bans replied users or users extracted from replied SangMata rename alerts only when the bot has Telegram ban rights and logs full evidence.
-- `/stats` returns readable DKG aggregate activity for recent fraud events, high-confidence findings, risk types, and action guidance.
-- `/stats campaigns` shows repeated domains, wallets, scam patterns, or text fingerprints from recent local memory.
-- `/why <event-id>` explains the local and DKG evidence behind a tracabot decision, including Shared Memory write metadata and publish status when available.
-- `/watch` and `/unwatch` are admin-only scrutiny controls when replying to a user or SangMata rename alert; `/watch <telegram-id>`, `/watch @user`, `/unwatch <telegram-id>`, and `/unwatch @user` also work. ID/reply-based use creates a clickable Telegram mention and boosts future risk scoring without banning by itself.
-- `/watchlist` is admin-only and shows local active watches, temporary mutes, and pending review items for follow-up.
-- `/challenge on|off|status` is admin-only and toggles the new-user DKG join challenge per chat without restarting the bot.
-- `/conversation on|off|status` is admin-only and toggles natural language / agentic chat mode per group (default on). When enabled, users can mention the bot or reply and speak naturally; TRACaBot classifies intent and maps requests to scans, reports, DKG memory queries, stats, evidence explanations, etc. The agent stays strictly on anti-scam + fraud intelligence topics and answers briefly.
-- `/appeal <event-id> reason` records a correction request to DKG Shared Memory.
-- `/review [@user|event-id] uphold|overturn reason` is admin-only and writes a DKG review decision for future audits and false-positive correction. Reply-based review inference also works.
-- `/digest` summarizes recent bans, restrictions, reports, watches, appeals, reviews, and campaign signals.
-- `/status` is admin-only and shows DKG reachability, DKG/OpenClaw adapter version/capabilities, Telegram permissions, thresholds, learning policy, conversational mode, and proactive cross-group prior-action alert status (in-chat + admin DMs when history exists in the Context Graph) without exposing secrets.
-- `/help` explains commands, autonomous thresholds, safeguards, and the DKG shared-memory loop for admins.
+- `/mute` is restricted to admins and temporarily restricts a replied or mentioned user.
+
+Stats, campaigns, sources, reviews, settings, and recent enforcement actions are available through `/start` menu buttons instead of public slash commands. Admins can also reply naturally to review alerts with explicit verdicts such as “confirm scam” or “reject as not a scam”; non-admin corrections are logged as appeals.
 
 ## Community Workflow
 
 Community members can use TRACaBot without needing admin permissions:
 
 - Reply to a suspicious message with `/scan` to get a risk verdict before engaging.
-- Reply with `/report` when a message, username, wallet, or link looks like a scam. Accepted reports become evidence-backed DKG Shared Memory; weak or duplicate reports stay local-only.
-- Use `/dmreport` for scam DMs, fake support accounts, or impersonators who contact members outside the group.
-- Use `/why <event-id>` when TRACaBot returns an event ID and you want to understand the evidence behind a decision.
-- Use `/appeal <event-id> reason` if you think a report, restriction, or ban was wrong.
+- Reply with `/report` when a message, username, wallet, or link looks like a scam. Reports are queued for admin review before any DKG fraud memory is written.
+- Use `/report` with forwarded DM context, a screenshot caption, or a clear description for scam DMs and fake support accounts.
+- Open `/start` and use Explain Event when TRACaBot returns an event ID and you want to understand the evidence behind a decision.
+- Reply naturally to a bot review alert if you think a report, restriction, or ban was wrong; non-admin corrections are logged as appeals.
 
 ## Admin Workflow
 
 Admins keep enforcement guarded and auditable:
 
 - Use `/ban` only as a reply to a scammer, scam message, or supported SangMata rename alert. The bot must have Telegram ban rights.
-- Use `/watch` for suspicious accounts that should receive extra scrutiny but should not be banned yet.
-- Use `/watchlist` to see watched users, temporary mutes, and pending review items.
-- Use `/review [@user|event-id] uphold|overturn reason` to resolve appeals or false positives. Review decisions are written to DKG Shared Memory.
-- Use `/stats`, `/stats campaigns`, and `/digest` to understand recent detections, repeated scam waves, and recommended follow-up.
-- Use `/status` to verify bot permissions, DKG/OpenClaw adapter versions and memory capabilities, thresholds, learning policy, and conversational mode without exposing secrets.
+- Open `/start` and use Reviews to see pending review items and temporary mutes.
+- Reply naturally to review alerts with an explicit verdict to resolve appeals or false positives. Review decisions are written to DKG Shared Memory.
+- Open `/start` and use Stats/Campaigns to understand recent detections, repeated scam waves, and recommended follow-up.
+- Open `/start` and use Settings/Status to verify bot permissions, DKG/OpenClaw adapter versions and memory capabilities, thresholds, learning policy, and conversational mode without exposing secrets.
 
 ## Campaign Summaries
 

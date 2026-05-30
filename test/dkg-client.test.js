@@ -208,6 +208,43 @@ test('risk lookups use shared actor aliases and telegram ids across communities'
   assert.deepEqual(intel.evidence.map((item) => item.eventId), ['by-id', 'by-alias']);
 });
 
+test('admin history escapes identifiers and ignores false-positive or non-production bindings', async () => {
+  const queries = [];
+  const dkg = new DkgClient({ contextGraph: 'tracabot' });
+  dkg.queryBindings = async (sparql) => {
+    queries.push(sparql);
+    return [
+      {
+        g: 'did:dkg:context-graph:tracabot/_shared_memory',
+        eventType: 'review_overturned',
+        confidence: '100'
+      },
+      {
+        g: 'did:dkg:context-graph:legacy/_shared_memory',
+        eventType: 'ban_executed',
+        confidence: '100'
+      },
+      {
+        g: 'did:dkg:context-graph:tracabot/_shared_memory',
+        eventType: 'ban_executed',
+        confidence: '100',
+        testMode: 'true'
+      },
+      {
+        g: 'did:dkg:context-graph:tracabot/_shared_memory',
+        eventType: 'review_upheld',
+        confidence: '90'
+      }
+    ];
+  };
+  const history = await dkg.queryAdminHistoryForActor({ userId: 42, username: 'bad" } UNION { ?x ?y ?z } #' });
+  assert.equal(history.hasPriorAdminAction, true);
+  assert.deepEqual(history.events.map((event) => event.eventType), ['review_upheld']);
+  assert.match(queries[0], /"42"/);
+  assert.match(queries[0], /"badunionxyz"/);
+  assert.doesNotMatch(queries[0], /UNION \{ \?x \?y \?z \}/);
+});
+
 test('risk lookups use shared scam domains across communities', async () => {
   const queries = [];
   const dkg = new DkgClient({ contextGraph: 'tracabot' });

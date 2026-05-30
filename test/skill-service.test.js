@@ -13,7 +13,7 @@ const execFileAsync = promisify(execFile);
 function makeService() {
   const dkgWrites = [];
   const service = new TracabotSkillService({
-    config: { adminIds: new Set(['admin']), actionThreshold: 85, agentDid: 'did:dkg:agent:test' },
+    config: { adminIds: new Set(['admin']), actionThreshold: 85, agentDid: 'did:dkg:agent:test', skillWriteToken: 'test-write-token' },
     analyzer: ({ text }) => ({ is_scam: /support|wallet/i.test(text), confidence: /support|wallet/i.test(text) ? 75 : 0, scam_type: /support|wallet/i.test(text) ? 'impersonation' : 'other', evidence: /support|wallet/i.test(text) ? ['support wallet lure'] : [], recommended_action: 'warn' }),
     dkg: {
       async queryRiskIndicators() { return { riskScore: 20, reportsAcrossCommunities: 1, wallets: [], domains: [], patterns: ['impersonation'], evidence: [{ eventId: 'prior', ual: 'did:dkg:context-graph:tracabot/_shared_memory' }] }; },
@@ -46,7 +46,8 @@ test('skill service watchlist and digest stay local', () => {
 test('skill service appeal and review write DKG evidence', async () => {
   const { service, dkgWrites } = makeService();
   const appeal = await service.submitAppeal({ eventId: 'evt-1', reason: 'false positive', actorUsername: 'admin' });
-  const review = await service.reviewEvent({ eventId: 'evt-1', decision: 'overturn', reason: 'appeal accepted', actorUsername: 'admin' });
+  await assert.rejects(() => service.reviewEvent({ eventId: 'evt-1', decision: 'overturn', reason: 'appeal accepted', actorUsername: 'admin' }), /authorized write token/);
+  const review = await service.reviewEvent({ eventId: 'evt-1', decision: 'overturn', reason: 'appeal accepted', actorUsername: 'admin', writeToken: 'test-write-token' });
   assert.equal(appeal.tool, 'submit_appeal');
   assert.equal(review.decision, 'overturned');
   assert.ok(dkgWrites.some((event) => event.event_type === 'appeal_submitted'));
@@ -61,6 +62,14 @@ test('skill service monitors unsafe chat events through DKG working memory', asy
   assert.equal(result.monitored, true);
   assert.equal(result.writesDkg, true);
   assert.equal(dkgWrites[0].event_type, 'unsafe_chat_event');
+  assert.equal(dkgWrites[0].payload.publication_status, 'shared_memory');
+});
+
+test('skill service ignores untrusted adminVerified flags without write token', async () => {
+  const { service, dkgWrites } = makeService();
+  const result = await service.monitorChatEvent({ telegramUserId: '8388593201', username: 'fake_support', text: 'official support says verify wallet now', adminVerified: true });
+  assert.equal(result.adminVerified, false);
+  assert.equal(dkgWrites[0].payload.admin_verified, false);
   assert.equal(dkgWrites[0].payload.publication_status, 'shared_memory');
 });
 

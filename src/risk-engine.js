@@ -102,7 +102,7 @@ export function formatRiskAssessment({ target, risk }) {
   const name = displayName(target);
   const verdict = risk.confidence >= 85 ? 'HIGH RISK' : risk.confidence >= 60 ? 'REVIEW' : 'LOW RISK';
   const evidence = publicEvidence(risk).join('; ') || 'No strong public scam signal found.';
-  return `TRACaBot check for ${name}: ${verdict} (${risk.confidence}%). Type: ${risk.scam_type}. Public signals: ${evidence}. Ask an admin to review. Users can reply with /appeal and an optional reason.`;
+  return `TRACaBot check for ${name}: ${verdict} (${risk.confidence}%). Type: ${risk.scam_type}. Public signals: ${evidence}. Ask an admin to review. Flagged users can reply directly to the alert with an appeal or correction.`;
 }
 
 /**
@@ -146,15 +146,9 @@ export function formatScanReply({ target, risk, eventId = '', findingId = '' }) 
 
 export function formatReportReply(event, decision = null) {
   if (decision && decision.decision !== 'accepted') {
-    return `⚠️ I need stronger evidence before sharing this with the DKG fraud memory. Reply to the suspicious message, mention a recently active suspect, or include the wallet, link, or text that should be checked.`;
+    return `⚠️ I need stronger evidence before sending this to admin review. Reply to the suspicious message, mention a recently active suspect, or include the wallet, link, or text that should be checked.`;
   }
-  if (event?.dkg?.publish) {
-    return '✅ Reported. I saved the evidence to DKG fraud memory and published the high-confidence signal for cross-community protection.';
-  }
-  if (event?.dkg?.publish_error) {
-    return '✅ Reported. I saved the evidence to DKG fraud memory. Public sharing was attempted, but the local DKG node did not confirm publication yet.';
-  }
-  return '✅ Reported. I saved the evidence to DKG fraud memory so future checks can use it.';
+  return '✅ Reported. I added this to the admin review queue. Admins can review it from the Tracabot menu.';
 }
 
 export function formatBanReply(target, eventId) {
@@ -192,7 +186,7 @@ export function formatStatsReply(stats) {
   const total = stats.total || 0;
   const graph = stats.graph || 'tracabot';
   if (!total) {
-    return `📊 TRACaBot report (7d): all quiet. DKG graph ${graph} shows 0 production events and 0 high-confidence signals.\nVault is looking solid. Use /stats sources for receipts.`;
+    return `📊 TRACaBot report (7d): all quiet. DKG graph ${graph} shows 0 production events and 0 high-confidence signals.\nVault is looking solid. Use Stats > Sources for receipts.`;
   }
   const highRate = Math.round((high / total) * 100);
   const verdict = high >= 10 || highRate >= 50 ? 'hot week' : high >= 3 ? 'active watch' : 'mostly calm';
@@ -206,7 +200,7 @@ export function formatStatsReply(stats) {
   return [
     `📊 TRACaBot report (7d): ${verdict}. ${plural(high, 'high-confidence signal')} from ${plural(total, 'DKG event')} (${highRate}%).`,
     `Top pattern: ${topRisk}. Actions: ${plural(bans, 'ban')}, ${plural(reports, 'report')}, ${plural(scans, 'scan')}.`,
-    `${closing} Source: DKG graph ${graph}; /stats sources shows IDs.`
+    `${closing} Source: DKG graph ${graph}; Stats > Sources shows IDs.`
   ].join('\n');
 }
 
