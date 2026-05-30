@@ -1118,11 +1118,13 @@ test('/start opens protection menu and explains direct commands', async () => {
     text: '/start'
   });
   const help = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
-  assert.match(help, /protect|Tracabot/i);
-  assert.match(help, /delete\/restrict at 75%/);
-  assert.match(help, /\/scan|\/report|\/ban|\/mute/);
-  assert.doesNotMatch(help, /\/tracabot|\/dashboard|\/settings|\/review|\/stats|\/watch|\/unwatch|\/appeal|\/banlist|\/dmreport|\/watchlist|\/why event-id|\/digest|\/challenge|\/conversation/);
-  assert.match(help, /shared fraud evidence/);
+  assert.match(help, /Welcome to Tracabot/i);
+  assert.match(help, /Choose an option below/);
+  assert.match(help, /tracabot\.com/);
+  for (const command of ['/tracabot', '/dashboard', '/settings', '/review', '/stats', '/watch', '/unwatch', '/appeal', '/banlist', '/dmreport', '/watchlist', '/why event-id', '/digest', '/challenge', '/conversation']) {
+    assert.ok(!help.split('\n').some((line) => line.trim().startsWith(command)), `expected /start copy not to include ${command}`);
+  }
+  assert.doesNotMatch(help, /Autonomous policy|Testing note|delete\/restrict|<user\|id\|wallet/i);
   assert.doesNotMatch(help, /Context Graph tracabot/);
   assert.ok(calls.find((call) => call.method === 'sendMessage')?.payload.reply_markup?.inline_keyboard?.some((row) => row.some((button) => String(button.text).includes('Stats'))));
 });

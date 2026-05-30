@@ -925,24 +925,14 @@ export class TelegramShieldBot {
   }
 
   formatHelp() {
-    const warn = this.config.warnThreshold ?? 60;
-    const restrict = this.config.restrictThreshold ?? 75;
-    const ban = this.config.banThreshold ?? this.config.actionThreshold ?? 85;
     return [
-      '🛡️ Tracabot protection menu',
-      '/start opens this interactive menu. Use the buttons for stats, reviews, settings, enforcement, and explanations.',
-      '/scan <user|id|wallet|message> - check risk using local analysis + DKG shared memory. Best used as a reply to the exact message/user.',
-      '/report <user|wallet|text> - report suspicious evidence for admin review. Reply to a message, forward a DM, include @username when available, and add as much detail as possible.',
-      '/ban - admin-only; reply to a user to ban and publish evidence.',
-      '/mute [duration] - admin-only; reply to or mention a user to mute. Examples: /mute 5 minutes, /mute 1 day. Default is 24 hours.',
-      'Ask naturally for explanations: “why was this flagged?” or “explain event <id>”. Non-admin replies to flags are logged as appeals automatically.',
+      '🛡️ Welcome to Tracabot',
       '',
-      `Autonomous policy: warn/log at ${warn}%, delete/restrict at ${restrict}%, delete/ban at ${ban}%.`,
-      'DKG memory: reads and writes shared fraud evidence for cross-community protection.',
-      `Join challenge default: ${this.config.joinChallenge ? `new users verify with a Knowledge Asset address within ${this.config.joinChallengeTtlSeconds || 60}s` : 'off'}.`,
-      'Conversational / agent mode (per group, default on): mention me or reply and speak naturally. The LLM agent parses your intent, can use Context Graph memory/tools when relevant, and answers directly. Admins can toggle it from Settings in this menu.',
-      'Safeguards: no auto-action against Telegram admins or bot accounts; weak reports stay local. Privileged actions still require explicit commands or admin confirmation.',
-      'Testing note: Bot message auto-deletion is limited to /help responses and join challenge flows only. Normal conversations and most commands no longer auto-delete their replies.'
+      'I help communities spot scam patterns, review suspicious reports, and protect members with shared DKG memory.',
+      '',
+      'Choose an option below to check risk, review reports, or see what Tracabot has learned.',
+      '',
+      'More info: https://tracabot.com'
     ].join('\n');
   }
 
@@ -1380,7 +1370,8 @@ export class TelegramShieldBot {
   dashboardText() {
     return [
       '🛡️ Tracabot protection menu',
-      'Choose an action below. For direct message/user actions, use /scan, /report, /ban, or /mute as a reply to the exact message.'
+      '',
+      'Choose an option below.'
     ].join('\n');
   }
 
