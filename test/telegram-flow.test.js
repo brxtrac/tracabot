@@ -1129,7 +1129,7 @@ test('/start opens protection menu and explains direct commands', async () => {
     text: '/start'
   });
   const help = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
-  assert.match(help, /🟢 <b>TRACaBot Agent online<\/b>/i);
+  assert.match(help, /TRACaBot Agent online/i);
   assert.match(help, /TRACaBot|Scammers|Bots|Persistent memory|agentic|agents|community/i);
   assert.doesNotMatch(help, /tracabot\.com/);
   assert.doesNotMatch(help, /I help communities|Choose an option below|More info:/);
@@ -1537,7 +1537,7 @@ test('help button explains TRACaBot commands and menu returns home', async () =>
   assert.ok(menuButton, 'missing Menu button');
   await bot.handleCallbackQuery({ id: 'menu-cb', from: { id: 1, username: 'admin' }, message: { chat, message_id: 541 }, data: menuButton.callback_data });
   const homePanel = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload;
-  assert.match(homePanel.text || '', /🟢 <b>TRACaBot Agent online<\/b>/);
+  assert.match(homePanel.text || '', /TRACaBot Agent online/);
   assert.doesNotMatch(homePanel.text || '', /tracabot\.com/);
   assert.doesNotMatch(homePanel.text || '', /Choose an option below|TRACaBot Help/);
 

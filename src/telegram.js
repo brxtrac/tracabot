@@ -956,7 +956,7 @@ export class TelegramShieldBot {
   formatHelp() {
     const punchLine = START_PUNCH_LINES[Math.floor(Math.random() * START_PUNCH_LINES.length)];
     return [
-      '🟢 <b>TRACaBot Agent online</b>',
+      '🛡️ TRACaBot Agent online',
       '',
       punchLine
     ].join('\n');
