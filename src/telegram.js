@@ -3350,6 +3350,17 @@ export class TelegramShieldBot {
     const eventId = parsed.parts[1] || '';
     const callbackMessage = { chat: message.chat, from, message_id: message.message_id, text: '' };
     const trusted = await this.isTrustedModerator(callbackMessage).catch(() => false);
+    if (parsed.action === 'close') {
+      if (requester && String(from.id || from.username || '') !== String(requester) && !trusted) {
+        await this.answerCallback(query.id, 'Open your own panel to close it.');
+        return true;
+      }
+      await this.answerCallback(query.id);
+      await this.call('deleteMessage', { chat_id: chatId, message_id: message.message_id }).catch(async () => {
+        await this.editInteractiveMessage(chatId, message.message_id, 'Closed.', [], {});
+      });
+      return true;
+    }
     if (requester && String(from.id || from.username || '') !== String(requester)) {
       await this.answerCallback(query.id, 'Open your own panel to use these buttons.');
       return true;
@@ -3359,13 +3370,6 @@ export class TelegramShieldBot {
       return true;
     }
     await this.answerCallback(query.id);
-
-    if (parsed.action === 'close') {
-      await this.call('deleteMessage', { chat_id: chatId, message_id: message.message_id }).catch(async () => {
-        await this.editInteractiveMessage(chatId, message.message_id, 'Closed.', [], {});
-      });
-      return true;
-    }
 
     if (parsed.action === 'dashboard') {
       await this.editInteractiveMessage(chatId, message.message_id, this.formatHelp(), this.dashboardKeyboard(requester));

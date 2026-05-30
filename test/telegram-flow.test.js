@@ -1578,6 +1578,21 @@ test('settings callback rejects non-admin requesters', async () => {
   assert.ok(calls.some((call) => call.method === 'answerCallbackQuery' && String(call.payload.text).includes('Admin only')));
 });
 
+test('admins can close other panels but non-admins cannot', async () => {
+  const { bot, calls } = makeBot({ canBan: true, trustedUserIds: [1] });
+  const chat = { id: -100, title: 'demo' };
+  const ownerPanel = await openMenu(bot, calls, chat, { id: 2, username: 'member' }, 47);
+  const closeData = buttonByText(ownerPanel, 'Close').callback_data;
+
+  await bot.handleCallbackQuery({ id: 'close-admin', from: { id: 1, username: 'admin' }, message: { chat, message_id: ownerPanel.message_id || 47 }, data: closeData });
+  assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === (ownerPanel.message_id || 47)));
+
+  const before = calls.length;
+  await bot.handleCallbackQuery({ id: 'close-other-member', from: { id: 3, username: 'other' }, message: { chat, message_id: ownerPanel.message_id || 47 }, data: closeData });
+  assert.ok(calls.slice(before).some((call) => call.method === 'answerCallbackQuery' && String(call.payload.text).includes('Open your own panel')));
+  assert.equal(calls.slice(before).some((call) => call.method === 'deleteMessage'), false);
+});
+
 test('/settings lets admins toggle new-user join challenge per chat', async () => {
   const { bot, calls } = makeBot({
     canBan: true,
