@@ -1508,6 +1508,10 @@ test('help button explains TRACaBot commands and menu returns home', async () =>
   assert.match(homePanel.text || '', /TRACaBot Agent online/);
   assert.match(homePanel.text || '', /🌐 https:\/\/tracabot\.com/);
   assert.doesNotMatch(homePanel.text || '', /Choose an option below|TRACaBot Help/);
+
+  await bot.handleCallbackQuery({ id: 'old-help-cb', from: { id: 1, username: 'admin' }, message: { chat, message_id: 542 }, data: ['tc', 'v1', 'help-scan', '1'].join(':') });
+  const legacyHelpPanel = calls.filter((call) => call.method === 'editMessageText' && String(call.payload.text).includes('TRACaBot Help')).at(-1)?.payload;
+  assert.match(legacyHelpPanel.text || '', /TRACaBot Help/);
 });
 
 test('/review with no args shows latest pending review items', async () => {

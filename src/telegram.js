@@ -3381,7 +3381,7 @@ export class TelegramShieldBot {
       await this.editInteractiveMessage(chatId, message.message_id, this.formatReviewPanel(filter), this.reviewPanelKeyboard(requester, filter), { parse_mode: 'HTML', disable_web_page_preview: true });
       return true;
     }
-    if (['stats', 'stats-sources', 'campaigns', 'banlist', 'status', 'challenge-set', 'conversation-set', 'help', 'why'].includes(parsed.action)) {
+    if (['stats', 'stats-sources', 'campaigns', 'banlist', 'status', 'challenge-set', 'conversation-set', 'help', 'help-scan', 'why'].includes(parsed.action)) {
       if (requester && String(from.id || from.username || '') !== String(requester)) {
         await this.answerCallback(query.id, 'Open your own panel to use these buttons.');
         return true;
@@ -3425,7 +3425,7 @@ export class TelegramShieldBot {
         await this.editInteractiveMessage(chatId, message.message_id, this.settingsText(chatId), this.settingsKeyboard(requester, chatId));
         return true;
       }
-      if (parsed.action === 'help') {
+      if (parsed.action === 'help' || parsed.action === 'help-scan') {
         await this.editInteractiveMessage(chatId, message.message_id, this.formatMenuHelp(), this.mainNavKeyboard(requester));
         return true;
       }
