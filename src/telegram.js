@@ -936,11 +936,15 @@ export class TelegramShieldBot {
         ? 'TRACaBot flagged this for admin review.'
         : 'TRACaBot needs an admin review.',
       riskLine,
-      'Reply naturally: admins can say “confirm scam” or “reject as not a scam”; non-admin replies are logged as appeals.'
+      'Admins: use the buttons below to confirm or reject this flag. Non-admin replies are logged as appeals.'
       // No longer duplicating the full original message as "Context:" — we reply directly to it (see below)
     ].filter(Boolean).join('\n');
 
-    const sent = await this.send(message.chat.id, text, { reply_to_message_id: message.message_id });
+    const requesterId = this.config.adminIds.values().next().value || 'admin';
+    const reviewButtons = event?.id ? this.reviewActionKeyboard(requesterId, event.id) : [];
+    const sent = reviewButtons.length
+      ? await this.sendInteractiveReply(message.chat.id, text, reviewButtons, { reply_to_message_id: message.message_id })
+      : await this.send(message.chat.id, text, { reply_to_message_id: message.message_id });
     if (sent?.message_id && event?.id) {
       this.reviewMessageEvents.set(`${message.chat.id}:${sent.message_id}`, event.id);
     }
@@ -1151,16 +1155,22 @@ export class TelegramShieldBot {
       if (eventAgeMs(event) > 7 * 24 * 60 * 60 * 1000) return false;
       const reviewed = event.payload?.reviewed_target || {};
       const reviewedKey = event.payload?.reviewed_target_key || targetKey(reviewed);
+      const sameTarget = Boolean(
+        (key && reviewedKey === key)
+        || (id && reviewed.id && String(reviewed.id) === id)
+        || (username && reviewed.username && String(reviewed.username).replace(/^@/, '').toLowerCase() === username)
+      );
       const original = this.findEvent(event.payload?.target_event_id || '');
+      const sameOriginalTarget = Boolean(original && key && targetKey(original.user || original.payload?.target || {}) === key);
+      if (!sameTarget && !sameOriginalTarget) return false;
       const originalText = [original?.payload?.message_text, original?.payload?.evidence?.join('\n'), original?.text].filter(Boolean).join('\n');
       const originalFingerprint = textFingerprint(originalText);
       const currentFingerprint = textFingerprint(text);
-      if (!originalFingerprint || !currentFingerprint || originalFingerprint !== currentFingerprint) return false;
+      const sameEvidence = Boolean(originalFingerprint && currentFingerprint && originalFingerprint === currentFingerprint);
+      const concreteAdminSafeDecision = Boolean(event.payload?.reviewed_target_key || event.payload?.reviewed_target?.id || event.payload?.reviewed_target?.username);
+      if (!sameEvidence && !concreteAdminSafeDecision) return false;
       if ((dkgIntel.wallets || []).length || (dkgIntel.domains || []).length || (dkgIntel.evidence || []).length) return false;
-      if (key && reviewedKey === key) return true;
-      if (id && reviewed.id && String(reviewed.id) === id) return true;
-      if (username && reviewed.username && String(reviewed.username).replace(/^@/, '').toLowerCase() === username) return true;
-      return Boolean(original && targetKey(original.user || {}) === key);
+      return true;
     }) || null;
   }
 

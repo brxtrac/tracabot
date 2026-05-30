@@ -220,6 +220,9 @@ test('DKG-backed high-risk first post is deleted and sent to admin review when b
   assert.equal(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 166), false);
   assert.equal(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 166), false);
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')));
+  const alert = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review'))?.payload;
+  assert.ok(buttonByText(alert, 'Confirm scam'));
+  assert.ok(buttonByText(alert, 'Reject flag'));
   assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user.id === 166 && event.payload.recommended_action === 'admin_review'));
 });
 
@@ -273,8 +276,8 @@ test('DKG-backed high-risk join asks for admin review without ban-rights wording
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')));
   const alert = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review'))?.payload.text || '';
   assert.match(alert, /for admin review.*DKG-backed|flagged .* for admin review/);
-  assert.match(alert, /Reply naturally/);
-  assert.match(alert, /non-admin replies are logged as appeals/);
+  assert.match(alert, /use the buttons below/);
+  assert.match(alert, /Non-admin replies are logged as appeals/);
   assert.doesNotMatch(alert, /ban rights|Recommendation: ban/i);
   assert.doesNotMatch(alert, /DKG UAL|DKG event|did:dkg:context-graph|event ID/);
   assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.local_only));
@@ -1439,8 +1442,11 @@ test('natural admin review infers event when admin replies to bot review alert',
   assert.ok(dkgWrites.some((event) => event.event_type === 'review_overturned' && event.payload.target_event_id === reviewSource.id));
 });
 
-test('/review reject does not globally suppress future enforcement for the reviewed user', async () => {
-  const { bot, calls } = makeBot({ canBan: true });
+test('/review reject suppresses future flags for the reviewed user without new concrete evidence', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] }
+  });
   const chat = { id: -100, title: 'demo' };
   bot.store.append({
     id: 'evt-false-positive',
@@ -1458,8 +1464,8 @@ test('/review reject does not globally suppress future enforcement for the revie
   });
   assert.equal(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 4242), false);
   assert.equal(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 4242), false);
-  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')), true);
-  assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user.id === 4242));
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')), false);
+  assert.equal(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user.id === 4242 && event.id !== 'evt-false-positive'), false);
 });
 
 test('/start review panel shows active mutes and review items', async () => {
