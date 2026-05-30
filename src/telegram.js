@@ -492,13 +492,6 @@ export class TelegramShieldBot {
     }, Number(ttlSeconds) * 1000).unref?.();
   }
 
-  scheduleKeyboardExpiry(chatId, messageId, ttlSeconds = 300) {
-    if (!this.config.autoDeleteBotMessages || !messageId || Number(chatId) > 0 || Number(ttlSeconds) <= 0) return;
-    setTimeout(() => {
-      this.call('editMessageReplyMarkup', { chat_id: chatId, message_id: messageId, reply_markup: inlineKeyboard([]) }).catch(() => null);
-    }, Number(ttlSeconds) * 1000).unref?.();
-  }
-
   async sendEphemeral(chatId, text, extra = {}, ttlSeconds = this.config.botMessageTtlSeconds || 60) {
     const sent = await this.send(chatId, text, extra);
     const isPrivate = extra.private === true || Number(chatId) > 0;
@@ -516,9 +509,7 @@ export class TelegramShieldBot {
   }
 
   async sendInteractiveReply(chatId, text, rows = [], extra = {}) {
-    const sent = await this.sendCommandReply(chatId, text, { ...extra, reply_markup: inlineKeyboard(rows) });
-    this.scheduleKeyboardExpiry(chatId, sent?.message_id);
-    return sent;
+    return this.sendCommandReply(chatId, text, { ...extra, reply_markup: inlineKeyboard(rows) });
   }
 
   async menuIntro(message = {}) {

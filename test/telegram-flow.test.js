@@ -1141,27 +1141,6 @@ test('/start opens protection menu and explains direct commands', async () => {
   assert.ok(calls.find((call) => call.method === 'sendMessage')?.payload.reply_markup?.inline_keyboard?.some((row) => row.some((button) => String(button.text).includes('Stats'))));
 });
 
-test('inline keyboards expire after five minutes in group chats', async () => {
-  const { bot, calls } = makeBot({ canBan: true });
-  const originalSetTimeout = globalThis.setTimeout;
-  const timers = [];
-  globalThis.setTimeout = (fn, delay) => {
-    timers.push({ fn, delay });
-    return { unref() {} };
-  };
-  try {
-    await bot.handleCommand({ chat: { id: -100, title: 'demo' }, from: { id: 1, username: 'admin' }, message_id: 30, text: '/start' });
-  } finally {
-    globalThis.setTimeout = originalSetTimeout;
-  }
-
-  assert.equal(timers.some((timer) => timer.delay === 300000), true);
-  await timers.find((timer) => timer.delay === 300000).fn();
-  const expiry = calls.find((call) => call.method === 'editMessageReplyMarkup');
-  assert.equal(expiry.payload.chat_id, -100);
-  assert.equal(expiry.payload.reply_markup.inline_keyboard.length, 0);
-});
-
 test('/settings status panel reports permissions without exposing secrets', async () => {
   const { bot, calls } = makeBot({ canBan: true, trustedUserIds: [1], adminIds: ['1'] });
   const chat = { id: -100, title: 'demo' };
