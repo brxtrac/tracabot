@@ -951,13 +951,29 @@ export class TelegramShieldBot {
     return [
       '🛡️ TRACaBot Agent online',
       '',
-      'I help communities spot scams, learn from every attack, and turn shared memory into stronger protection across agents and communities.',
-      '',
-      'Choose an option below to check risk, review reports, or see what TRACaBot has processed, learned, and executed.',
-      '',
       punchLine,
       '',
-      'More info: https://tracabot.com'
+      '🌐 https://tracabot.com'
+    ].join('\n');
+  }
+
+  formatMenuHelp() {
+    return [
+      '❔ TRACaBot Help',
+      '',
+      'TRACaBot helps communities spot scams, learn from every attack, and turn shared memory into stronger protection across agents and communities.',
+      '',
+      'Commands',
+      '',
+      '/start - open the TRACaBot Agent menu.',
+      '/scan - check a user, wallet, link, or replied message for scam risk. Best used as a reply to the exact message or user.',
+      '/report - send suspicious users, messages, wallets, links, or forwarded DMs to admin review.',
+      '/ban - admin only; ban a replied user and record enforcement evidence.',
+      '/mute - admin only; mute a replied or mentioned user. Examples: /mute 5 minutes, /mute 1 day.',
+      '',
+      'How TRACaBot works',
+      '',
+      'TRACaBot processes reports, reviews, actions, and scam signals into persistent memory so agents and communities can recognize repeated patterns faster.'
     ].join('\n');
   }
 
@@ -1392,18 +1408,10 @@ export class TelegramShieldBot {
     return rows;
   }
 
-  dashboardText() {
-    return [
-      '🛡️ Tracabot protection menu',
-      '',
-      'Choose an option below.'
-    ].join('\n');
-  }
-
   dashboardKeyboard(requesterId) {
     return [
       [button('📊 Stats', callbackData('stats', requesterId)), button('🛡️ Reviews', callbackData('review-list', requesterId))],
-      [button('🔎 Scan help', callbackData('help-scan', requesterId)), button('🧾 Explain event', callbackData('why', requesterId))],
+      [button('❔ Help', callbackData('help', requesterId)), button('🧾 Explain event', callbackData('why', requesterId))],
       [button('👮 Enforcement', callbackData('banlist', requesterId)), button('⚙️ Settings', callbackData('settings', requesterId))],
       [button('✖️ Close', callbackData('close', requesterId))]
     ];
@@ -3347,7 +3355,7 @@ export class TelegramShieldBot {
     }
 
     if (parsed.action === 'dashboard') {
-      await this.editInteractiveMessage(chatId, message.message_id, this.dashboardText(), this.dashboardKeyboard(requester));
+      await this.editInteractiveMessage(chatId, message.message_id, this.formatHelp(), this.dashboardKeyboard(requester));
       return true;
     }
 
@@ -3373,7 +3381,7 @@ export class TelegramShieldBot {
       await this.editInteractiveMessage(chatId, message.message_id, this.formatReviewPanel(filter), this.reviewPanelKeyboard(requester, filter), { parse_mode: 'HTML', disable_web_page_preview: true });
       return true;
     }
-    if (['stats', 'stats-sources', 'campaigns', 'banlist', 'status', 'challenge-set', 'conversation-set', 'help-scan', 'why'].includes(parsed.action)) {
+    if (['stats', 'stats-sources', 'campaigns', 'banlist', 'status', 'challenge-set', 'conversation-set', 'help', 'why'].includes(parsed.action)) {
       if (requester && String(from.id || from.username || '') !== String(requester)) {
         await this.answerCallback(query.id, 'Open your own panel to use these buttons.');
         return true;
@@ -3417,8 +3425,8 @@ export class TelegramShieldBot {
         await this.editInteractiveMessage(chatId, message.message_id, this.settingsText(chatId), this.settingsKeyboard(requester, chatId));
         return true;
       }
-      if (parsed.action === 'help-scan') {
-        await this.editInteractiveMessage(chatId, message.message_id, '🔎 To scan: reply to a user/message with /scan, use /scan @username, or ask me naturally “scan this”.', this.dashboardKeyboard(requester));
+      if (parsed.action === 'help') {
+        await this.editInteractiveMessage(chatId, message.message_id, this.formatMenuHelp(), this.mainNavKeyboard(requester));
         return true;
       }
       if (parsed.action === 'why') {

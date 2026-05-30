@@ -1119,11 +1119,10 @@ test('/start opens protection menu and explains direct commands', async () => {
   });
   const help = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
   assert.match(help, /TRACaBot Agent online/i);
-  assert.match(help, /learn from every attack/);
-  assert.match(help, /shared memory into stronger protection across agents and communities/);
-  assert.match(help, /Choose an option below/);
-  assert.match(help, /processed, learned, and executed/);
+  assert.match(help, /TRACaBot|Scammers|Bots|Persistent memory|agentic|agents|community/i);
+  assert.match(help, /🌐 https:\/\/tracabot\.com/);
   assert.match(help, /tracabot\.com/);
+  assert.doesNotMatch(help, /I help communities|Choose an option below|More info:/);
   for (const command of ['/tracabot', '/dashboard', '/settings', '/review', '/stats', '/watch', '/unwatch', '/appeal', '/banlist', '/dmreport', '/watchlist', '/why event-id', '/digest', '/challenge', '/conversation']) {
     assert.ok(!help.split('\n').some((line) => line.trim().startsWith(command)), `expected /start copy not to include ${command}`);
   }
@@ -1490,14 +1489,25 @@ test('settings buttons update join challenge and conversation settings', async (
   assert.ok(bot.store.all().some((event) => event.event_type === 'conversational_setting_changed' && event.payload.enabled === false && event.local_only));
 });
 
-test('scan helper buttons explain risk and return to menu', async () => {
+test('help button explains TRACaBot commands and menu returns home', async () => {
   const { bot, calls } = makeBot({ canBan: true, analyzer: () => ({ is_scam: false, confidence: 20, scam_type: 'other', evidence: ['low risk'], recommended_action: 'ignore' }) });
   const chat = { id: -100, type: 'supergroup', title: 'demo' };
-  await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 54, text: '/scan @maybe_user' });
-  const panel = calls.find((call) => call.method === 'sendMessage' && call.payload.reply_markup)?.payload;
-  const whyButton = buttonByText(panel, 'Explain');
-  await bot.handleCallbackQuery({ id: 'scan-cb-2', from: { id: 1, username: 'admin' }, message: { chat, message_id: 541 }, data: whyButton.callback_data });
-  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('Why')));
+  const menu = await openMenu(bot, calls, chat, { id: 1, username: 'admin' }, 54);
+  assert.throws(() => buttonByText(menu, 'Scan help'));
+  const helpButton = buttonByText(menu, 'Help');
+  await bot.handleCallbackQuery({ id: 'help-cb', from: { id: 1, username: 'admin' }, message: { chat, message_id: 541 }, data: helpButton.callback_data });
+  const helpPanel = calls.find((call) => call.method === 'editMessageText' && String(call.payload.text).includes('TRACaBot Help'))?.payload;
+  assert.match(helpPanel.text || '', /spot scams, learn from every attack/);
+  assert.match(helpPanel.text || '', /shared memory into stronger protection across agents and communities/);
+  for (const command of ['/start', '/scan', '/report', '/ban', '/mute']) assert.match(helpPanel.text || '', new RegExp(command.replace('/', '\\/')));
+  assert.doesNotMatch(helpPanel.text || '', /DKG|Decentralized Knowledge Graph/);
+  const menuButton = helpPanel.reply_markup.inline_keyboard.flat().find((button) => String(button.text).includes('Menu'));
+  assert.ok(menuButton, 'missing Menu button');
+  await bot.handleCallbackQuery({ id: 'menu-cb', from: { id: 1, username: 'admin' }, message: { chat, message_id: 541 }, data: menuButton.callback_data });
+  const homePanel = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload;
+  assert.match(homePanel.text || '', /TRACaBot Agent online/);
+  assert.match(homePanel.text || '', /🌐 https:\/\/tracabot\.com/);
+  assert.doesNotMatch(homePanel.text || '', /Choose an option below|TRACaBot Help/);
 });
 
 test('/review with no args shows latest pending review items', async () => {
