@@ -216,6 +216,7 @@ test('admin history escapes identifiers and ignores false-positive or non-produc
     return [
       {
         g: 'did:dkg:context-graph:tracabot/_shared_memory',
+        s: 'https://tracabot.org/ontology#event/false-positive-safe',
         eventType: 'review_overturned',
         confidence: '100'
       },
@@ -239,7 +240,9 @@ test('admin history escapes identifiers and ignores false-positive or non-produc
   };
   const history = await dkg.queryAdminHistoryForActor({ userId: 42, username: 'bad" } UNION { ?x ?y ?z } #' });
   assert.equal(history.hasPriorAdminAction, true);
+  assert.equal(history.hasPriorFalsePositive, true);
   assert.deepEqual(history.events.map((event) => event.eventType), ['review_upheld']);
+  assert.deepEqual(history.falsePositiveEvents.map((event) => event.eventId), ['false-positive-safe']);
   assert.match(queries[0], /"42"/);
   assert.match(queries[0], /"badunionxyz"/);
   assert.doesNotMatch(queries[0], /UNION \{ \?x \?y \?z \}/);

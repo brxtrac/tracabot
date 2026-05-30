@@ -599,16 +599,29 @@ export class DkgClient {
     const severeEvents = bindings
       .filter(b => isProductionBindingForContext(b, this.config.contextGraph))
       .map(b => ({
+        eventId: eventIdFromSource(b.s),
         eventType: cleanValue(b.eventType),
         confidence: Number(cleanValue(b.confidence)) || 0,
         scamType: cleanValue(b.scamType),
         ual: cleanValue(b.g)
       }))
       .filter(e => severeTypes.includes(e.eventType) && e.confidence >= 70);
+    const falsePositiveEvents = bindings
+      .filter(b => isProductionBindingForContext(b, this.config.contextGraph))
+      .map(b => ({
+        eventId: eventIdFromSource(b.s),
+        eventType: cleanValue(b.eventType),
+        confidence: Number(cleanValue(b.confidence)) || 0,
+        scamType: cleanValue(b.scamType),
+        ual: cleanValue(b.g)
+      }))
+      .filter(e => e.eventType === 'review_overturned');
 
     return {
       hasPriorAdminAction: severeEvents.length > 0,
-      events: severeEvents
+      hasPriorFalsePositive: falsePositiveEvents.length > 0,
+      events: severeEvents,
+      falsePositiveEvents
     };
   }
 

@@ -585,7 +585,7 @@ test('review queue uses admin-scoped inline buttons and callback decisions', asy
   const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Reviews', 'review-menu');
   const openButton = panel.reply_markup.inline_keyboard.flat().find((item) => item.callback_data?.includes('review-open'));
   assert.ok(openButton);
-  await bot.handleCallbackQuery({ id: 'cb1', from: { id: 2, username: 'otheradmin' }, message: { chat: { id: -100, type: 'supergroup' }, message_id: panel.message_id || 20 }, data: openButton.callback_data });
+  await bot.handleCallbackQuery({ id: 'cb1', from: { id: 3, username: 'member' }, message: { chat: { id: -100, type: 'supergroup' }, message_id: panel.message_id || 20 }, data: openButton.callback_data });
   assert.ok(calls.some((call) => call.method === 'answerCallbackQuery' && String(call.payload.text).includes('Open your own panel')));
   await bot.handleCallbackQuery({ id: 'cb2', from: { id: 1, username: 'admin' }, message: { chat: { id: -100, type: 'supergroup' }, message_id: 20 }, data: openButton.callback_data });
   const opened = calls.find((call) => call.method === 'editMessageText' && String(call.payload.text).includes('Review'))?.payload;
@@ -596,6 +596,17 @@ test('review queue uses admin-scoped inline buttons and callback decisions', asy
   assert.match(finalScreen.text, /Confirmed scam/);
   assert.doesNotMatch(finalScreen.text, /Reply to this message with a reason|Submit confirmation/);
   assert.ok(finalScreen.reply_markup.inline_keyboard.flat().some((item) => item.text.includes('Back to queue')));
+});
+
+test('scam alert review buttons can be used by any trusted admin', async () => {
+  const { bot, calls } = makeBot({ canBan: true, trustedUserIds: [1, 2] });
+  const chat = { id: -100, type: 'supergroup' };
+  await bot.handleMessage({ chat, from: { id: 77, username: 'suspect', is_bot: false }, message_id: 21, text: 'known scam actor returns' });
+  const alert = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('flagged this for admin review'))?.payload;
+  const rejectData = buttonByText(alert, 'Reject flag').callback_data;
+  await bot.handleCallbackQuery({ id: 'alert-review-other-admin', from: { id: 2, username: 'otheradmin' }, message: { chat, message_id: alert.message_id || 22 }, data: rejectData });
+  assert.equal(calls.some((call) => call.method === 'answerCallbackQuery' && String(call.payload.text || '').includes('Open your own panel')), false);
+  assert.ok(bot.store.all().some((event) => event.event_type === 'review_overturned' && event.payload.reviewer.id === 2));
 });
 
 test('callback parser rejects malformed payloads and bounds generated data', async () => {
@@ -1502,6 +1513,23 @@ test('/review reject suppresses future flags for the reviewed user without new c
   assert.equal(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 4242), false);
   assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')), false);
   assert.equal(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user.id === 4242 && event.id !== 'evt-false-positive'), false);
+});
+
+test('context graph false-positive decision suppresses future flags for that user', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    dkgIntel: { riskScore: 90, reportsAcrossCommunities: 2, wallets: [], domains: [], patterns: ['impersonation'], evidence: [{ eventId: 'old-risk' }] }
+  });
+  bot.dkg.queryAdminHistoryForActor = async () => ({
+    hasPriorAdminAction: false,
+    hasPriorFalsePositive: true,
+    events: [],
+    falsePositiveEvents: [{ eventId: 'prior-safe', eventType: 'review_overturned' }]
+  });
+  const chat = { id: -100, title: 'demo' };
+  await bot.handleMessage({ chat, from: { id: 4242, username: 'coineazy', is_bot: false }, message_id: 35, text: 'support says claim now' });
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('flagged this for admin review')), false);
+  assert.equal(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user.id === 4242), false);
 });
 
 test('/start review panel shows active mutes and review items', async () => {

@@ -2685,8 +2685,8 @@ export class TelegramShieldBot {
           userId: targetUser.id,
           username: targetUser.username,
           aliases: actorAliases(targetUser)
-        }).catch(() => ({ hasPriorAdminAction: false, events: [] }))
-      : { hasPriorAdminAction: false, events: [] };
+        }).catch(() => ({ hasPriorAdminAction: false, hasPriorFalsePositive: false, events: [], falsePositiveEvents: [] }))
+      : { hasPriorAdminAction: false, hasPriorFalsePositive: false, events: [], falsePositiveEvents: [] };
 
     let priorAdminAlertEvent = null;
 
@@ -2718,7 +2718,7 @@ export class TelegramShieldBot {
     }
     const adminUsernames = (await this.adminIdentities(message.chat.id)).filter((id) => !/^\d+$/.test(id));
     const renameCopycat = this.adminRenameCopycat(message.chat, targetUser, adminUsernames);
-    const falsePositiveReview = this.falsePositiveReviewFor(targetUser, bounded, dkgIntel);
+    const falsePositiveReview = this.falsePositiveReviewFor(targetUser, bounded, dkgIntel) || (adminHistory.hasPriorFalsePositive ? { id: adminHistory.falsePositiveEvents?.[0]?.eventId || 'context-graph-false-positive' } : null);
     const effectiveIntel = falsePositiveReview ? { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [], artifactEvidence: [] } : dkgIntel;
     const analysis = this.analyzer({ text: bounded, user: { ...targetUser, adminUsernames, adminRenameCopycat: Boolean(renameCopycat) }, globalIntel: effectiveIntel });
     if (renameCopycat) {
@@ -3452,7 +3452,7 @@ export class TelegramShieldBot {
       });
       return true;
     }
-    if (requester && String(from.id || from.username || '') !== String(requester)) {
+    if (requester && String(from.id || from.username || '') !== String(requester) && !(trusted && parsed.action.startsWith('review-'))) {
       await this.answerCallback(query.id, 'Open your own panel to use these buttons.');
       return true;
     }
