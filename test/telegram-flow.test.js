@@ -1532,6 +1532,44 @@ test('context graph false-positive decision suppresses future flags for that use
   assert.equal(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user.id === 4242), false);
 });
 
+test('trusted context graph false-positive suppresses cross-group warning even with older severe history', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    configOverrides: { proactiveAlertCrossGroup: true, warnThreshold: 50 },
+    dkgIntel: { riskScore: 90, reportsAcrossCommunities: 2, wallets: [], domains: [], patterns: ['impersonation'], evidence: [{ eventId: 'old-risk' }] }
+  });
+  bot.dkg.queryAdminHistoryForActor = async () => ({
+    hasPriorAdminAction: true,
+    hasPriorFalsePositive: true,
+    events: [{ eventId: 'prior-ban', eventType: 'ban_executed', confidence: 92 }],
+    falsePositiveEvents: [{ eventId: 'trusted-clear', eventType: 'review_overturned', adminVerified: true }]
+  });
+  const chat = { id: -200, title: 'other community' };
+  const risk = await bot.assess({ chat, from: { id: 4242, username: 'safeuser', is_bot: false }, message_id: 45, text: 'support says claim now' }, { id: 4242, username: 'safeuser' }, 'support says claim now');
+  assert.equal(risk.recommended_action, 'ignore');
+  assert.equal(bot.store.all().some((event) => event.event_type === 'proactive_cross_group_warning'), false);
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('CROSS-GROUP WARNING')), false);
+});
+
+test('untrusted context graph false-positive does not clear cross-community scam history', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    configOverrides: { proactiveAlertCrossGroup: true, warnThreshold: 50 },
+    dkgIntel: { riskScore: 75, reportsAcrossCommunities: 1, wallets: [], domains: [], patterns: [], evidence: [{ eventId: 'prior-risk' }] }
+  });
+  bot.dkg.queryAdminHistoryForActor = async () => ({
+    hasPriorAdminAction: true,
+    hasPriorFalsePositive: false,
+    events: [{ eventId: 'prior-ban', eventType: 'ban_executed', confidence: 92 }],
+    falsePositiveEvents: []
+  });
+  const chat = { id: -201, title: 'real community' };
+  const risk = await bot.assess({ chat, from: { id: 5151, username: 'badactor', is_bot: false }, message_id: 46, text: 'hello' }, { id: 5151, username: 'badactor' }, 'hello');
+  assert.ok((risk.confidence || 0) >= 70);
+  assert.ok(bot.store.all().some((event) => event.event_type === 'proactive_cross_group_warning'));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('CROSS-GROUP WARNING')));
+});
+
 test('/start review panel shows active mutes and review items', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   const chat = { id: -100, title: 'demo' };

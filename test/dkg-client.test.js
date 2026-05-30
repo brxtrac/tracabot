@@ -218,7 +218,15 @@ test('admin history escapes identifiers and ignores false-positive or non-produc
         g: 'did:dkg:context-graph:tracabot/_shared_memory',
         s: 'https://tracabot.org/ontology#event/false-positive-safe',
         eventType: 'review_overturned',
-        confidence: '100'
+        confidence: '100',
+        adminVerified: 'true'
+      },
+      {
+        g: 'did:dkg:context-graph:tracabot/_shared_memory',
+        s: 'https://tracabot.org/ontology#event/fake-admin-clear',
+        eventType: 'review_overturned',
+        confidence: '100',
+        adminVerified: ''
       },
       {
         g: 'did:dkg:context-graph:legacy/_shared_memory',
@@ -245,6 +253,9 @@ test('admin history escapes identifiers and ignores false-positive or non-produc
   assert.deepEqual(history.falsePositiveEvents.map((event) => event.eventId), ['false-positive-safe']);
   assert.match(queries[0], /"42"/);
   assert.match(queries[0], /"badunionxyz"/);
+  assert.match(queries[0], /targetTelegramUserId/);
+  assert.match(queries[0], /targetUsername/);
+  assert.match(queries[0], /targetKey/);
   assert.doesNotMatch(queries[0], /UNION \{ \?x \?y \?z \}/);
 });
 
@@ -559,6 +570,32 @@ test('review decisions require explicit admin verification before verified publi
     payload: { review_decision: 'reject', admin_verified: true, confidence: 90, evidence: ['false positive correction'] }
   });
   assert.equal(falsePositive.calls.some(([method]) => method === 'publishSharedMemory'), false);
+});
+
+test('review-overturned events write reviewed target identity for global admin clears', async () => {
+  const adapterClient = makeAdapterClient();
+  const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient });
+  const result = await dkg.writeEvent({
+    id: 'evt-reviewed-target-clear',
+    event_type: 'review_overturned',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    chat: { id: 'chat' },
+    user: { id: '1', username: 'trustedadmin' },
+    payload: {
+      review_decision: 'reject',
+      admin_verified: true,
+      confidence: 100,
+      reviewed_target: { id: '4242', username: 'safeuser', first_name: 'Safe' },
+      reviewed_target_key: 'id:4242',
+      evidence: ['trusted admin cleared false positive']
+    }
+  });
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#telegramUserId') && triple.object === '"1"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetTelegramUserId') && triple.object === '"4242"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetUsername') && triple.object === '"safeuser"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetKey') && triple.object === '"id:4242"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#trustedGlobalClear') && triple.object === '"true"'));
 });
 
 test('uses configured on-chain context graph id for verified publish', async () => {

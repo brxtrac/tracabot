@@ -45,6 +45,10 @@ function actorAliases(user = {}) {
     .filter(Boolean);
 }
 
+function reviewedTarget(event = {}) {
+  return event.payload?.reviewed_target || event.payload?.target || {};
+}
+
 function normalizeDomain(value = '') {
   const domain = String(value).toLowerCase().replace(/^www\./, '').replace(/[^a-z0-9.-]/g, '');
   if (!domain.includes('.') || domain.length > 253) return '';
@@ -108,6 +112,10 @@ function shouldAutoPublishEvent(event = {}) {
   if (event.event_type === 'unsafe_chat_event') return verifiedByAdmin || (confidence >= 95 && localConfidence >= 80);
   if (event.event_type === 'channel_observation') return false;
   return false;
+}
+
+function trustedGlobalFalsePositive(event = {}) {
+  return event.event_type === 'review_overturned' && Boolean(event.payload?.admin_verified || event.payload?.community_verified_flag);
 }
 
 function lifecycleStage(event = {}) {
@@ -176,6 +184,8 @@ function eventTriples(event) {
   const subject = `${NS}event/${event.id}`;
   const evidence = boundedList(event.payload?.evidence || [], MAX_EVIDENCE_ITEMS, MAX_EVIDENCE_LENGTH);
   const status = shouldAutoPublishEvent(event) ? 'context_graph_auto_publish_eligible' : 'shared_memory';
+  const reviewed = reviewedTarget(event);
+  const reviewedKey = event.payload?.reviewed_target_key || event.payload?.target_key || event.payload?.watch_target_key || '';
   const triples = [
     { subject, predicate: 'rdf:type', object: `${NS}${event.event_type}` },
     { subject, predicate: `${NS}eventId`, object: literal(event.id) },
@@ -193,14 +203,15 @@ function eventTriples(event) {
     { subject, predicate: `${NS}reporterTelegramUserId`, object: literal(event.payload?.reporter?.id || '') },
     { subject, predicate: `${NS}reporterUsername`, object: literal(event.payload?.reporter?.username || '') },
     { subject, predicate: `${NS}reportDecision`, object: literal(event.payload?.report_decision || '') },
-    { subject, predicate: `${NS}targetTelegramUserId`, object: literal(event.payload?.target?.id || event.payload?.target_user_id || event.user?.id || '') },
-    { subject, predicate: `${NS}targetUsername`, object: literal(event.payload?.target?.username || event.user?.username || '') },
-    { subject, predicate: `${NS}targetLabel`, object: literal(event.payload?.target?.label || event.payload?.target?.first_name || '') },
-    { subject, predicate: `${NS}targetKey`, object: literal(event.payload?.target_key || event.payload?.watch_target_key || '') },
+    { subject, predicate: `${NS}targetTelegramUserId`, object: literal(reviewed?.id || event.payload?.target_user_id || event.user?.id || '') },
+    { subject, predicate: `${NS}targetUsername`, object: literal(reviewed?.username || event.user?.username || '') },
+    { subject, predicate: `${NS}targetLabel`, object: literal(reviewed?.label || reviewed?.first_name || '') },
+    { subject, predicate: `${NS}targetKey`, object: literal(reviewedKey) },
     { subject, predicate: `${NS}moderatorTelegramUserId`, object: literal(event.payload?.moderator?.id || event.payload?.reviewer?.id || '') },
     { subject, predicate: `${NS}moderatorUsername`, object: literal(event.payload?.moderator?.username || event.payload?.reviewer?.username || '') },
     { subject, predicate: `${NS}reviewDecision`, object: literal(event.payload?.review_decision || '') },
     { subject, predicate: `${NS}adminVerified`, object: literal(event.payload?.admin_verified ? 'true' : '') },
+    { subject, predicate: `${NS}trustedGlobalClear`, object: literal(trustedGlobalFalsePositive(event) ? 'true' : '') },
     { subject, predicate: `${NS}publicationStatus`, object: literal(event.payload?.publication_status || status) },
     { subject, predicate: `${NS}commitReceiptId`, object: literal(event.payload?.commit_receipt_id || '') },
     { subject, predicate: `${NS}commitPolicy`, object: literal(event.payload?.commit_policy || '') },
@@ -574,11 +585,11 @@ export class DkgClient {
 
     // Build SPARQL to find high-severity events involving this actor
     const valueClauses = [...new Set(identifiers)].map(id =>
-      `{ ?s <${NS}telegramUserId> ${literal(id)} . } UNION { ?s <${NS}username> ${literal(id)} . } UNION { ?s <${NS}actorAlias> ${literal(id)} . }`
+      `{ ?s <${NS}telegramUserId> ${literal(id)} . } UNION { ?s <${NS}username> ${literal(id)} . } UNION { ?s <${NS}actorAlias> ${literal(id)} . } UNION { ?s <${NS}targetTelegramUserId> ${literal(id)} . } UNION { ?s <${NS}targetUsername> ${literal(id)} . } UNION { ?s <${NS}targetKey> ${literal(id)} . }`
     ).join(' UNION ');
 
     const sparql = `
-      SELECT ?g ?s ?eventType ?confidence ?scamType ?created ?chatId ?username ?eventSource ?testMode WHERE {
+      SELECT ?g ?s ?eventType ?confidence ?scamType ?created ?chatId ?username ?eventSource ?testMode ?adminVerified ?trustedGlobalClear WHERE {
         GRAPH ?g {
           { ${valueClauses} }
           OPTIONAL { ?s <${NS}eventType> ?eventType . }
@@ -589,6 +600,8 @@ export class DkgClient {
           OPTIONAL { ?s <${NS}username> ?username . }
           OPTIONAL { ?s <${NS}source> ?eventSource . }
           OPTIONAL { ?s <${NS}testMode> ?testMode . }
+          OPTIONAL { ?s <${NS}adminVerified> ?adminVerified . }
+          OPTIONAL { ?s <${NS}trustedGlobalClear> ?trustedGlobalClear . }
         }
       } LIMIT 30
     `;
@@ -613,9 +626,11 @@ export class DkgClient {
         eventType: cleanValue(b.eventType),
         confidence: Number(cleanValue(b.confidence)) || 0,
         scamType: cleanValue(b.scamType),
+        adminVerified: cleanValue(b.adminVerified) === 'true',
+        trustedGlobalClear: cleanValue(b.trustedGlobalClear) === 'true',
         ual: cleanValue(b.g)
       }))
-      .filter(e => e.eventType === 'review_overturned');
+      .filter(e => e.eventType === 'review_overturned' && (e.adminVerified || e.trustedGlobalClear));
 
     return {
       hasPriorAdminAction: severeEvents.length > 0,

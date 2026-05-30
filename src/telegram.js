@@ -2689,8 +2689,9 @@ export class TelegramShieldBot {
       : { hasPriorAdminAction: false, hasPriorFalsePositive: false, events: [], falsePositiveEvents: [] };
 
     let priorAdminAlertEvent = null;
+    const graphFalsePositiveReview = adminHistory.hasPriorFalsePositive ? { id: adminHistory.falsePositiveEvents?.[0]?.eventId || 'context-graph-false-positive' } : null;
 
-    if (adminHistory.hasPriorAdminAction) {
+    if (!graphFalsePositiveReview && adminHistory.hasPriorAdminAction) {
       dkgIntel.evidence = dkgIntel.evidence || [];
       dkgIntel.evidence.push('Prior admin action/sentence found in Tracabot Context Graph for this actor');
       dkgIntel.riskScore = Math.max(dkgIntel.riskScore || 0, 75);
@@ -2718,7 +2719,7 @@ export class TelegramShieldBot {
     }
     const adminUsernames = (await this.adminIdentities(message.chat.id)).filter((id) => !/^\d+$/.test(id));
     const renameCopycat = this.adminRenameCopycat(message.chat, targetUser, adminUsernames);
-    const falsePositiveReview = this.falsePositiveReviewFor(targetUser, bounded, dkgIntel) || (adminHistory.hasPriorFalsePositive ? { id: adminHistory.falsePositiveEvents?.[0]?.eventId || 'context-graph-false-positive' } : null);
+    const falsePositiveReview = this.falsePositiveReviewFor(targetUser, bounded, dkgIntel) || graphFalsePositiveReview;
     const effectiveIntel = falsePositiveReview ? { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [], artifactEvidence: [] } : dkgIntel;
     const analysis = this.analyzer({ text: bounded, user: { ...targetUser, adminUsernames, adminRenameCopycat: Boolean(renameCopycat) }, globalIntel: effectiveIntel });
     if (renameCopycat) {
