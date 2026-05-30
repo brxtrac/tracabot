@@ -957,20 +957,29 @@ export class TelegramShieldBot {
     const openclaw = redactedOpenClawStatus(this.config);
     const caps = dkgRuntime.capabilities || {};
     return [
-      'TRACaBot status',
-      `DKG: ${dkgOk ? 'reachable' : 'unreachable'}`,
-      `DKG release: ${dkgRuntime.dkgReleaseVersion || 'unknown'}; adapter: ${dkgRuntime.adapterVersion || 'unknown'}`,
-      `DKG memory: WM assertions=${caps.workingMemoryAssertions ? 'yes' : 'no'}, SWM=${caps.sharedWorkingMemory ? 'yes' : 'no'}, VM publish=${caps.verifiedMemoryPublish ? 'yes' : 'no'}, query=${caps.query ? 'yes' : 'no'}`,
-      `Telegram rights: delete=${canDelete ? 'yes' : 'no'}, restrict/ban=${canBan ? 'yes' : 'no'}`,
-      `Autonomous thresholds: warn ${this.config.warnThreshold}%, restrict ${this.config.restrictThreshold}%, ban ${this.config.banThreshold}%`,
-      `Auto-delete (bot replies): Only /help and join challenges during testing`,
-      `Join challenge: ${this.chatJoinChallengeEnabled(chatId) ? `on; Knowledge Asset address; ttl ${this.config.joinChallengeTtlSeconds || 60}s; max attempts ${this.config.joinChallengeMaxAttempts || 3}; timeout ${this.config.joinChallengeAction || 'kick'}` : 'off'}`,
-      `Cross-group prior-action alerts: ${this.config.proactiveAlertCrossGroup !== false ? 'on (in-chat + admin DMs, rate-limited)' : 'off'}`,
-      `Conversation (this chat): ${this.chatConversationalEnabled(chatId) ? 'on' : 'off'}; provider=${this.config.llmProvider || 'auto'}; proactive >= ${this.config.proactiveReplyThreshold}% (global default ${this.config.conversational !== false ? 'on' : 'off'}), rate limit ~${this.config.conversationRateLimitSeconds || 8}s between direct questions`,
-      `LLM backend: provider=${this.config.llmProvider || 'auto'}; direct base=${this.config.llmBaseUrl ? 'configured' : 'not set'}; OpenClaw discovery=${openclaw.available ? 'available' : 'not discovered'}`,
-      `LLM client: ${this.llm ? 'available in this process' : 'not created'}${openclaw.available ? ' — OpenClaw config can supply OAuth/model settings when provider=auto/openclaw' : ''}`,
-      `Learning artifacts: ${this.config.wmArtifacts === false ? 'off' : 'on'}; min quality ${this.config.wmArtifactMinConfidence}; redact=${this.config.wmArtifactRedact === false ? 'no' : 'yes'}`,
-      'Secrets and internal endpoints are not displayed in group chat.'
+      '🩺 Tracabot status',
+      '',
+      'Telegram',
+      `• Delete messages: ${canDelete ? '✅ yes' : '❌ no'}`,
+      `• Restrict / ban: ${canBan ? '✅ yes' : '❌ no'}`,
+      '',
+      'Protection',
+      `• Warn at ${this.config.warnThreshold}%`,
+      `• Restrict at ${this.config.restrictThreshold}%`,
+      `• Ban at ${this.config.banThreshold}%`,
+      `• Join challenge: ${this.chatJoinChallengeEnabled(chatId) ? `✅ on (${this.config.joinChallengeTtlSeconds || 60}s, ${this.config.joinChallengeMaxAttempts || 3} tries)` : '⚪ off'}`,
+      `• Natural language: ${this.chatConversationalEnabled(chatId) ? '✅ on' : '⚪ off'}`,
+      '',
+      'DKG memory',
+      `• Node: ${dkgOk ? '✅ reachable' : '⚠️ unreachable'}`,
+      `• Adapter: ${dkgRuntime.adapterVersion || 'unknown'}`,
+      `• Release: ${dkgRuntime.dkgReleaseVersion || 'unknown'}`,
+      `• Working memory: ${caps.workingMemoryAssertions ? '✅' : '⚪'}  Shared memory: ${caps.sharedWorkingMemory ? '✅' : '⚪'}  Verified publish: ${caps.verifiedMemoryPublish ? '✅' : '⚪'}`,
+      '',
+      'Agent',
+      `• LLM: ${this.llm ? '✅ available' : '⚪ disabled'} (${this.config.llmProvider || 'auto'})`,
+      `• Learning drafts: ${this.config.wmArtifacts === false ? '⚪ off' : '✅ on'}`,
+      `• Cross-group alerts: ${this.config.proactiveAlertCrossGroup !== false ? '✅ on' : '⚪ off'}`
     ].join('\n');
   }
 
@@ -1300,9 +1309,17 @@ export class TelegramShieldBot {
       .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
       .slice(0, limit);
 
-    if (!enforcementEvents.length) return 'No recent enforcement actions recorded.';
+    if (!enforcementEvents.length) {
+      return [
+        '👮 Enforcement',
+        '',
+        'No recent bans, mutes, or confirmed scam reviews recorded.',
+        '',
+        'Use Reviews for pending items or /ban and /mute as replies when action is needed.'
+      ].join('\n');
+    }
 
-    const lines = ['👮 Recent enforcement actions (most recent first)'];
+    const lines = ['👮 Enforcement', '', 'Recent actions'];
 
     for (const ev of enforcementEvents) {
       const target = ev.user || ev.payload?.target || {};
@@ -1313,11 +1330,11 @@ export class TelegramShieldBot {
       const summary = reason;
 
       const time = ageLabel(ev.timestamp);
-      const eventId = shortId(ev.id);
-      lines.push(`• ${actionType} ${name} — ${summary} (${time}, ${eventId})`);
+      lines.push(`• ${actionType} ${name}`);
+      lines.push(`  ${escapeHtml(summary)} · ${time}`);
     }
 
-    lines.push('\nAsk me naturally for details, for example: “why event <id>?”.');
+    lines.push('', 'Use Reviews to handle pending items. Event IDs stay in Sources for admins who need receipts.');
     return lines.join('\n');
   }
 
@@ -1377,18 +1394,23 @@ export class TelegramShieldBot {
   }
 
   settingsText(chatId) {
+    const challengeOn = this.chatJoinChallengeEnabled(chatId);
+    const languageOn = this.chatConversationalEnabled(chatId);
     return [
       '⚙️ Tracabot settings',
-      `Join challenge: ${this.chatJoinChallengeEnabled(chatId) ? 'on' : 'off'}`,
-      `Natural language mode: ${this.chatConversationalEnabled(chatId) ? 'on' : 'off'}`,
-      'Sensitive values like tokens, endpoints, admin IDs, and API keys cannot be edited from Telegram.'
+      '',
+      `🚪 Join challenge: ${challengeOn ? '✅ on' : '⚪ off'}`,
+      `🧠 Natural language: ${languageOn ? '✅ on' : '⚪ off'}`,
+      '',
+      'Tap a toggle below to switch the setting for this chat.'
     ].join('\n');
   }
 
-  settingsKeyboard(requesterId) {
+  settingsKeyboard(requesterId, chatId = '') {
+    const challengeOn = this.chatJoinChallengeEnabled(chatId);
+    const languageOn = this.chatConversationalEnabled(chatId);
     return [
-      [button('🚪 Challenge on', callbackData('challenge-set', requesterId, 'on')), button('🚪 Challenge off', callbackData('challenge-set', requesterId, 'off'))],
-      [button('🧠 Language on', callbackData('conversation-set', requesterId, 'on')), button('🧠 Language off', callbackData('conversation-set', requesterId, 'off'))],
+      [button(`${challengeOn ? '✅' : '⚪'} Join challenge`, callbackData('challenge-set', requesterId, challengeOn ? 'off' : 'on')), button(`${languageOn ? '✅' : '⚪'} Natural language`, callbackData('conversation-set', requesterId, languageOn ? 'off' : 'on'))],
       [button('🩺 Status', callbackData('status', requesterId))],
       ...this.mainNavKeyboard(requesterId)
     ];
@@ -1524,11 +1546,34 @@ export class TelegramShieldBot {
   formatCampaigns() {
     const campaigns = this.campaignSummary(7 * 24 * 60 * 60 * 1000).slice(0, 6);
     const challengeFailures = this.challengeFailureSummary(7 * 24 * 60 * 60 * 1000).slice(0, 6);
-    if (!campaigns.length && !challengeFailures.length) return 'No repeated fraud campaigns found in recent local memory.';
+    if (!campaigns.length && !challengeFailures.length) return '🧬 Campaign signals\n\nNo repeated scam waves found in recent local memory.';
+    const describeKey = (key = '') => {
+      const [type, value = ''] = String(key).split(/:(.*)/s).filter(Boolean);
+      const clean = value.replace(/\s+/g, ' ').trim();
+      if (type === 'domain') return `Repeated link domain: ${clean}`;
+      if (type === 'wallet') return `Repeated wallet: ${clean.slice(0, 10)}…${clean.slice(-6)}`;
+      if (type === 'pattern') return `Repeated tactic: ${clean.replace(/[_-]/g, ' ')}`;
+      if (type === 'text') return 'Repeated scam wording';
+      if (type === 'alias') return `Repeated join alias: ${clean}`;
+      if (type === 'target') return 'Repeated join challenge failures';
+      return clean || key;
+    };
+    const details = (item) => {
+      const bits = [];
+      if (item.domains?.length) bits.push(`domains: ${item.domains.slice(0, 2).join(', ')}`);
+      if (item.wallets?.length) bits.push(`wallets: ${item.wallets.length}`);
+      if (item.patterns?.length) bits.push(`tactics: ${item.patterns.slice(0, 2).map((p) => String(p).replace(/[_-]/g, ' ')).join(', ')}`);
+      if (item.aliases?.length) bits.push(`aliases: ${item.aliases.slice(0, 3).join(', ')}`);
+      if (item.affectedCommunities?.length) bits.push(`${plural(item.affectedCommunities.length, 'community')}`);
+      return bits.length ? `  ${bits.join(' · ')}` : '';
+    };
     return [
-      'Recent campaign signals:',
-      ...campaigns.map((campaign) => `- ${campaign.key} across ${plural(campaign.events.length, 'event')}: ${campaign.events.slice(0, 4).map((event) => event.id).join(', ')}`),
-      ...challengeFailures.map((signal) => `- join challenge repeat ${signal.key} across ${plural(signal.events.length, 'event')}: ${signal.events.slice(0, 4).map((event) => event.id).join(', ')}`)
+      '🧬 Campaign signals',
+      '',
+      'Repeated patterns seen in recent local memory. Event receipts are hidden here to keep this readable.',
+      '',
+      ...campaigns.map((campaign) => [`• ${describeKey(campaign.key)} (${plural(campaign.events.length, 'event')})`, details(campaign)].filter(Boolean).join('\n')),
+      ...challengeFailures.map((signal) => [`• ${describeKey(signal.key)} (${plural(signal.events.length, 'event')})`, details(signal)].filter(Boolean).join('\n'))
     ].join('\n');
   }
 
@@ -2185,7 +2230,7 @@ export class TelegramShieldBot {
 
     if (action === 'settings') {
       if (!trusted) await this.sendEphemeral(chatId, 'Settings are admin-only.', replyOptions);
-      else await this.sendInteractiveReply(chatId, this.settingsText(chatId), this.settingsKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
+      else await this.sendInteractiveReply(chatId, this.settingsText(chatId), this.settingsKeyboard(message.from?.id || message.from?.username || '', chatId), replyOptions);
       return { handled: true };
     }
 
@@ -3295,7 +3340,7 @@ export class TelegramShieldBot {
         await this.answerCallback(query.id, 'Admin only');
         return true;
       }
-      await this.editInteractiveMessage(chatId, message.message_id, this.settingsText(chatId), this.settingsKeyboard(requester));
+      await this.editInteractiveMessage(chatId, message.message_id, this.settingsText(chatId), this.settingsKeyboard(requester, chatId));
       return true;
     }
 
@@ -3340,7 +3385,7 @@ export class TelegramShieldBot {
           await this.answerCallback(query.id, 'Admin only');
           return true;
         }
-        await this.editInteractiveMessage(chatId, message.message_id, await this.formatStatus(callbackMessage), this.settingsKeyboard(requester));
+        await this.editInteractiveMessage(chatId, message.message_id, await this.formatStatus(callbackMessage), this.settingsKeyboard(requester, chatId));
         return true;
       }
       if (parsed.action === 'challenge-set' || parsed.action === 'conversation-set') {
@@ -3353,7 +3398,7 @@ export class TelegramShieldBot {
         if (value === 'on' || value === 'off') {
           await this.record(setting, callbackMessage, { enabled: value === 'on', moderator: from, evidence: [`admin turned ${parsed.action === 'challenge-set' ? 'new-user join challenge' : 'conversation mode'} ${value}`] }, { writeDkg: false });
         }
-        await this.editInteractiveMessage(chatId, message.message_id, this.settingsText(chatId), this.settingsKeyboard(requester));
+        await this.editInteractiveMessage(chatId, message.message_id, this.settingsText(chatId), this.settingsKeyboard(requester, chatId));
         return true;
       }
       if (parsed.action === 'help-scan') {
@@ -3788,7 +3833,17 @@ export class TelegramShieldBot {
       console.error(`DKG startup check failed; continuing with Telegram polling: ${error instanceof Error ? error.message : String(error)}`);
     }
     try {
-      await this.call('setMyCommands', { commands: TELEGRAM_COMMANDS });
+      const commandScopes = [
+        null,
+        { type: 'all_private_chats' },
+        { type: 'all_group_chats' },
+        { type: 'all_chat_administrators' }
+      ];
+      for (const scope of commandScopes) {
+        const payload = scope ? { scope } : {};
+        await this.call('deleteMyCommands', payload).catch(() => {});
+        await this.call('setMyCommands', { ...payload, commands: TELEGRAM_COMMANDS });
+      }
     } catch (error) {
       console.error(`setMyCommands failed: ${error instanceof Error ? error.message : String(error)}`);
     }

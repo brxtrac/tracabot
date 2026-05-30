@@ -1095,8 +1095,8 @@ test('join challenge repeat failures cluster normalized 1win alias variants', as
   const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Stats', 'join-alias-stats');
   const campaignsButton = buttonByText(panel, 'Campaigns');
   await bot.handleCallbackQuery({ id: 'join-alias-campaigns', from: { id: 1, username: 'admin' }, message: { chat, message_id: 89 }, data: campaignsButton.callback_data });
-  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('join challenge repeat alias:1win')));
-  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('Top campaign: alias:1win')));
+  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('Repeated join alias: 1win')));
+  assert.equal(calls.some((call) => call.method === 'editMessageText' && /[0-9a-f]{8}-[0-9a-f]{4}/i.test(String(call.payload.text))), false);
 });
 
 test('telegram command descriptions match the public bot command list', () => {
@@ -1133,12 +1133,11 @@ test('/settings status panel reports permissions without exposing secrets', asyn
   const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Settings', 'settings-menu');
   const statusButton = panel.reply_markup.inline_keyboard.flat().find((button) => String(button.text).includes('Status'));
   await bot.handleCallbackQuery({ id: 'settings-status', from: { id: 1, username: 'admin' }, message: { chat, message_id: panel.message_id || 31 }, data: statusButton.callback_data });
-  const reply = calls.find((call) => call.method === 'editMessageText' && String(call.payload.text).includes('TRACaBot status'))?.payload.text || '';
-  assert.match(reply, /TRACaBot status/);
-  assert.match(reply, /DKG: reachable/);
-  assert.match(reply, /delete=yes/);
-  assert.match(reply, /Join challenge: off/);
-  assert.match(reply, /Secrets and internal endpoints are not displayed/);
+  const reply = calls.find((call) => call.method === 'editMessageText' && String(call.payload.text).includes('Tracabot status'))?.payload.text || '';
+  assert.match(reply, /Tracabot status/);
+  assert.match(reply, /Node: ✅ reachable/);
+  assert.match(reply, /Delete messages: ✅ yes/);
+  assert.match(reply, /Join challenge: ⚪ off/);
   assert.doesNotMatch(reply, /token/i);
   assert.doesNotMatch(reply, /127\.0\.0\.1|openai|codex|Context Graph tracabot/);
 });
@@ -1480,7 +1479,7 @@ test('settings buttons update join challenge and conversation settings', async (
   const challengePanel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Settings', 'settings-buttons');
   await bot.handleCallbackQuery({ id: 'toggle-cb-1', from: { id: 1, username: 'admin' }, message: { chat, message_id: 521 }, data: challengePanel.reply_markup.inline_keyboard[0][0].callback_data });
   assert.equal(bot.chatJoinChallengeEnabled(chat.id), true);
-  await bot.handleCallbackQuery({ id: 'toggle-cb-2', from: { id: 1, username: 'admin' }, message: { chat, message_id: 531 }, data: challengePanel.reply_markup.inline_keyboard[1][1].callback_data });
+  await bot.handleCallbackQuery({ id: 'toggle-cb-2', from: { id: 1, username: 'admin' }, message: { chat, message_id: 531 }, data: challengePanel.reply_markup.inline_keyboard[0][1].callback_data });
   assert.equal(bot.chatConversationalEnabled(chat.id), false);
   assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_setting_changed' && event.payload.enabled === true && event.local_only));
   assert.ok(bot.store.all().some((event) => event.event_type === 'conversational_setting_changed' && event.payload.enabled === false && event.local_only));
@@ -1533,7 +1532,8 @@ test('/settings lets admins toggle new-user join challenge per chat', async () =
   assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_setting_changed' && event.payload.enabled === true && event.local_only));
   await bot.handleNewMembers({ chat, from: { id: 1, username: 'admin' }, new_chat_members: [{ id: 9001, username: 'new_user', is_bot: false }] });
   assert.ok(calls.some((call) => call.method === 'sendMessage' && /quick check before posting/.test(call.payload.text)));
-  await bot.handleCallbackQuery({ id: 'challenge-off', from: { id: 1, username: 'admin' }, message: { chat, message_id: 47 }, data: panel.reply_markup.inline_keyboard[0][1].callback_data });
+  const updatedPanel = calls.filter((call) => call.method === 'editMessageText' && String(call.payload.text).includes('Tracabot settings')).at(-1)?.payload;
+  await bot.handleCallbackQuery({ id: 'challenge-off', from: { id: 1, username: 'admin' }, message: { chat, message_id: 47 }, data: updatedPanel.reply_markup.inline_keyboard[0][0].callback_data });
   assert.equal(bot.chatJoinChallengeEnabled(chat.id), false);
 });
 
