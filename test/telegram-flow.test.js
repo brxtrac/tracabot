@@ -1142,6 +1142,19 @@ test('/start opens protection menu and explains direct commands', async () => {
   assert.doesNotMatch(help, /Autonomous policy|Testing note|delete\/restrict|<user\|id\|wallet/i);
   assert.doesNotMatch(help, /Context Graph tracabot/);
   assert.ok(calls.find((call) => call.method === 'sendMessage')?.payload.reply_markup?.inline_keyboard?.some((row) => row.some((button) => String(button.text).includes('Stats'))));
+  assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 30));
+});
+
+test('/start bot command variant deletes the trigger after opening menu', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  await bot.handleCommand({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 1, username: 'admin' },
+    message_id: 31,
+    text: '/start@tracethembot'
+  });
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('TRACaBot Agent online')));
+  assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 31));
 });
 
 test('/settings status panel reports permissions without exposing secrets', async () => {
@@ -1327,9 +1340,12 @@ test('natural language LLM replies are sanitized', async () => {
 });
 
 test('bare bot mentions open the compact menu for both handles', async () => {
-  const { bot } = makeBot({ canBan: true, conversational: true, llm: null });
+  const { bot, calls } = makeBot({ canBan: true, conversational: true, llm: null });
   assert.equal(bot.isBareBotMention({ text: '@tracabot' }), true);
   assert.equal(bot.isBareBotMention({ text: '@tracethembot' }), true);
+  await bot.handleMessage({ chat: { id: -100, title: 'demo' }, from: { id: 1, username: 'admin' }, message_id: 32, text: '@tracethembot' });
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('Choose an action below')));
+  assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 32));
 });
 
 test('natural language why explains local event decisions', async () => {

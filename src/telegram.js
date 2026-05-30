@@ -512,6 +512,11 @@ export class TelegramShieldBot {
     return this.sendCommandReply(chatId, text, { ...extra, reply_markup: inlineKeyboard(rows) });
   }
 
+  cleanupMenuTrigger(message = {}) {
+    if (message.chat?.type === 'private' || !message.chat?.id || !message.message_id) return;
+    this.deleteMessage(message.chat.id, message.message_id).catch(() => null);
+  }
+
   async menuIntro(message = {}) {
     if (this.llm && this.chatConversationalEnabled(message?.chat?.id)) {
       const reply = await this.generalConversationReply({ ...message, text: message.text || 'Open the Tracabot protection menu.' }).catch(() => '');
@@ -524,7 +529,9 @@ export class TelegramShieldBot {
     const chatId = message.chat?.id;
     const requester = message.from?.id || message.from?.username || '';
     const text = await this.menuIntro(message);
-    return this.sendInteractiveReply(chatId, text, this.dashboardKeyboard(requester), { reply_to_message_id: message.message_id, ...extra });
+    const sent = await this.sendInteractiveReply(chatId, text, this.dashboardKeyboard(requester), { reply_to_message_id: message.message_id, ...extra });
+    this.cleanupMenuTrigger(message);
+    return sent;
   }
 
   async editInteractiveMessage(chatId, messageId, text, rows = [], extra = {}) {
@@ -2867,6 +2874,7 @@ export class TelegramShieldBot {
     const chatId = message.chat.id;
     if (isCommand(text, 'start')) {
       await this.sendInteractiveReply(chatId, this.formatHelp(), this.dashboardKeyboard(message.from?.id || message.from?.username || ''), { reply_to_message_id: message.message_id });
+      this.cleanupMenuTrigger(message);
       return;
     }
     if (isCommand(text, 'scan')) {
