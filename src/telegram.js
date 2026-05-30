@@ -1981,7 +1981,7 @@ export class TelegramShieldBot {
       return true;
     }
     if (!isOnTopicDirectAddress(message)) {
-      await this.sendEphemeral(chatId, offTopicRedirect(), replyOptions);
+      await this.sendInteractiveReply(chatId, offTopicRedirect(), this.dashboardKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
       return true;
     }
     return false;
@@ -2024,7 +2024,7 @@ export class TelegramShieldBot {
         const chatId = message.chat.id;
 
         if (agentDecision.action === 'ignore') {
-          await this.sendEphemeral(chatId, offTopicRedirect(), replyOptions);
+          await this.sendInteractiveReply(chatId, offTopicRedirect(), this.dashboardKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
           responded = true;
         } else if (agentDecision.needs_clarification) {
           await this.sendEphemeral(chatId, agentDecision.needs_clarification, replyOptions);

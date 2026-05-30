@@ -1282,8 +1282,10 @@ test('natural language unsupported request uses bounded LLM answer via agent pat
   const { bot, calls } = makeBot({ canBan: true, conversational: true, llm });
   await bot.handleMessage({ chat: { id: -100, title: 'demo' }, from: { id: 2, username: 'member' }, message_id: 44, text: '@tracethembot can you make me a sandwich?' });
   const reply = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
+  const markup = calls.find((call) => call.method === 'sendMessage')?.payload.reply_markup;
   assert.equal(llmCalls.length, 0);
   assert.match(reply, /community anti-scam bodyguard/);
+  assert.ok(markup?.inline_keyboard?.flat().some((button) => String(button.text).includes('Help')));
 });
 
 test('bot mention about website live feed redirects instead of clarifying', async () => {
@@ -1292,8 +1294,10 @@ test('bot mention about website live feed redirects instead of clarifying', asyn
   const { bot, calls } = makeBot({ canBan: true, conversational: true, llm });
   await bot.handleMessage({ chat: { id: -100, title: 'demo' }, from: { id: 2, username: 'member' }, message_id: 440, text: '@tracethembot first iteration of the website, trying to find a way to have a live feed or CG visualisation on the page' });
   const reply = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
+  const markup = calls.find((call) => call.method === 'sendMessage')?.payload.reply_markup;
   assert.equal(llmCalls.length, 0);
   assert.match(reply, /community anti-scam bodyguard/);
+  assert.ok(markup?.inline_keyboard?.flat().some((button) => String(button.text).includes('Help')));
   assert.doesNotMatch(reply, /live feed|Context Graph|visuali[sz]ation|stack|public|admin-only/i);
 });
 
