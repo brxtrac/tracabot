@@ -1921,6 +1921,7 @@ export class TelegramShieldBot {
 
   isRecentBotNearReply(message = {}) {
     if (message.text?.startsWith('/')) return false;
+    if (!this.isReplyToBot(message)) return false;
     const recent = this.lastBotReplyByThread.get(`${message.chat?.id}:*`);
     if (!recent || Date.now() - recent.timestamp > BOT_REPLY_CONTEXT_TTL_MS) return false;
     return message.from?.is_bot !== true;
@@ -3561,13 +3562,14 @@ export class TelegramShieldBot {
     if (message.chat?.type === 'private') return;
     const user = actorFromMessage(message);
       const risk = await this.assess({ ...message, text: fullMessageText }, user, fullMessageText);
+    const passiveLowRisk = !this.isDirectlyAddressed(message) && risk.confidence < (this.config.warnThreshold ?? 60);
     if (risk.confidence < this.config.actionThreshold) {
       await this.record('risk_check', message, risk);
 
       // Phase 3: Consult artefact curator (via skill) — now graph-aware (DKG Context Graph prior admin history)
       const svc = (() => { try { return TracabotSkillService.fromEnv(); } catch { return null; } })();
       let curatorDecision = null;
-      if (svc) {
+      if (!passiveLowRisk && svc) {
         curatorDecision = await svc.decideArtefactAction({
           telegramUserId: message.from?.id,
           username: message.from?.username,
@@ -3598,6 +3600,7 @@ export class TelegramShieldBot {
 
       await this.recordBenignConversationFlow(message, risk);
       await this.recordChannelObservation(message, risk);
+      if (passiveLowRisk) return;
     }
     if (risk.confidence >= (this.config.warnThreshold ?? 60)) {
       await this.record('scam_detection', message, risk);

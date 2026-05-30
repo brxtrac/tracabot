@@ -1263,17 +1263,20 @@ test('natural language rejects private info requests', async () => {
   assert.doesNotMatch(reply, /token|env|admin list/i);
 });
 
-test('natural language non-direct messages respect rate limiting', async () => {
-  const { bot, calls } = makeBot({ canBan: true, conversational: true, configOverrides: { conversationRateLimitSeconds: 60 } });
+test('natural language ignores non-direct messages after recent bot replies', async () => {
+  const llmCalls = [];
+  const llm = { async complete(input) { llmCalls.push(input); return { ok: true, text: 'I should not answer group chatter.' }; } };
+  const { bot, calls } = makeBot({ canBan: true, conversational: true, llm, configOverrides: { conversationRateLimitSeconds: 60 } });
   const chat = { id: -100, title: 'demo' };
   const from = { id: 2, username: 'member' };
-  bot.scheduleDelete = () => null;
+  bot.rememberBotReply(chat.id, { message_id: 41 }, 'I am here as the community anti-scam bodyguard', {});
+  const before = calls.length;
 
-  // Non-direct message (no mention, no reply to bot) should be rate limited
+  // Non-direct group chatter after a bot reply must not be treated as a conversation turn.
   await bot.handleMessage({ chat, from, message_id: 42, text: 'hello everyone' });
   await bot.handleMessage({ chat, from, message_id: 43, text: 'anyone here?' });
-  // Direct addresses bypass the per-user rate limit to keep the LLM agent responsive
-  assert.ok(calls.length >= 0); // just ensure no crash
+  assert.equal(llmCalls.length, 0);
+  assert.equal(calls.slice(before).some((call) => call.method === 'sendMessage' && /community anti-scam bodyguard|I should not answer group chatter/i.test(String(call.payload.text || ''))), false);
 });
 
 test('natural language unsupported request uses bounded LLM answer via agent path', async () => {
