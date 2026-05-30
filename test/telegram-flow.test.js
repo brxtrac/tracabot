@@ -1531,6 +1531,7 @@ test('help button explains TRACaBot commands and menu returns home', async () =>
   const helpPanel = calls.find((call) => call.method === 'editMessageText' && String(call.payload.text).includes('TRACaBot Help'))?.payload;
   assert.match(helpPanel.text || '', /spot scams, learn from every attack/);
   assert.match(helpPanel.text || '', /shared memory into stronger protection across agents and communities/);
+  assert.doesNotMatch(helpPanel.text || '', /How TRACaBot works|persistent memory so agents and communities/);
   for (const command of ['/start', '/scan', '/report', '/ban', '/mute']) assert.match(helpPanel.text || '', new RegExp(command.replace('/', '\\/')));
   assert.doesNotMatch(helpPanel.text || '', /DKG|Decentralized Knowledge Graph/);
   const menuButton = helpPanel.reply_markup.inline_keyboard.flat().find((button) => String(button.text).includes('Menu'));

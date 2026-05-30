@@ -974,11 +974,7 @@ export class TelegramShieldBot {
       '/scan - check a user, wallet, link, or replied message for scam risk. Best used as a reply to the exact message or user.',
       '/report - send suspicious users, messages, wallets, links, or forwarded DMs to admin review.',
       '/ban - admin only; ban a replied user and record enforcement evidence.',
-      '/mute - admin only; mute a replied or mentioned user. Examples: /mute 5 minutes, /mute 1 day.',
-      '',
-      'How TRACaBot works',
-      '',
-      'TRACaBot processes reports, reviews, actions, and scam signals into persistent memory so agents and communities can recognize repeated patterns faster.'
+      '/mute - admin only; mute a replied or mentioned user. Examples: /mute 5 minutes, /mute 1 day.'
     ].join('\n');
   }
 
