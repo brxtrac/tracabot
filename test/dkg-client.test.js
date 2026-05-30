@@ -517,6 +517,47 @@ test('publishes unsafe chat events only when admin verified or very high confide
   assert.equal(verified.calls.some(([method]) => method === 'publishSharedMemory'), true);
 });
 
+test('review decisions require explicit admin verification before verified publish', async () => {
+  const unverifiedUpheld = makeAdapterClient();
+  const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient: unverifiedUpheld });
+  await dkg.writeEvent({
+    id: 'evt-review-unverified',
+    event_type: 'review_upheld',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    chat: { id: 'chat' },
+    user: { id: 'user' },
+    payload: { review_decision: 'confirm', confidence: 90, evidence: ['admin text without explicit verification flag'] }
+  });
+  assert.equal(unverifiedUpheld.calls.some(([method]) => method === 'publishSharedMemory'), false);
+
+  const verifiedUpheld = makeAdapterClient();
+  const verifiedDkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient: verifiedUpheld });
+  await verifiedDkg.writeEvent({
+    id: 'evt-review-verified',
+    event_type: 'review_upheld',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    chat: { id: 'chat' },
+    user: { id: 'user' },
+    payload: { review_decision: 'confirm', admin_verified: true, confidence: 90, evidence: ['explicit admin verification'] }
+  });
+  assert.equal(verifiedUpheld.calls.some(([method]) => method === 'publishSharedMemory'), true);
+
+  const falsePositive = makeAdapterClient();
+  const falsePositiveDkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient: falsePositive });
+  await falsePositiveDkg.writeEvent({
+    id: 'evt-review-false-positive',
+    event_type: 'review_overturned',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    chat: { id: 'chat' },
+    user: { id: 'user' },
+    payload: { review_decision: 'reject', admin_verified: true, confidence: 90, evidence: ['false positive correction'] }
+  });
+  assert.equal(falsePositive.calls.some(([method]) => method === 'publishSharedMemory'), false);
+});
+
 test('uses configured on-chain context graph id for verified publish', async () => {
   const adapterClient = makeAdapterClient();
   adapterClient.getAuthToken = () => 'test-token';

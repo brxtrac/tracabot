@@ -595,6 +595,17 @@ test('review queue uses admin-scoped inline buttons and callback decisions', asy
   assert.ok(finalScreen.reply_markup.inline_keyboard.flat().some((item) => item.text.includes('Back to queue')));
 });
 
+test('callback parser rejects malformed payloads and bounds generated data', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, type: 'supergroup' };
+  await bot.handleCallbackQuery({ id: 'bad-callback', from: { id: 1, username: 'admin' }, message: { chat, message_id: 20 }, data: 'tc:v1:help:%' });
+  assert.equal(calls.some((call) => call.method === 'editMessageText'), false);
+
+  const panel = bot.dashboardKeyboard('123456789').flat();
+  assert.ok(panel.every((item) => item.callback_data.length <= 64));
+  assert.throws(() => bot.dashboardKeyboard('x'.repeat(80)), /callback data too long/);
+});
+
 test('/mute mutes replied user for parsed duration and writes shared-memory event', async () => {
   const { bot, calls, dkgWrites } = makeBot({ canBan: true });
   await bot.handleMessage({
@@ -1288,7 +1299,7 @@ test('bot mention about website live feed redirects instead of clarifying', asyn
 });
 
 test('natural language unsupported request falls back without LLM', async () => {
-  const { bot, calls } = makeBot({ canBan: true, conversational: true, llm: null });
+  const { bot, calls } = makeBot({ canBan: true, conversational: true, conversationRateLimitSeconds: 0, llm: null });
   await bot.handleMessage({ chat: { id: -100, title: 'demo' }, from: { id: 2, username: 'member' }, message_id: 44, text: '@tracethembot can you make me a sandwich?' });
   // Take the last sendMessage that is reasonably long (the real agent response)
   const candidates = calls.filter(c => c.method === 'sendMessage' && String(c.payload.text || '').length > 30);
@@ -1304,6 +1315,12 @@ test('natural language LLM replies are sanitized', async () => {
   const reply = candidates.length ? candidates[candidates.length-1].payload.text : '';
   assert.match(reply, /community anti-scam bodyguard|community anti-scam guardian|I focus on anti-scam checks, DKG fraud memory|I'm Tracabot — a DKG-powered anti-scam guardian/);
   assert.doesNotMatch(reply, /token|admin list|abc/i);
+});
+
+test('bare bot mentions open the compact menu for both handles', async () => {
+  const { bot } = makeBot({ canBan: true, conversational: true, llm: null });
+  assert.equal(bot.isBareBotMention({ text: '@tracabot' }), true);
+  assert.equal(bot.isBareBotMention({ text: '@tracethembot' }), true);
 });
 
 test('natural language why explains local event decisions', async () => {
@@ -1333,6 +1350,22 @@ test('natural admin review records decision for explicit event id', async () => 
   await bot.executeAgentAction('review', { event_id: 'evt-ban', decision: 'reject', reason: 'agreed false positive' }, { chat, from: { id: 1, username: 'admin' }, message_id: 34, text: '@tracethembot reject evt-ban agreed false positive' }, true);
   assert.ok(dkgWrites.some((event) => event.event_type === 'review_overturned' && event.payload.review_decision === 'reject'));
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Rejected')));
+});
+
+test('natural admin review rejects missing, resolved, and wrong-chat event ids', async () => {
+  const { bot, dkgWrites, calls } = makeBot({ canBan: true, trustedUserIds: [1] });
+  const chat = { id: -100, title: 'demo' };
+  const otherChat = { id: -200, title: 'other' };
+  bot.store.append({ id: 'evt-resolved-review', event_type: 'review_upheld', timestamp: new Date().toISOString(), chat, user: { id: 86, username: 'resolved' }, payload: { target_event_id: 'old', review_decision: 'confirm' } });
+  bot.store.append({ id: 'evt-wrong-chat', event_type: 'risk_review_needed', timestamp: new Date().toISOString(), chat: otherChat, user: { id: 87, username: 'other_chat' }, payload: { confidence: 80, evidence: ['wrong chat'] } });
+
+  await bot.executeAgentAction('review', { event_id: 'evt-missing', decision: 'reject' }, { chat, from: { id: 1, username: 'admin' }, message_id: 341, text: '@tracethembot reject evt-missing' }, true);
+  await bot.executeAgentAction('review', { event_id: 'evt-resolved-review', decision: 'reject' }, { chat, from: { id: 1, username: 'admin' }, message_id: 342, text: '@tracethembot reject evt-resolved-review' }, true);
+  await bot.executeAgentAction('review', { event_id: 'evt-wrong-chat', decision: 'reject' }, { chat, from: { id: 1, username: 'admin' }, message_id: 343, text: '@tracethembot reject evt-wrong-chat' }, true);
+
+  assert.equal(dkgWrites.some((event) => event.event_type === 'review_upheld' || event.event_type === 'review_overturned'), false);
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('active pending review')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('different chat')));
 });
 
 test('natural admin review infers latest target event from reply', async () => {

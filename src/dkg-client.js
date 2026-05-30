@@ -98,9 +98,10 @@ function isProductionBindingForContext(binding = {}, contextGraph = '') {
 function shouldAutoPublishEvent(event = {}) {
   const confidence = Number(event.payload?.confidence || 0);
   const localConfidence = Number(event.payload?.local_confidence || 0);
-  const verifiedByAdmin = Boolean(event.payload?.admin_verified || event.payload?.community_verified_flag || event.payload?.review_decision);
+  const verifiedByAdmin = Boolean(event.payload?.admin_verified || event.payload?.community_verified_flag);
   if (event.event_type === 'ban_executed') return confidence >= 80;
-  if (['review_upheld', 'review_overturned'].includes(event.event_type)) return verifiedByAdmin;
+  if (event.event_type === 'review_upheld') return verifiedByAdmin;
+  if (event.event_type === 'review_overturned') return verifiedByAdmin && event.payload?.publish_false_positive === true;
   if (event.event_type === 'fraud_finding') return confidence >= 80 && localConfidence >= 60;
   if (event.event_type === 'fraud_campaign') return confidence >= 85 && boundedList(event.payload?.evidence_root_ids || event.payload?.related_event_ids || []).length >= 2;
   if (event.event_type === 'report_submitted') return confidence >= 80 && localConfidence >= 60 && event.payload?.report_decision === 'accepted';

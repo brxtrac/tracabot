@@ -84,11 +84,18 @@ function isCommand(text = '', command = '') {
 }
 
 function callbackData(action = '', ...parts) {
-  return ['tc', 'v1', action, ...parts].map((part) => encodeURIComponent(String(part || ''))).join(':').slice(0, 64);
+  const data = ['tc', 'v1', action, ...parts].map((part) => encodeURIComponent(String(part || ''))).join(':');
+  if (data.length > 64) throw new Error(`callback data too long for action ${action}`);
+  return data;
 }
 
 function parseCallbackData(data = '') {
-  const parts = String(data || '').split(':').map((part) => decodeURIComponent(part));
+  let parts;
+  try {
+    parts = String(data || '').split(':').map((part) => decodeURIComponent(part));
+  } catch {
+    return null;
+  }
   if (parts[0] !== 'tc' || parts[1] !== 'v1') return null;
   return { action: parts[2] || '', parts: parts.slice(3) };
 }
@@ -1915,7 +1922,7 @@ export class TelegramShieldBot {
   }
 
   isBareBotMention(message = {}) {
-    return /^@tracethembot$/i.test(String(messageText(message) || '').trim());
+    return /^@(?:tracabot|tracethembot)$/i.test(String(messageText(message) || '').trim());
   }
 
   isRecentBotNearReply(message = {}) {
@@ -2441,6 +2448,16 @@ export class TelegramShieldBot {
         return { handled: true };
       }
 
+      const targetEvent = this.findEvent(eventId);
+      if (!targetEvent || !this.isPendingReviewEvent(targetEvent)) {
+        await this.sendEphemeral(chatId, 'I could not find an active pending review for that event. Reopen Reviews and try from the current queue.', replyOptions);
+        return { handled: true };
+      }
+      if (targetEvent.chat?.id && message.chat?.id && String(targetEvent.chat.id) !== String(message.chat.id)) {
+        await this.sendEphemeral(chatId, 'That review item belongs to a different chat. Reopen Reviews in the original chat before recording a decision.', replyOptions);
+        return { handled: true };
+      }
+
       const decision = isReject ? 'reject' : 'confirm';
       const reason = parameters.reason || `implicit review decision via LLM context: ${decisionRaw || 'admin verdict'}`;
 
@@ -2918,9 +2935,6 @@ export class TelegramShieldBot {
       return;
     }
     if (isCommand(text, 'ban')) {
-      this.sendTyping(chatId);
-      await this.sendEphemeral(chatId, 'Processing ban request…', { reply_to_message_id: message.message_id });
-
       const { target, text: targetText } = this.resolveCommandTarget(message, 'ban');
       const replyUser = target?.id ? target : message.reply_to_message?.from;
       if (!await this.isTrustedModerator(message)) {
@@ -2932,6 +2946,10 @@ export class TelegramShieldBot {
         await this.sendEphemeral(chatId, `⚠️ /ban is restricted to configured admins or Telegram chat admins. Request logged locally as ${event.id}.`, { reply_to_message_id: message.message_id });
         return;
       }
+
+      this.sendTyping(chatId);
+      await this.sendEphemeral(chatId, 'Processing ban request…', { reply_to_message_id: message.message_id });
+
       if (!replyUser?.id) {
         const risk = await this.assess({ ...message, from: target, text: targetText }, target, targetText);
         const event = await this.record('ban_requested_no_reply', { ...message, from: target }, {
@@ -3498,6 +3516,10 @@ export class TelegramShieldBot {
     if (this.isDmReportMention(message)) {
       if (await this.rejectNonOwnerPrivateReport(message)) return;
       await this.handleDmReport(message, evidenceText(message));
+      return;
+    }
+    if (this.isBareBotMention(message)) {
+      await this.sendMenu(message);
       return;
     }
     if (await this.handleAlertReply(message)) return;
