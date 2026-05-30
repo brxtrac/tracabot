@@ -1256,7 +1256,7 @@ test('natural language stats is handled via the LLM agent path', async () => {
   const { bot, calls } = makeBot({ canBan: true, conversational: true, llm });
   await bot.handleMessage({ chat: { id: -100, title: 'demo' }, from: { id: 2, username: 'member' }, message_id: 40, text: '@tracethembot show me stats' });
   assert.equal(llmCalls.length, 0);
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('TRACaBot report')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('TRACaBot Stats')));
 });
 
 test('natural language digest uses deterministic route without LLM', async () => {
@@ -1265,7 +1265,9 @@ test('natural language digest uses deterministic route without LLM', async () =>
   const { bot, calls } = makeBot({ canBan: true, conversational: true, llm });
   await bot.handleMessage({ chat: { id: -100, title: 'demo' }, from: { id: 2, username: 'member' }, message_id: 401, text: '@tracethembot show me the digest' });
   assert.equal(llmCalls.length, 0);
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('tracabot digest (24h)')));
+  const reply = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
+  assert.match(reply, /TRACaBot Stats/);
+  assert.doesNotMatch(reply, /tracabot digest \(24h\)/);
 });
 
 test('natural language rejects private info requests', async () => {
@@ -1540,7 +1542,7 @@ test('stats buttons open sources and campaigns for the requesting user', async (
   await bot.handleCallbackQuery({ id: 'stats-cb-1', from: { id: 1, username: 'admin' }, message: { chat, message_id: 501 }, data: sourcesButton.callback_data });
   await bot.handleCallbackQuery({ id: 'stats-cb-2', from: { id: 1, username: 'admin' }, message: { chat, message_id: 501 }, data: campaignsButton.callback_data });
   assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('evt-stats')));
-  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('domain:buttons.example')));
+  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('Repeated link domain: buttons.example')));
 });
 
 test('review tab buttons are admin-only and filter active mutes', async () => {
@@ -1681,9 +1683,9 @@ test('stats menu campaigns and summary cover local memory', async () => {
   const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Stats', 'stats-local');
   const campaignsButton = buttonByText(panel, 'Campaigns');
   await bot.handleCallbackQuery({ id: 'stats-local-campaigns', from: { id: 1, username: 'admin' }, message: { chat, message_id: 381 }, data: campaignsButton.callback_data });
-  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('domain:fake.example')));
-  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('24h local')));
-  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('Follow up')));
+  assert.match(panel.text, /Pattern watch/);
+  assert.match(panel.text, /fake\.example across 2 events/);
+  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('Repeated link domain: fake.example')));
 });
 
 test('campaign summaries include evidence roots and affected communities', async () => {
@@ -2168,17 +2170,19 @@ test('caption-only messages do not crash message handling', async () => {
 test('stats menu pulls DKG aggregate data', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   const reply = await openMenuPanel(bot, calls, { id: -100, title: 'demo' }, { id: 1, username: 'admin' }, 'Stats', 'stats-dkg');
-  assert.match(reply.text, /TRACaBot report \(7d\)/);
-  assert.match(reply.text, /2 high-confidence signals from 3 DKG events/);
-  assert.match(reply.text, /24h local/);
+  assert.match(reply.text, /TRACaBot Stats/);
+  assert.match(reply.text, /2 high-confidence receipts from 3 verified events this week/);
+  assert.match(reply.text, /Protected today/);
   assert.doesNotMatch(reply.text, /{"fraud_finding"/);
 });
 
-test('stats menu includes 24h digest section', async () => {
+test('stats menu combines weekly receipts and daily activity without digest duplication', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   const reply = await openMenuPanel(bot, calls, { id: -100, title: 'demo' }, { id: 1, username: 'admin' }, 'Stats', 'stats-digest');
-  assert.match(reply.text, /tracabot digest \(24h\)/);
-  assert.match(reply.text, /TRACaBot report \(7d\)/);
+  assert.match(reply.text, /Shared memory/);
+  assert.match(reply.text, /Review queue/);
+  assert.match(reply.text, /Pattern watch/);
+  assert.doesNotMatch(reply.text, /tracabot digest \(24h\)|TRACaBot report \(7d\)|24h local/);
 });
 
 test('/review list is compact and groups duplicate targets', async () => {

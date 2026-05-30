@@ -1655,6 +1655,16 @@ export class TelegramShieldBot {
     ].join('\n');
   }
 
+  campaignStatsLabel(campaign = null) {
+    if (!campaign) return 'No repeated scam wave in the last 24h.';
+    const label = (campaign.patterns || []).map((item) => String(item).replace(/[_-]/g, ' ')).find(Boolean)
+      || (campaign.domains || [])[0]
+      || (campaign.aliases || [])[0]
+      || String(campaign.key || '').replace(/^[^:]+:/, '').replace(/[_-]/g, ' ').slice(0, 48)
+      || 'repeated signal';
+    return `${label} across ${campaign.events.length} events`;
+  }
+
   formatStatsDashboard(stats) {
     const events = this.recentEvents(24 * 60 * 60 * 1000);
     const count = (types) => events.filter((event) => types.includes(event.event_type)).length;
@@ -1662,16 +1672,43 @@ export class TelegramShieldBot {
     const reviews = this.pendingReviewItems();
     const restrictions = this.recentRestrictions();
     const high = events.filter((event) => Number(event.payload?.confidence || 0) >= 80).length;
+    const total = Number(stats.total || 0);
+    const verifiedHigh = Number(stats.highConfidence || 0);
+    const protectedActions = count(['risk_query', 'risk_check']) + count(['report_review_needed', 'report_submitted']) + count(['review_upheld', 'review_overturned']) + count(['ban_executed', 'restrict_executed']);
+    const bans = count(['ban_executed']);
+    const mutes = count(['restrict_executed']);
+    const reports = count(['report_review_needed', 'report_submitted']);
+    const decisions = count(['review_upheld', 'review_overturned']);
+    const queueLine = reviews.length
+      ? `${reviews.length} admin reviews waiting. Open Reviews to clear the queue.`
+      : 'Review queue clear.';
+    const actionLine = [
+      protectedActions ? `${protectedActions} protection actions` : '',
+      high ? `${high} high-risk signals` : '',
+      reports ? `${reports} reports queued` : '',
+      decisions ? `${decisions} admin decisions` : '',
+      bans ? `${bans} bans` : '',
+      mutes ? `${mutes} mutes` : ''
+    ].filter(Boolean).join(' · ') || 'No urgent local threats handled today.';
+    const graphLine = total
+      ? `${verifiedHigh} high-confidence receipts from ${total} verified events this week.`
+      : 'No verified 7d events yet.';
     return [
-      formatStatsReply(stats),
+      '📊 TRACaBot Stats',
       '',
-      `24h local: ${plural(events.length, 'event')}, ${plural(high, 'high-risk signal')}, ${plural(count(['report_submitted']), 'accepted report')}, ${plural(count(['review_upheld', 'review_overturned']), 'review decision')}.`,
-      `Queue: ${plural(reviews.length, 'pending review')}, ${plural(restrictions.length, 'active mute')}.`,
-      campaigns.length ? `Top campaign: ${campaigns[0].key} (${campaigns[0].events.length} events): ${(campaigns[0].labels || campaigns[0].patterns || campaigns[0].domains || []).slice(0, 3).join(', ') || 'repeated signal'}` : 'No repeated campaign cluster in the last 24h.',
+      '✅ Protected today',
+      actionLine,
       '',
-      this.formatDigest(),
+      '🧠 Shared memory',
+      graphLine,
       '',
-      reviews.length ? 'Follow up: open Reviews from /start, or reply to a bot alert with “confirm scam” or “reject as not a scam”.' : 'Follow up: use /scan for suspicious users, /report for evidence, or Stats > Sources for receipts.'
+      '🚨 Review queue',
+      `${queueLine}${restrictions.length ? ` ${restrictions.length} active mutes.` : ''}`,
+      '',
+      '🧬 Pattern watch',
+      this.campaignStatsLabel(campaigns[0]),
+      '',
+      'Next: use /scan on suspicious users, /report with evidence, or Stats > Sources for receipts.'
     ].join('\n');
   }
 
