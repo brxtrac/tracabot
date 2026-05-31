@@ -153,7 +153,7 @@ export function formatReportReply(event, decision = null) {
 
 export function formatBanReply(target, eventId) {
   const name = displayName(target);
-  return `🔨 Banned ${name}. I saved the moderation evidence to DKG fraud memory for future protection.`;
+  return `🔨 Banned ${name}. I saved the moderation evidence to TRACaBot context memory for future protection.`;
 }
 
 function labelStatKey(key = '') {

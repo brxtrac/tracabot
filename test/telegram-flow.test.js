@@ -1760,6 +1760,9 @@ test('/ban replying to SangMata rename bans the renamed user ID', async () => {
   const sangmata = { chat, from: { id: 461843263, username: 'SangMataInfo_bot', is_bot: true }, text: 'User 8388593201 changed name from QQQ to Kristian Baumgartner.' };
   await bot.handleCommand({ chat, from: { id: 1, username: 'admin' }, message_id: 44, text: '/ban', reply_to_message: sangmata });
   assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === '8388593201'));
+  const reply = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('Banned Kristian Baumgartner'))?.payload.text || '';
+  assert.match(reply, /TRACaBot context memory/);
+  assert.doesNotMatch(reply, /Could not remove the replied message|DKG evidence logging is continuing|DKG fraud memory/);
   const event = bot.store.all().find((item) => item.event_type === 'ban_executed');
   assert.equal(event.user.id, '8388593201');
   assert.match(JSON.stringify(event.payload.evidence), /SangMata rename alert/);

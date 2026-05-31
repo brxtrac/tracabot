@@ -3079,7 +3079,8 @@ export class TelegramShieldBot {
       repliedMessageDeleted = false;
       repliedMessageDeleteError = 'auto-delete disabled during testing';
       await this.ban(chatId, replyUser.id);
-      await this.sendCommandReply(chatId, `${formatBanReply(replyUser, '')} ${repliedMessageDeleted ? 'Removed the replied scam message.' : replyMessageId ? 'Could not remove the replied message.' : 'No replied message to remove.'} DKG evidence logging is continuing.`, { reply_to_message_id: message.message_id });
+      const deletionNote = replyUser.sangmata ? '' : repliedMessageDeleted ? ' Removed the replied scam message.' : '';
+      await this.sendCommandReply(chatId, `${formatBanReply(replyUser, '')}${deletionNote}`, { reply_to_message_id: message.message_id });
       const event = await this.record('ban_executed', { ...message, from: replyUser }, {
         ...risk,
         reason,
