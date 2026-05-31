@@ -32,6 +32,12 @@ test('loadConfig parses community scope settings', () => {
   assert.equal(config.policyId, 'strict-v1');
 });
 
+test('loadConfig parses bot owner ids for global trust roots', () => {
+  const config = loadConfig({ TRACABOT_BOT_OWNER_IDS: '1234,@brx' });
+  assert.equal(config.botOwnerIds.has('1234'), true);
+  assert.equal(config.botOwnerIds.has('brx'), true);
+});
+
 test('loadConfig parses boolean environment values strictly', () => {
   assert.equal(loadConfig({ TRACABOT_AUTO_BAN: '0' }).autoBan, false);
   assert.equal(loadConfig({ TRACABOT_AUTO_BAN: 'yes' }).autoBan, true);

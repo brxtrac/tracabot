@@ -115,7 +115,7 @@ function shouldAutoPublishEvent(event = {}) {
 }
 
 function trustedGlobalFalsePositive(event = {}) {
-  return event.event_type === 'review_overturned' && Boolean(event.payload?.admin_verified || event.payload?.community_verified_flag);
+  return event.event_type === 'review_overturned' && Boolean(event.payload?.trac_backed_global_authority || event.payload?.verified_memory_authority || event.payload?.community_verified_flag === 'verified_memory_trac_spend');
 }
 
 function lifecycleStage(event = {}) {
@@ -211,7 +211,12 @@ function eventTriples(event) {
     { subject, predicate: `${NS}moderatorUsername`, object: literal(event.payload?.moderator?.username || event.payload?.reviewer?.username || '') },
     { subject, predicate: `${NS}reviewDecision`, object: literal(event.payload?.review_decision || '') },
     { subject, predicate: `${NS}adminVerified`, object: literal(event.payload?.admin_verified ? 'true' : '') },
+    { subject, predicate: `${NS}localAdminVerified`, object: literal(event.payload?.local_admin_verified ? 'true' : '') },
     { subject, predicate: `${NS}trustedGlobalClear`, object: literal(trustedGlobalFalsePositive(event) ? 'true' : '') },
+    { subject, predicate: `${NS}decisionScope`, object: literal(event.payload?.decision_scope || '') },
+    { subject, predicate: `${NS}trustBasis`, object: literal(event.payload?.trust_basis || '') },
+    { subject, predicate: `${NS}verifiedMemoryAuthority`, object: literal(event.payload?.verified_memory_authority ? 'true' : '') },
+    { subject, predicate: `${NS}tracBackedGlobalAuthority`, object: literal(event.payload?.trac_backed_global_authority ? 'true' : '') },
     { subject, predicate: `${NS}publicationStatus`, object: literal(event.payload?.publication_status || status) },
     { subject, predicate: `${NS}commitReceiptId`, object: literal(event.payload?.commit_receipt_id || '') },
     { subject, predicate: `${NS}commitPolicy`, object: literal(event.payload?.commit_policy || '') },
@@ -589,7 +594,7 @@ export class DkgClient {
     ).join(' UNION ');
 
     const sparql = `
-      SELECT ?g ?s ?eventType ?confidence ?scamType ?created ?chatId ?username ?eventSource ?testMode ?adminVerified ?trustedGlobalClear WHERE {
+      SELECT ?g ?s ?eventType ?confidence ?scamType ?created ?chatId ?username ?eventSource ?testMode ?adminVerified ?trustedGlobalClear ?verifiedMemoryAuthority ?tracBackedGlobalAuthority ?communityVerifiedFlag WHERE {
         GRAPH ?g {
           { ${valueClauses} }
           OPTIONAL { ?s <${NS}eventType> ?eventType . }
@@ -602,6 +607,9 @@ export class DkgClient {
           OPTIONAL { ?s <${NS}testMode> ?testMode . }
           OPTIONAL { ?s <${NS}adminVerified> ?adminVerified . }
           OPTIONAL { ?s <${NS}trustedGlobalClear> ?trustedGlobalClear . }
+          OPTIONAL { ?s <${NS}verifiedMemoryAuthority> ?verifiedMemoryAuthority . }
+          OPTIONAL { ?s <${NS}tracBackedGlobalAuthority> ?tracBackedGlobalAuthority . }
+          OPTIONAL { ?s <${NS}communityVerifiedFlag> ?communityVerifiedFlag . }
         }
       } LIMIT 30
     `;
@@ -628,9 +636,12 @@ export class DkgClient {
         scamType: cleanValue(b.scamType),
         adminVerified: cleanValue(b.adminVerified) === 'true',
         trustedGlobalClear: cleanValue(b.trustedGlobalClear) === 'true',
+        verifiedMemoryAuthority: cleanValue(b.verifiedMemoryAuthority) === 'true',
+        tracBackedGlobalAuthority: cleanValue(b.tracBackedGlobalAuthority) === 'true',
+        communityVerifiedFlag: cleanValue(b.communityVerifiedFlag),
         ual: cleanValue(b.g)
       }))
-      .filter(e => e.eventType === 'review_overturned' && (e.adminVerified || e.trustedGlobalClear));
+      .filter(e => e.eventType === 'review_overturned' && (e.trustedGlobalClear || e.verifiedMemoryAuthority || e.tracBackedGlobalAuthority || e.communityVerifiedFlag === 'verified_memory_trac_spend'));
 
     return {
       hasPriorAdminAction: severeEvents.length > 0,

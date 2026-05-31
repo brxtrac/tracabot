@@ -219,7 +219,8 @@ test('admin history escapes identifiers and ignores false-positive or non-produc
         s: 'https://tracabot.org/ontology#event/false-positive-safe',
         eventType: 'review_overturned',
         confidence: '100',
-        adminVerified: 'true'
+        adminVerified: 'true',
+        tracBackedGlobalAuthority: 'true'
       },
       {
         g: 'did:dkg:context-graph:tracabot/_shared_memory',
@@ -567,9 +568,9 @@ test('review decisions require explicit admin verification before verified publi
     agentDid: 'did:dkg:agent:test',
     chat: { id: 'chat' },
     user: { id: 'user' },
-    payload: { review_decision: 'reject', admin_verified: true, confidence: 90, evidence: ['false positive correction'] }
+    payload: { review_decision: 'reject', admin_verified: true, publish_false_positive: true, trac_backed_global_authority: true, confidence: 90, evidence: ['false positive correction'] }
   });
-  assert.equal(falsePositive.calls.some(([method]) => method === 'publishSharedMemory'), false);
+  assert.equal(falsePositive.calls.some(([method]) => method === 'publishSharedMemory'), true);
 });
 
 test('review-overturned events write reviewed target identity for global admin clears', async () => {
@@ -585,6 +586,10 @@ test('review-overturned events write reviewed target identity for global admin c
     payload: {
       review_decision: 'reject',
       admin_verified: true,
+      trac_backed_global_authority: true,
+      verified_memory_authority: true,
+      decision_scope: 'global_verified_memory',
+      trust_basis: 'bot_owner_verified_memory_trac',
       confidence: 100,
       reviewed_target: { id: '4242', username: 'safeuser', first_name: 'Safe' },
       reviewed_target_key: 'id:4242',
@@ -596,6 +601,34 @@ test('review-overturned events write reviewed target identity for global admin c
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetUsername') && triple.object === '"safeuser"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetKey') && triple.object === '"id:4242"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#trustedGlobalClear') && triple.object === '"true"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#decisionScope') && triple.object === '"global_verified_memory"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#tracBackedGlobalAuthority') && triple.object === '"true"'));
+});
+
+test('local admin false-positive reviews are not global clears without TRAC-backed authority', async () => {
+  const adapterClient = makeAdapterClient();
+  const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient });
+  const result = await dkg.writeEvent({
+    id: 'evt-local-clear',
+    event_type: 'review_overturned',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    chat: { id: 'chat' },
+    user: { id: '2', username: 'localadmin' },
+    payload: {
+      review_decision: 'reject',
+      local_admin_verified: true,
+      admin_verified: false,
+      decision_scope: 'local_community',
+      trust_basis: 'telegram_local_admin',
+      reviewed_target: { id: '4242', username: 'safeuser' },
+      reviewed_target_key: 'id:4242',
+      evidence: ['local admin cleared in one community']
+    }
+  });
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#localAdminVerified') && triple.object === '"true"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#decisionScope') && triple.object === '"local_community"'));
+  assert.equal(result.triples.some((triple) => triple.predicate.endsWith('#trustedGlobalClear') && triple.object === '"true"'), false);
 });
 
 test('uses configured on-chain context graph id for verified publish', async () => {

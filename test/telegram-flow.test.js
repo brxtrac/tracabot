@@ -67,6 +67,7 @@ function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = nu
     config: {
         telegramToken: 'test',
         adminIds: new Set(adminIds),
+        botOwnerIds: new Set(),
         autoDelete: true,
         autoRestrict: true,
         autoBan: true,
@@ -592,6 +593,7 @@ test('review queue uses admin-scoped inline buttons and callback decisions', asy
   const confirmData = opened.reply_markup.inline_keyboard[0][0].callback_data;
   await bot.handleCallbackQuery({ id: 'cb3', from: { id: 1, username: 'admin' }, message: { chat: { id: -100, type: 'supergroup' }, message_id: 20 }, data: confirmData });
   assert.ok(bot.store.all().some((event) => event.event_type === 'review_upheld' && event.payload.target_event_id === flagged.id));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'review_upheld' && event.payload.local_admin_verified === true && event.payload.decision_scope === 'local_community'));
   const finalScreen = calls.filter((call) => call.method === 'editMessageText').at(-1).payload;
   assert.match(finalScreen.text, /Confirmed scam/);
   assert.doesNotMatch(finalScreen.text, /Reply to this message with a reason|Submit confirmation/);
@@ -606,7 +608,30 @@ test('scam alert review buttons can be used by any trusted admin', async () => {
   const rejectData = buttonByText(alert, 'Reject flag').callback_data;
   await bot.handleCallbackQuery({ id: 'alert-review-other-admin', from: { id: 2, username: 'otheradmin' }, message: { chat, message_id: alert.message_id || 22 }, data: rejectData });
   assert.equal(calls.some((call) => call.method === 'answerCallbackQuery' && String(call.payload.text || '').includes('Open your own panel')), false);
-  assert.ok(bot.store.all().some((event) => event.event_type === 'review_overturned' && event.payload.reviewer.id === 2));
+  const review = bot.store.all().find((event) => event.event_type === 'review_overturned' && event.payload.reviewer.id === 2);
+  assert.ok(review);
+  assert.equal(review.payload.admin_verified, false);
+  assert.equal(review.payload.local_admin_verified, true);
+  assert.equal(review.payload.decision_scope, 'local_community');
+});
+
+test('bot owner with verified-memory publishing creates TRAC-backed global review clear', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    trustedUserIds: [1],
+    configOverrides: { botOwnerIds: new Set(['1']), publishContextGraphId: '13' }
+  });
+  const chat = { id: -100, type: 'supergroup' };
+  await bot.handleMessage({ chat, from: { id: 77, username: 'suspect', is_bot: false }, message_id: 22, text: 'known scam actor returns' });
+  const alert = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('flagged this for admin review'))?.payload;
+  const rejectData = buttonByText(alert, 'Reject flag').callback_data;
+  await bot.handleCallbackQuery({ id: 'owner-global-clear', from: { id: 1, username: 'owner' }, message: { chat, message_id: alert.message_id || 23 }, data: rejectData });
+  const review = bot.store.all().find((event) => event.event_type === 'review_overturned' && event.payload.reviewer.id === 1);
+  assert.ok(review);
+  assert.equal(review.payload.admin_verified, true);
+  assert.equal(review.payload.trac_backed_global_authority, true);
+  assert.equal(review.payload.decision_scope, 'global_verified_memory');
+  assert.equal(review.payload.publish_false_positive, true);
 });
 
 test('callback parser rejects malformed payloads and bounds generated data', async () => {

@@ -851,6 +851,28 @@ export class TelegramShieldBot {
     return this.config.adminIds.has(String(user.id).toLowerCase()) || this.config.adminIds.has(String(user.username || '').replace(/^@/, '').toLowerCase());
   }
 
+  isBotOwner(user = {}) {
+    return this.config.botOwnerIds?.has(String(user.id).toLowerCase()) || this.config.botOwnerIds?.has(String(user.username || '').replace(/^@/, '').toLowerCase());
+  }
+
+  hasVerifiedMemoryAuthority(user = {}) {
+    return this.isBotOwner(user) && Boolean(this.config.publishContextGraphId);
+  }
+
+  reviewTrustPayload(user = {}) {
+    const verifiedMemoryAuthority = this.hasVerifiedMemoryAuthority(user);
+    const scope = verifiedMemoryAuthority ? 'global_verified_memory' : 'local_community';
+    return {
+      admin_verified: verifiedMemoryAuthority,
+      local_admin_verified: true,
+      decision_scope: scope,
+      trust_basis: verifiedMemoryAuthority ? 'bot_owner_verified_memory_trac' : 'telegram_local_admin',
+      verified_memory_authority: verifiedMemoryAuthority,
+      trac_backed_global_authority: verifiedMemoryAuthority,
+      publish_false_positive: verifiedMemoryAuthority
+    };
+  }
+
   chatJoinChallengeEnabled(chatId) {
     const key = String(chatId || '');
     const latest = [...this.store.all()].reverse().find((event) => event.event_type === 'join_challenge_setting_changed' && String(event.chat?.id || '') === key);
@@ -1819,6 +1841,7 @@ export class TelegramShieldBot {
         reviewer: actorFromMessage(message),
         reviewed_target: reviewedTarget,
         reviewed_target_key: targetKey(reviewedTarget),
+        ...this.reviewTrustPayload(actorFromMessage(message)),
         false_positive_reason: reason,
         evidence: [`natural language admin rejected scam flag ${reviewedEvent.id}: ${reason}`]
       });
@@ -2260,6 +2283,7 @@ export class TelegramShieldBot {
         reviewer: actorFromMessage(message),
         reviewed_target: reviewedTarget,
         reviewed_target_key: targetKey(reviewedTarget),
+        ...this.reviewTrustPayload(actorFromMessage(message)),
         false_positive_reason: classified.decision === 'reject' ? reason : '',
         implicit_detection: true,
         detection_method: 'llm_alert_reply_classifier',
@@ -2535,6 +2559,10 @@ export class TelegramShieldBot {
         target_event_id: eventId,
         review_decision: decision,
         reason,
+        reviewer: actorFromMessage(message),
+        reviewed_target: targetEvent.user || targetEvent.payload?.target || {},
+        reviewed_target_key: targetKey(targetEvent.user || targetEvent.payload?.target || {}),
+        ...this.reviewTrustPayload(actorFromMessage(message)),
         implicit_detection: true,
         detection_method: 'llm_context_after_flag',
         moderator: actorFromMessage(message)
@@ -3572,7 +3600,7 @@ export class TelegramShieldBot {
         reviewer: from,
         reviewed_target: event.user || event.payload?.target || {},
         reviewed_target_key: targetKey(event.user || event.payload?.target || {}),
-        admin_verified: true,
+        ...this.reviewTrustPayload(from),
         false_positive_reason: finalDecision === 'reject' ? reason : '',
         evidence: [`admin callback ${finalDecision === 'confirm' ? 'confirmed scam flag' : 'rejected scam flag'} ${event.id}: ${reason}`]
       });

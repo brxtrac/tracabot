@@ -53,6 +53,10 @@ export function loadConfig(env = process.env) {
     .split(',')
     .map((id) => id.trim().replace(/^@/, '').toLowerCase())
     .filter(Boolean));
+  const botOwnerIds = new Set((env.TRACABOT_BOT_OWNER_IDS || env.TRACABOT_BOT_OWNER_ID || '')
+    .split(',')
+    .map((id) => id.trim().replace(/^@/, '').toLowerCase())
+    .filter(Boolean));
   if (!Number.isFinite(actionThreshold) || actionThreshold < 50 || actionThreshold > 100) {
     throw new Error('TRACABOT_ACTION_THRESHOLD must be a number from 50 to 100');
   }
@@ -150,6 +154,7 @@ export function loadConfig(env = process.env) {
   return {
     telegramToken: env.TELEGRAM_BOT_TOKEN || '',
     adminIds,
+    botOwnerIds,
     autoDelete: parseBoolean(env.TRACABOT_AUTO_DELETE, true),
     autoRestrict: parseBoolean(env.TRACABOT_AUTO_RESTRICT, true),
     autoBan: parseBoolean(env.TRACABOT_AUTO_BAN, true),
