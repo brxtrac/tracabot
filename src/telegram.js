@@ -529,7 +529,9 @@ export class TelegramShieldBot {
     const chatId = message.chat?.id;
     const requester = message.from?.id || message.from?.username || '';
     const text = await this.menuIntro(message);
-    const sent = await this.sendInteractiveReply(chatId, text, this.dashboardKeyboard(requester), { reply_to_message_id: message.message_id, ...extra });
+    const isPrivateChat = message.chat?.type === 'private' || Number(chatId) > 0;
+    const replyContext = isPrivateChat ? { reply_to_message_id: message.message_id } : {};
+    const sent = await this.sendInteractiveReply(chatId, text, this.dashboardKeyboard(requester), { ...replyContext, ...extra });
     this.cleanupMenuTrigger(message);
     return sent;
   }
@@ -2959,7 +2961,9 @@ export class TelegramShieldBot {
     const text = message.text || '';
     const chatId = message.chat.id;
     if (isCommand(text, 'start')) {
-      await this.sendInteractiveReply(chatId, this.formatHelp(), this.dashboardKeyboard(message.from?.id || message.from?.username || ''), { reply_to_message_id: message.message_id });
+      const isPrivateChat = message.chat?.type === 'private' || Number(chatId) > 0;
+      const replyContext = isPrivateChat ? { reply_to_message_id: message.message_id } : {};
+      await this.sendInteractiveReply(chatId, this.formatHelp(), this.dashboardKeyboard(message.from?.id || message.from?.username || ''), replyContext);
       this.cleanupMenuTrigger(message);
       return;
     }

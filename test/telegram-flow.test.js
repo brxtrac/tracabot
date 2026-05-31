@@ -1177,7 +1177,9 @@ test('/start opens protection menu and explains direct commands', async () => {
   }
   assert.doesNotMatch(help, /Autonomous policy|Testing note|delete\/restrict|<user\|id\|wallet/i);
   assert.doesNotMatch(help, /Context Graph tracabot/);
-  assert.ok(calls.find((call) => call.method === 'sendMessage')?.payload.reply_markup?.inline_keyboard?.some((row) => row.some((button) => String(button.text).includes('Stats'))));
+  const menuMessage = calls.find((call) => call.method === 'sendMessage')?.payload;
+  assert.ok(menuMessage?.reply_markup?.inline_keyboard?.some((row) => row.some((button) => String(button.text).includes('Stats'))));
+  assert.equal(menuMessage.reply_to_message_id, undefined);
   assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 30));
 });
 
@@ -1189,7 +1191,9 @@ test('/start bot command variant deletes the trigger after opening menu', async 
     message_id: 31,
     text: '/start@tracethembot'
   });
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('TRACaBot Agent online')));
+  const menuMessage = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('TRACaBot Agent online'))?.payload;
+  assert.ok(menuMessage);
+  assert.equal(menuMessage.reply_to_message_id, undefined);
   assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 31));
 });
 
