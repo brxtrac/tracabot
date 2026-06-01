@@ -761,6 +761,8 @@ test('DM DKG UAL solves join challenge and restores group permissions', async ()
   assert.ok(calls.some((call) => call.method === 'sendMessage' && call.payload.chat_id === 145 && String(call.payload.text).includes('You shared a did:dkg: address')));
   assert.ok(calls.some((call) => call.method === 'sendMessage' && call.payload.chat_id === 145 && String(call.payload.text).includes('future of trusted, decentralized AI')));
   assert.ok(calls.some((call) => call.method === 'sendMessage' && call.payload.chat_id === 145 && String(call.payload.text).includes('For more information: https://x.com/BranaRakic/status/2040159452431560995')));
+  assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.chat_id === -100));
+  assert.equal(bot.joinChallengeTimers.has('-100:145'), false);
   const groupSuccess = calls.find((call) => call.method === 'sendMessage' && call.payload.chat_id === -100 && String(call.payload.text).includes('DKG-verified'))?.payload || {};
   assert.match(groupSuccess.text, /@dmlearner/);
   assert.equal(groupSuccess.parse_mode, 'HTML');
@@ -1079,11 +1081,32 @@ test('expired DKG join challenge kicks unresolved user', async () => {
   const chat = { id: -100, title: 'demo' };
   await bot.handleNewMembers({ chat, from: { id: 1, username: 'admin' }, new_chat_members: [{ id: 47, username: 'timeout', first_name: 'Timeout', is_bot: false }] });
   const challenge = bot.joinChallenges.get('-100:47');
+  const promptMessageId = challenge.messageId;
+  assert.ok(promptMessageId);
   challenge.expiresAt = Date.now() - 1;
   await bot.expireJoinChallenges();
   assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 47));
   assert.ok(calls.some((call) => call.method === 'unbanChatMember' && call.payload.user_id === 47));
+  assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.chat_id === -100 && call.payload.message_id === promptMessageId));
+  assert.equal(bot.joinChallengeTimers.has('-100:47'), false);
   assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_expired' && event.local_only));
+});
+
+test('join challenge expiry timer deletes stale prompt near timeout', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    configOverrides: { joinChallenge: true, joinChallengeAction: 'kick', joinChallengeTtlSeconds: 0, joinChallengeMode: 'ual' }
+  });
+  const chat = { id: -100, title: 'demo' };
+  await bot.handleNewMembers({ chat, from: { id: 1, username: 'admin' }, new_chat_members: [{ id: 4701, username: 'timerexpire', first_name: 'Timer', is_bot: false }] });
+  const challenge = bot.joinChallenges.get('-100:4701');
+  const promptMessageId = challenge.messageId;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.chat_id === -100 && call.payload.message_id === promptMessageId));
+  assert.equal(bot.joinChallenges.has('-100:4701'), false);
+  assert.equal(bot.joinChallengeTimers.has('-100:4701'), false);
 });
 
 test('one-off expired DKG join challenge stays local-only without DKG write', async () => {

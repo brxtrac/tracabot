@@ -412,6 +412,7 @@ export class TelegramShieldBot {
     this.observedUsers = new Map();
     this.chatAdmins = new Map();
     this.joinChallenges = new Map();
+    this.joinChallengeTimers = new Map();
     this.solvedJoinChallenges = new Map();
     this.reviewMessageEvents = new Map();
     this.lastPendingReviewsByChat = new Map(); // chatId -> displayed review groups for natural follow-up corrections
@@ -3190,11 +3191,12 @@ export class TelegramShieldBot {
       }, { writeDkg: false });
       return false;
     }
-    const expiresAt = Date.now() + (this.config.joinChallengeTtlSeconds || 60) * 1000;
+    const expiresAt = Date.now() + (this.config.joinChallengeTtlSeconds ?? 60) * 1000;
     const key = this.challengeKey(chatId, member.id);
     const qa = this.selectJoinChallengeQa(chatId, member);
     const challenge = { chat: message.chat, user: member, startedAt: Date.now(), expiresAt, messageId: '', attempts: 0, mode: qa ? 'qa' : 'ual', qa, restricted: false };
     this.joinChallenges.set(key, challenge);
+    this.scheduleJoinChallengeExpiry(key, challenge);
     let restricted = false;
     try {
       await this.restrict(chatId, member.id, Math.floor(expiresAt / 1000));
@@ -3204,6 +3206,7 @@ export class TelegramShieldBot {
       challenge.messageId = sent?.message_id || '';
     } catch (error) {
       this.joinChallenges.delete(key);
+      this.clearJoinChallengeTimer(key);
       if (restricted) await this.restoreMemberPermissions(chatId, member.id).catch(() => null);
       await this.record('join_challenge_start_failed', { ...message, from: member }, {
         target: member,
@@ -3224,6 +3227,30 @@ export class TelegramShieldBot {
       restricted_text_only: restricted,
       evidence: [qa ? 'new user asked to answer a DKG Knowledge Asset question' : 'new user asked to verify with a DKG Knowledge Asset UAL']
     }, { writeDkg: false });
+  }
+
+  clearJoinChallengeTimer(key) {
+    const timer = this.joinChallengeTimers.get(key);
+    if (timer) clearTimeout(timer);
+    this.joinChallengeTimers.delete(key);
+  }
+
+  scheduleJoinChallengeExpiry(key, challenge) {
+    this.clearJoinChallengeTimer(key);
+    const delay = Math.max(0, challenge.expiresAt - Date.now());
+    const graceMs = Math.min(250, Math.max(10, delay * 0.1));
+    const timer = setTimeout(() => {
+      this.expireJoinChallenges().catch((error) => console.error(error instanceof Error ? error.message : String(error)));
+    }, delay + graceMs);
+    timer.unref?.();
+    this.joinChallengeTimers.set(key, timer);
+  }
+
+  async deleteJoinChallengePrompt(challenge) {
+    if (!challenge?.messageId || !challenge.chat?.id) return false;
+    if (!await this.hasDeleteRights(challenge.chat.id)) return false;
+    await this.deleteMessage(challenge.chat.id, challenge.messageId).catch(() => null);
+    return true;
   }
 
   selectJoinChallengeQa(chatId, member = {}) {
@@ -3301,7 +3328,9 @@ export class TelegramShieldBot {
     const maxAttempts = this.config.joinChallengeMaxAttempts || 3;
     if (challenge.attempts < maxAttempts) return false;
     const chatId = challenge.chat.id;
-    this.joinChallenges.delete(this.challengeKey(chatId, challenge.user.id));
+    const key = this.challengeKey(chatId, challenge.user.id);
+    this.joinChallenges.delete(key);
+    this.clearJoinChallengeTimer(key);
     const actionApplied = await this.applyJoinChallengeFailureAction(challenge, 'max_attempts');
     const event = await this.record('join_challenge_failed_max_attempts', { ...message, chat: challenge.chat, from: challenge.user }, {
       target: challenge.user,
@@ -3315,7 +3344,7 @@ export class TelegramShieldBot {
       evidence: [`new user failed DKG join challenge after ${challenge.attempts} attempts`]
     }, { writeDkg: false });
     await this.maybeRecordJoinChallengeRepeatFailure({ ...message, chat: challenge.chat, from: challenge.user }, event);
-    if (challenge.messageId && await this.hasDeleteRights(chatId)) await this.deleteMessage(chatId, challenge.messageId).catch(() => null);
+    await this.deleteJoinChallengePrompt(challenge);
     await this.sendEphemeral(chatId, `${userMention(challenge.user)} did not complete DKG verification after ${challenge.attempts} attempts.`, { parse_mode: 'HTML', autoDelete: true }, this.config.successMessageTtlSeconds || 45).catch(() => null);
     if (options.dm && options.sourceChatId) await this.send(options.sourceChatId, 'Verification failed too many times. Ask a group admin to reset your access.', { private: true }).catch(() => null);
     return true;
@@ -3435,6 +3464,7 @@ export class TelegramShieldBot {
     const replyChatId = options.sourceChatId || chatId;
     const key = this.challengeKey(chatId, message.from.id);
     this.joinChallenges.delete(key);
+    this.clearJoinChallengeTimer(key);
     this.markJoinChallengeSolved(chatId, message.from.id);
     if (await this.hasRestrictRights(chatId)) await this.restoreMemberPermissions(chatId, message.from.id).catch(() => null);
     if (this.config.joinChallengeDeleteOnPass !== false && await this.hasDeleteRights(chatId)) {
@@ -3765,12 +3795,14 @@ export class TelegramShieldBot {
     const key = this.challengeKey(chatMemberUpdate.chat?.id, member.id);
     if (['left', 'kicked'].includes(newStatus)) {
       this.joinChallenges.delete(key);
+      this.clearJoinChallengeTimer(key);
       this.solvedJoinChallenges.delete(key);
       return;
     }
     const joined = ['left', 'kicked'].includes(oldStatus) && ['member', 'restricted'].includes(newStatus);
     if (!joined) return;
     this.joinChallenges.delete(key);
+    this.clearJoinChallengeTimer(key);
     await this.handleNewMembers({
       chat: chatMemberUpdate.chat,
       from: chatMemberUpdate.from || member,
@@ -3784,6 +3816,7 @@ export class TelegramShieldBot {
     for (const [key, challenge] of this.joinChallenges.entries()) {
       if (now < challenge.expiresAt) continue;
       this.joinChallenges.delete(key);
+      this.clearJoinChallengeTimer(key);
       const message = { chat: challenge.chat, from: challenge.user, text: 'join challenge expired' };
       if (await this.hasRestrictRights(challenge.chat.id)) {
         if (this.config.joinChallengeAction === 'ban') await this.ban(challenge.chat.id, challenge.user.id).catch(() => null);
@@ -3798,7 +3831,7 @@ export class TelegramShieldBot {
         evidence: ['new user did not complete DKG Knowledge Asset UAL verification before timeout']
       }, { writeDkg: false });
       await this.maybeRecordJoinChallengeRepeatFailure(message, event);
-      if (challenge.messageId && await this.hasDeleteRights(challenge.chat.id)) await this.deleteMessage(challenge.chat.id, challenge.messageId).catch(() => null);
+      await this.deleteJoinChallengePrompt(challenge);
       await this.sendEphemeral(challenge.chat.id, `${userMention(challenge.user)} did not complete DKG verification in time.`, { parse_mode: 'HTML', autoDelete: true }, this.config.successMessageTtlSeconds || 45).catch(() => null);
     }
   }
