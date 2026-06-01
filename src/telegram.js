@@ -108,6 +108,25 @@ function button(text, data) {
   return { text, callback_data: data };
 }
 
+function urlButton(text, url) {
+  return { text, url };
+}
+
+const MEMORY_CARD_CHALLENGES = [
+  { id: 'mem-id', field: 'ID', value: 'did:dkg:tracabot:7F3A', signal: 'impersonation pattern', use: 'warns communities about repeat scam behavior', question: 'Which item is the memory ID?', options: ['did:dkg:tracabot:7F3A', 'impersonation pattern', 'repeat scam behavior'], answerIndex: 0, explanation: 'The memory ID starts with did:dkg: and names the reusable safety record.' },
+  { id: 'signal', field: 'Signal', value: 'fake support DM', memoryId: 'did:dkg:tracabot:91C2', use: 'helps admins spot impersonators', question: 'Which item is the scam signal?', options: ['fake support DM', 'did:dkg:tracabot:91C2', 'helps admins spot impersonators'], answerIndex: 0, explanation: 'The signal describes the risky pattern TRACaBot should remember.' },
+  { id: 'use', field: 'Use', value: 'warns users before they connect wallets', memoryId: 'did:dkg:tracabot:4B8E', signal: 'wallet verification lure', question: 'What is this memory record used for?', options: ['warns users before they connect wallets', 'wallet verification lure', 'did:dkg:tracabot:4B8E'], answerIndex: 0, explanation: 'The use explains how the memory helps protect the community.' },
+  { id: 'prefix', field: 'ID', value: 'did:dkg:tracabot:C20A', signal: 'copied admin name', use: 'links repeat impersonation evidence', question: 'Which part shows this is verifiable agent memory?', options: ['did:dkg:', 'copied admin name', 'repeat impersonation evidence'], answerIndex: 0, explanation: 'did:dkg: is the verifiable memory ID prefix agents can recognize.' },
+  { id: 'scope', field: 'Scope', value: 'reusable across communities', memoryId: 'did:dkg:tracabot:E62D', signal: 'airdrop claim lure', question: 'Which item describes where this signal can help?', options: ['reusable across communities', 'airdrop claim lure', 'did:dkg:tracabot:E62D'], answerIndex: 0, explanation: 'Shared memory helps more than one community reuse the same safety signal.' },
+  { id: 'decision', field: 'Decision', value: 'confirmed scam pattern', memoryId: 'did:dkg:tracabot:5A10', signal: 'suspicious DM campaign', question: 'Which item is the reviewed safety decision?', options: ['confirmed scam pattern', 'suspicious DM campaign', 'did:dkg:tracabot:5A10'], answerIndex: 0, explanation: 'The decision is the admin-reviewed conclusion attached to the memory.' },
+  { id: 'record', field: 'ID', value: 'did:dkg:tracabot:AA43', signal: 'wallet drain lure', alert: 'be careful with urgent wallet links', question: 'Which item is the reusable memory record, not the alert text?', options: ['did:dkg:tracabot:AA43', 'be careful with urgent wallet links', 'wallet drain lure'], answerIndex: 0, explanation: 'The ID is the reusable record; alerts and signals are details inside it.' },
+  { id: 'pattern', field: 'Pattern', value: 'admin impersonation', memoryId: 'did:dkg:tracabot:19DD', use: 'compares new joins with known scam behavior', question: 'Which item names the suspicious behavior?', options: ['admin impersonation', 'compares new joins', 'did:dkg:tracabot:19DD'], answerIndex: 0, explanation: 'The pattern names the behavior TRACaBot should compare against future activity.' },
+  { id: 'purpose', field: 'Purpose', value: 'avoids starting from zero in each chat', memoryId: 'did:dkg:tracabot:F807', signal: 'repeated scam wording', question: 'Why does TRACaBot keep this memory?', options: ['avoids starting from zero in each chat', 'repeated scam wording', 'did:dkg:tracabot:F807'], answerIndex: 0, explanation: 'TRACaBot memory lets communities reuse useful safety context.' },
+  { id: 'evidence', field: 'Evidence', value: 'scam link pattern', memoryId: 'did:dkg:tracabot:3C77', use: 'supports admin review', question: 'Which item is the type of evidence?', options: ['scam link pattern', 'supports admin review', 'did:dkg:tracabot:3C77'], answerIndex: 0, explanation: 'Evidence is the observed material that supports the safety record.' },
+  { id: 'trait', field: 'Trait', value: 'reusable safety signal', memoryId: 'did:dkg:tracabot:B61E', signal: 'fake giveaway message', question: 'Which trait makes this useful to agents?', options: ['reusable safety signal', 'fake giveaway message', 'did:dkg:tracabot:B61E'], answerIndex: 0, explanation: 'Reusable safety signals are what let agents carry protection across communities.' },
+  { id: 'shared', field: 'Memory', value: 'shared safety record', memoryId: 'did:dkg:tracabot:D904', signal: 'seed phrase request', question: 'Which item says this can help more than one community?', options: ['shared safety record', 'seed phrase request', 'did:dkg:tracabot:D904'], answerIndex: 0, explanation: 'A shared safety record can help multiple communities recognize the same risk.' }
+];
+
 function parseDurationSeconds(text = '') {
   const value = String(text || '').toLowerCase();
   const match = value.match(/\b(\d+)\s*(minutes?|mins?|m|hours?|hrs?|h|days?|d)\b/i);
@@ -3140,6 +3159,19 @@ export class TelegramShieldBot {
     const ttl = this.config.joinChallengeTtlSeconds || 60;
     const username = await this.botUsername().catch(() => 'tracethembot');
     const dmLink = `https://t.me/${username}?start=${verifyStartPayload(chatId, member.id)}`;
+    const memoryCard = this.selectMemoryCardChallenge(chatId, member);
+    if (memoryCard) {
+      return [
+        '🛡️ TRACaBot Memory Check',
+        '',
+        `${userMention(member)}, quick anti-bot check before posting.`,
+        '',
+        'TRACaBot uses shared agent memory to remember scam signals across communities.',
+        '',
+        'Open DM and answer one memory question to unlock.',
+        `Time limit: ${ttl}s.`
+      ].join('\n');
+    }
     const qa = this.selectJoinChallengeQa(chatId, member);
     if (qa) {
       return [
@@ -3169,6 +3201,36 @@ export class TelegramShieldBot {
     ].join('\n');
   }
 
+  joinChallengeKeyboard(chatId, member, challenge) {
+    if (challenge?.mode !== 'memory-card') return null;
+    const username = this.botUsernameCache || 'tracethembot';
+    return inlineKeyboard([
+      [urlButton('🧠 Answer in DM', `https://t.me/${username}?start=${verifyStartPayload(chatId, member.id)}`)],
+      [button('❔ What is memory?', callbackData('join-info', String(member.id)))]
+    ]);
+  }
+
+  memoryCardText(card) {
+    const rows = [
+      '🧠 Memory Check',
+      '',
+      'TRACaBot memory stores reusable safety records that agents can recognize across communities.',
+      '',
+      'Memory card:'
+    ];
+    if (card.memoryId && card.field !== 'ID') rows.push(`ID: ${card.memoryId}`);
+    if (card.field && card.value) rows.push(`${card.field}: ${card.value}`);
+    if (card.signal) rows.push(`Signal: ${card.signal}`);
+    if (card.alert) rows.push(`Alert: ${card.alert}`);
+    if (card.use) rows.push(`Use: ${card.use}`);
+    rows.push('', card.question);
+    return rows.join('\n');
+  }
+
+  memoryCardKeyboard(chatId, userId, card) {
+    return inlineKeyboard(card.options.map((option, index) => [button(option, callbackData('join-answer', chatId, userId, card.id, index))]));
+  }
+
   ualChallengeEducationText() {
     return [
       'You shared a did:dkg: address, which points to verifiable knowledge AI agents can use, remember, and trust.',
@@ -3193,8 +3255,9 @@ export class TelegramShieldBot {
     }
     const expiresAt = Date.now() + (this.config.joinChallengeTtlSeconds ?? 60) * 1000;
     const key = this.challengeKey(chatId, member.id);
-    const qa = this.selectJoinChallengeQa(chatId, member);
-    const challenge = { chat: message.chat, user: member, startedAt: Date.now(), expiresAt, messageId: '', attempts: 0, mode: qa ? 'qa' : 'ual', qa, restricted: false };
+    const memoryCard = this.selectMemoryCardChallenge(chatId, member);
+    const qa = memoryCard ? null : this.selectJoinChallengeQa(chatId, member);
+    const challenge = { chat: message.chat, user: member, startedAt: Date.now(), expiresAt, messageId: '', attempts: 0, mode: memoryCard ? 'memory-card' : (qa ? 'qa' : 'ual'), qa, memoryCard, restricted: false };
     this.joinChallenges.set(key, challenge);
     this.scheduleJoinChallengeExpiry(key, challenge);
     let restricted = false;
@@ -3202,7 +3265,9 @@ export class TelegramShieldBot {
       await this.restrict(chatId, member.id, Math.floor(expiresAt / 1000));
       restricted = true;
       challenge.restricted = true;
-      const sent = await this.send(chatId, await this.challengeText(chatId, member), { parse_mode: 'HTML', disable_web_page_preview: true });
+      const username = await this.botUsername().catch(() => 'tracethembot');
+      this.botUsernameCache = username;
+      const sent = await this.send(chatId, await this.challengeText(chatId, member), { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: this.joinChallengeKeyboard(chatId, member, challenge) });
       challenge.messageId = sent?.message_id || '';
     } catch (error) {
       this.joinChallenges.delete(key);
@@ -3221,11 +3286,11 @@ export class TelegramShieldBot {
       target: member,
       target_key: targetKey(member),
       alias_keys: challengeAliasSignals(member),
-      challenge_type: qa ? 'dkg_asset_qa' : 'dkg_ual',
-      challenge_id: qa?.id || '',
+      challenge_type: challenge.mode === 'memory-card' ? 'memory_card' : (qa ? 'dkg_asset_qa' : 'dkg_ual'),
+      challenge_id: memoryCard?.id || qa?.id || '',
       ttl_seconds: this.config.joinChallengeTtlSeconds || 60,
       restricted_text_only: restricted,
-      evidence: [qa ? 'new user asked to answer a DKG Knowledge Asset question' : 'new user asked to verify with a DKG Knowledge Asset UAL']
+      evidence: [challenge.mode === 'memory-card' ? 'new user asked to answer a TRACaBot memory-card challenge' : (qa ? 'new user asked to answer a DKG Knowledge Asset question' : 'new user asked to verify with a DKG Knowledge Asset UAL')]
     }, { writeDkg: false });
   }
 
@@ -3254,7 +3319,7 @@ export class TelegramShieldBot {
   }
 
   selectJoinChallengeQa(chatId, member = {}) {
-    if (this.config.joinChallengeMode === 'ual') return null;
+    if (this.config.joinChallengeMode !== 'qa') return null;
     if (!this.config.joinChallengeAssetUrl || !Array.isArray(this.config.joinChallengeQaBank) || this.config.joinChallengeQaBank.length === 0) return null;
     const bucket = Math.floor(Date.now() / Math.max(1, (this.config.joinChallengeTtlSeconds || 60) * 1000));
     const seed = `${chatId}:${member.id}:${bucket}`;
@@ -3262,6 +3327,16 @@ export class TelegramShieldBot {
     for (const char of seed) hash = ((hash * 31) + char.charCodeAt(0)) >>> 0;
     const entry = this.config.joinChallengeQaBank[hash % this.config.joinChallengeQaBank.length];
     return { ...entry, assetUrl: this.config.joinChallengeAssetUrl };
+  }
+
+  selectMemoryCardChallenge(chatId, member = {}) {
+    if (this.config.joinChallengeMode !== 'memory-card') return null;
+    const bucket = Math.floor(Date.now() / Math.max(1, (this.config.joinChallengeTtlSeconds || 60) * 1000));
+    const seed = `${chatId}:${member.id}:${bucket}`;
+    let hash = 0;
+    for (const char of seed) hash = ((hash * 31) + char.charCodeAt(0)) >>> 0;
+    const template = MEMORY_CARD_CHALLENGES[hash % MEMORY_CARD_CHALLENGES.length];
+    return { ...template, options: [...template.options] };
   }
 
   pendingChallengeFor(message) {
@@ -3287,7 +3362,9 @@ export class TelegramShieldBot {
       await this.send(message.chat.id, 'I do not see an active DKG join challenge for you. If you just joined, ask an admin to restart the challenge or try rejoining.');
       return true;
     }
-    if (challenge.mode === 'qa') {
+    if (challenge.mode === 'memory-card') {
+      await this.send(message.chat.id, this.memoryCardText(challenge.memoryCard), { private: true, reply_markup: this.memoryCardKeyboard(payload.chatId, payload.userId, challenge.memoryCard) });
+    } else if (challenge.mode === 'qa') {
       await this.send(message.chat.id, `Open the Knowledge Asset from the group challenge, then answer this question here:\n\n${challenge.qa?.question || 'What does the asset ask?'}`);
     } else {
       await this.send(message.chat.id, 'Paste the Knowledge Asset address here. It should start with did:dkg:. I will verify it and unlock your group access.');
@@ -3366,8 +3443,8 @@ export class TelegramShieldBot {
         target_key: targetKey(message.from),
         alias_keys: challengeAliasSignals(message.from),
         attempts: challenge.attempts,
-        challenge_type: challenge.mode === 'qa' ? 'dkg_asset_qa' : 'dkg_ual',
-        challenge_id: challenge.qa?.id || '',
+        challenge_type: challenge.mode === 'memory-card' ? 'memory_card' : (challenge.mode === 'qa' ? 'dkg_asset_qa' : 'dkg_ual'),
+        challenge_id: challenge.memoryCard?.id || challenge.qa?.id || '',
         verification_channel: 'group',
         evidence: ['pending join challenge user tried to answer in group instead of DM verification link']
       }, { writeDkg: false });
@@ -3379,6 +3456,10 @@ export class TelegramShieldBot {
         await this.sendEphemeral(replyChatId, `${userMention(message.from)}, verification only works in DM. Use your verification link: ${dmLink}`, { reply_to_message_id: challenge.messageId || message.message_id, parse_mode: 'HTML', disable_web_page_preview: true, autoDelete: true }, this.config.challengeMessageTtlSeconds || 120);
       }
       return true;
+    }
+    if (challenge.mode === 'memory-card') {
+      const selected = this.resolveMemoryCardAnswer(challenge.memoryCard, text);
+      return this.handleMemoryCardAnswer({ id: '', from: message.from, message: { chat: { id: replyChatId, type: 'private' }, message_id: message.message_id } }, challenge, selected, options);
     }
     if (challenge.mode === 'qa') {
       const normalized = normalizeChallengeAnswer(text);
@@ -3459,6 +3540,44 @@ export class TelegramShieldBot {
     return this.completeJoinChallenge(message, challenge, options, { ual: text.slice(0, 240), validationReason: validation.reason });
   }
 
+  resolveMemoryCardAnswer(card, text = '') {
+    const value = String(text || '').trim();
+    const letter = value.match(/^[abc]$/i)?.[0]?.toLowerCase();
+    if (letter) return letter.charCodeAt(0) - 97;
+    const normalized = normalizeChallengeAnswer(value);
+    return (card?.options || []).findIndex((option) => normalizeChallengeAnswer(option) === normalized);
+  }
+
+  async handleMemoryCardAnswer(query, challenge, selectedIndex, options = {}) {
+    const card = challenge.memoryCard || {};
+    const sourceChatId = options.sourceChatId || query.message?.chat?.id || query.from?.id;
+    const message = { chat: challenge.chat, from: challenge.user, message_id: query.message?.message_id, text: card.options?.[selectedIndex] || '' };
+    if (selectedIndex === card.answerIndex) {
+      if (query.id) await this.answerCallback(query.id, 'Correct. Unlocking...').catch(() => null);
+      if (query.message?.chat?.id && query.message?.message_id) await this.editInteractiveMessage(query.message.chat.id, query.message.message_id, `✅ Correct.\n\n${card.explanation || 'That is the reusable memory detail TRACaBot can carry across communities.'}`, [], { disable_web_page_preview: true }).catch(() => null);
+      return this.completeJoinChallenge(message, challenge, { ...options, dm: true, sourceChatId }, { answer: card.options[selectedIndex], validationReason: 'memory_card_answer_match' });
+    }
+
+    challenge.attempts += 1;
+    await this.record('join_challenge_bad_attempt', message, {
+      target: challenge.user,
+      target_key: targetKey(challenge.user),
+      alias_keys: challengeAliasSignals(challenge.user),
+      attempts: challenge.attempts,
+      challenge_type: 'memory_card',
+      challenge_id: card.id || '',
+      selected_answer: card.options?.[selectedIndex] || '',
+      verification_channel: 'dm',
+      evidence: ['pending join challenge user selected an incorrect TRACaBot memory-card answer']
+    }, { writeDkg: false });
+    if (await this.maybeFailJoinChallenge(message, challenge, { ...options, dm: true, sourceChatId })) return true;
+    const reply = `Not quite. Look for the answer that matches the memory card.\n\n${this.memoryCardText(card)}`;
+    if (query.id) await this.answerCallback(query.id, 'Not quite. Try again.').catch(() => null);
+    if (query.message?.chat?.id && query.message?.message_id) await this.editInteractiveMessage(query.message.chat.id, query.message.message_id, reply, this.memoryCardKeyboard(challenge.chat.id, challenge.user.id, card), { disable_web_page_preview: true }).catch(() => null);
+    else if (sourceChatId) await this.send(sourceChatId, reply, { private: true, reply_markup: this.memoryCardKeyboard(challenge.chat.id, challenge.user.id, card) }).catch(() => null);
+    return true;
+  }
+
   async completeJoinChallenge(message, challenge, options = {}, result = {}) {
     const chatId = message.chat.id;
     const replyChatId = options.sourceChatId || chatId;
@@ -3478,18 +3597,19 @@ export class TelegramShieldBot {
       ual: result.ual || '',
       answer: result.answer || '',
       validation_reason: result.validationReason || '',
-      challenge_type: challenge.mode === 'qa' ? 'dkg_asset_qa' : 'dkg_ual',
-      challenge_id: challenge.qa?.id || '',
+      challenge_type: challenge.mode === 'memory-card' ? 'memory_card' : (challenge.mode === 'qa' ? 'dkg_asset_qa' : 'dkg_ual'),
+      challenge_id: challenge.memoryCard?.id || challenge.qa?.id || '',
       verification_channel: options.dm ? 'dm' : 'group',
-      evidence: [challenge.mode === 'qa' ? 'new user answered the DKG Knowledge Asset challenge' : 'new user completed DKG Knowledge Asset UAL verification']
+      evidence: [challenge.mode === 'memory-card' ? 'new user answered the TRACaBot memory-card challenge' : (challenge.mode === 'qa' ? 'new user answered the DKG Knowledge Asset challenge' : 'new user completed DKG Knowledge Asset UAL verification')]
     }, { writeDkg: false });
     if (options.dm) {
       const accessLink = await this.groupAccessLink(challenge.chat);
       const accessText = accessLink ? `\n\nReturn to the community: ${accessLink}` : '';
       const ualEducation = challenge.mode === 'ual' ? `\n\n${this.ualChallengeEducationText()}` : '';
-      await this.send(replyChatId, `✅ You’re in.${ualEducation}${accessText}`, { disable_web_page_preview: true });
+      const memoryEducation = challenge.mode === 'memory-card' ? '\n\nTRACaBot memory helps communities and agents reuse safety signals instead of starting from zero each time.' : '';
+      await this.send(replyChatId, `✅ You’re in.${memoryEducation}${ualEducation}${accessText}`, { disable_web_page_preview: true });
     }
-    const successText = `✅ DKG-verified: ${userMention(message.from)}\n\nYou are now on TRAC(k) and protected by our DKG-powered agent with cross-community, persistent memory against scams and impersonators.`;
+    const successText = `✅ Memory-verified: ${userMention(message.from)}\n\nYou are now protected by TRACaBot shared memory against repeat scams and impersonators.`;
     if (options.dm) await this.sendEphemeral(chatId, successText, { parse_mode: 'HTML' }, this.config.successMessageTtlSeconds || 45);
     else await this.sendEphemeral(chatId, successText, { reply_to_message_id: message.message_id, parse_mode: 'HTML' }, this.config.successMessageTtlSeconds || 45);
     return true;
@@ -3501,6 +3621,23 @@ export class TelegramShieldBot {
     const message = query.message || {};
     const chatId = message.chat?.id;
     const from = query.from || {};
+    if (parsed.action === 'join-info') {
+      await this.answerCallback(query.id, 'TRACaBot memory is reusable safety context agents can carry across communities.', true);
+      return true;
+    }
+    if (parsed.action === 'join-answer') {
+      const [challengeChatId, userId, cardId, selectedRaw] = parsed.parts;
+      if (String(from.id || '') !== String(userId || '')) {
+        await this.answerCallback(query.id, 'This challenge belongs to another user.');
+        return true;
+      }
+      const challenge = this.joinChallenges.get(this.challengeKey(challengeChatId, userId));
+      if (!challenge || challenge.mode !== 'memory-card' || challenge.memoryCard?.id !== cardId) {
+        await this.answerCallback(query.id, 'Challenge expired. Ask an admin to restart verification.');
+        return true;
+      }
+      return this.handleMemoryCardAnswer(query, challenge, Number(selectedRaw), { dm: true, sourceChatId: chatId });
+    }
     const requester = parsed.parts[0] || '';
     const eventId = parsed.parts[1] || '';
     const callbackMessage = { chat: message.chat, from, message_id: message.message_id, text: '' };

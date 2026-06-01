@@ -89,7 +89,7 @@ function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = nu
       challengeMessageTtlSeconds: 120,
       successMessageTtlSeconds: 45,
       joinChallenge: false,
-      joinChallengeMode: 'qa',
+      joinChallengeMode: 'memory-card',
       joinChallengeAssetUrl: '',
       joinChallengeQaBank: [],
       joinChallengeTtlSeconds: 60,
@@ -518,7 +518,7 @@ test('new bot members are ignored by proactive join moderation', async () => {
   assert.equal(bot.store.all().length, 0);
 });
 
-test('low-risk new members receive plain-language Knowledge Asset address join challenge', async () => {
+test('low-risk new members receive inline TRACaBot memory-card join challenge', async () => {
   const { bot, calls } = makeBot({
     canBan: true,
     analyzer: analyzeMessage,
@@ -543,18 +543,20 @@ test('low-risk new members receive plain-language Knowledge Asset address join c
   assert.equal(restriction.payload.permissions.can_add_web_page_previews, false);
   assert.equal(restriction.payload.permissions.can_invite_users, false);
   const challenge = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
-  assert.match(challenge, /quick check/);
-  assert.match(challenge, /Copy any Knowledge Asset address/);
-  assert.doesNotMatch(challenge, /A Knowledge Asset is a verifiable data item/);
-  assert.match(challenge, /Send that address to me in DM: https:\/\/t\.me\/tracethembot\?start=verify_m100_44/);
-  assert.match(challenge, /You are restricted here until verified/);
-  assert.match(challenge, /starts with did:dkg/);
+  const payload = calls.find((call) => call.method === 'sendMessage')?.payload || {};
+  assert.match(challenge, /TRACaBot Memory Check/);
+  assert.match(challenge, /shared agent memory/);
+  assert.match(challenge, /Open DM and answer one memory question/);
+  assert.doesNotMatch(challenge, /dkg\.origintrail\.io/);
+  assert.ok(payload.reply_markup.inline_keyboard.flat().some((item) => item.text.includes('Answer in DM') && item.url === 'https://t.me/tracethembot?start=verify_m100_44'));
+  assert.ok(payload.reply_markup.inline_keyboard.flat().some((item) => item.text.includes('What is memory?')));
   assert.doesNotMatch(challenge, /\bUAL\b/);
   assert.doesNotMatch(challenge, /prove that you’re human and ready to join/);
-  assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_started' && event.local_only));
+  const started = bot.store.all().find((event) => event.event_type === 'join_challenge_started' && event.local_only);
+  assert.equal(started.payload.challenge_type, 'memory_card');
 });
 
-test('chat_member joins receive Knowledge Asset address join challenge', async () => {
+test('chat_member joins receive memory-card join challenge', async () => {
   const { bot, calls } = makeBot({
     canBan: true,
     analyzer: analyzeMessage,
@@ -568,7 +570,7 @@ test('chat_member joins receive Knowledge Asset address join challenge', async (
     new_chat_member: { status: 'member', user: { id: 48, username: 'member48', first_name: 'Member', is_bot: false } }
   });
   assert.ok(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 48 && call.payload.permissions.can_send_messages === false));
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('quick check')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Memory Check')));
   assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_started' && event.user.id === 48));
 });
 
@@ -706,7 +708,7 @@ test('group-pasted DKG UAL does not solve join challenge before DM verification'
     canBan: true,
     analyzer: analyzeMessage,
     dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
-    configOverrides: { joinChallenge: true },
+    configOverrides: { joinChallenge: true, joinChallengeMode: 'ual' },
     validateUal: async () => ({ ok: true, reason: 'resolved' })
   });
   const chat = { id: -100, title: 'demo' };
@@ -719,6 +721,68 @@ test('group-pasted DKG UAL does not solve join challenge before DM verification'
   assert.match(reminder, /verification only works in DM/);
   assert.match(reminder, /https:\/\/t\.me\/tracethembot\?start=verify_m100_45/);
   assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_bad_attempt' && event.payload.verification_channel === 'group'));
+});
+
+test('memory-card DM answer buttons verify new members', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    configOverrides: { joinChallenge: true }
+  });
+  const group = { id: -100, title: 'demo', type: 'supergroup', username: 'traccommunity' };
+  const user = { id: 451, username: 'memlearner', first_name: 'Memory', is_bot: false };
+  await bot.handleNewMembers({ chat: group, from: { id: 1, username: 'admin' }, new_chat_members: [user] });
+  await bot.handleMessage({ chat: { id: 451, type: 'private' }, from: user, message_id: 1, text: '/start verify_m100_451' });
+  const dmPrompt = calls.find((call) => call.method === 'sendMessage' && call.payload.chat_id === 451 && String(call.payload.text).includes('Memory card'))?.payload;
+  assert.ok(dmPrompt);
+  assert.match(dmPrompt.text, /did:dkg:tracabot:/);
+  const challenge = bot.joinChallenges.get('-100:451');
+  const correct = dmPrompt.reply_markup.inline_keyboard.flat()[challenge.memoryCard.answerIndex];
+  assert.ok(correct);
+  await bot.handleCallbackQuery({ id: 'memory-correct', from: user, message: { chat: { id: 451, type: 'private' }, message_id: dmPrompt.message_id || 20 }, data: correct.callback_data });
+  assert.equal(bot.joinChallenges.has('-100:451'), false);
+  assert.ok(calls.some((call) => call.method === 'restrictChatMember' && call.payload.chat_id === -100 && call.payload.user_id === 451 && call.payload.until_date === 0));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && call.payload.chat_id === 451 && String(call.payload.text).includes('TRACaBot memory helps')));
+  const solved = bot.store.all().find((event) => event.event_type === 'join_challenge_solved' && event.user.id === 451);
+  assert.equal(solved.payload.challenge_type, 'memory_card');
+});
+
+test('memory-card wrong answer is rejected and scoped to challenged user', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    configOverrides: { joinChallenge: true }
+  });
+  const group = { id: -100, title: 'demo', type: 'supergroup' };
+  const user = { id: 452, username: 'wrongmem', first_name: 'Wrong', is_bot: false };
+  await bot.handleNewMembers({ chat: group, from: { id: 1, username: 'admin' }, new_chat_members: [user] });
+  await bot.handleMessage({ chat: { id: 452, type: 'private' }, from: user, message_id: 1, text: '/start verify_m100_452' });
+  const dmPrompt = calls.find((call) => call.method === 'sendMessage' && call.payload.chat_id === 452 && String(call.payload.text).includes('Memory card'))?.payload;
+  const wrong = dmPrompt.reply_markup.inline_keyboard.flat().find((item) => item.callback_data?.includes('join-answer') && item.callback_data.endsWith(':1'));
+  await bot.handleCallbackQuery({ id: 'memory-wrong-user', from: { id: 9999, username: 'other' }, message: { chat: { id: 9999, type: 'private' }, message_id: 21 }, data: wrong.callback_data });
+  assert.ok(calls.some((call) => call.method === 'answerCallbackQuery' && String(call.payload.text || '').includes('belongs to another user')));
+  await bot.handleCallbackQuery({ id: 'memory-wrong', from: user, message: { chat: { id: 452, type: 'private' }, message_id: dmPrompt.message_id || 22 }, data: wrong.callback_data });
+  assert.equal(bot.joinChallenges.has('-100:452'), true);
+  assert.ok(!calls.some((call) => call.method === 'restrictChatMember' && call.payload.chat_id === -100 && call.payload.user_id === 452 && call.payload.until_date === 0));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_bad_attempt' && event.payload.challenge_type === 'memory_card'));
+});
+
+test('memory-card text fallback accepts option letters', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    configOverrides: { joinChallenge: true }
+  });
+  const group = { id: -100, title: 'demo', type: 'supergroup' };
+  const user = { id: 453, username: 'textmem', first_name: 'Text', is_bot: false };
+  await bot.handleNewMembers({ chat: group, from: { id: 1, username: 'admin' }, new_chat_members: [user] });
+  await bot.handleMessage({ chat: { id: 453, type: 'private' }, from: user, message_id: 1, text: '/start verify_m100_453' });
+  await bot.handleMessage({ chat: { id: 453, type: 'private' }, from: user, message_id: 2, text: 'A' });
+  assert.equal(bot.joinChallenges.has('-100:453'), false);
+  assert.ok(calls.some((call) => call.method === 'restrictChatMember' && call.payload.chat_id === -100 && call.payload.user_id === 453 && call.payload.until_date === 0));
 });
 
 test('join challenge rolls back restriction when challenge message send fails', async () => {
@@ -748,7 +812,7 @@ test('DM DKG UAL solves join challenge and restores group permissions', async ()
     canBan: true,
     analyzer: analyzeMessage,
     dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
-    configOverrides: { joinChallenge: true },
+    configOverrides: { joinChallenge: true, joinChallengeMode: 'ual' },
     validateUal: async () => ({ ok: true, reason: 'resolved' })
   });
   const group = { id: -100, title: 'demo', type: 'supergroup', username: 'traccommunity' };
@@ -763,7 +827,7 @@ test('DM DKG UAL solves join challenge and restores group permissions', async ()
   assert.ok(calls.some((call) => call.method === 'sendMessage' && call.payload.chat_id === 145 && String(call.payload.text).includes('For more information: https://x.com/BranaRakic/status/2040159452431560995')));
   assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.chat_id === -100));
   assert.equal(bot.joinChallengeTimers.has('-100:145'), false);
-  const groupSuccess = calls.find((call) => call.method === 'sendMessage' && call.payload.chat_id === -100 && String(call.payload.text).includes('DKG-verified'))?.payload || {};
+  const groupSuccess = calls.find((call) => call.method === 'sendMessage' && call.payload.chat_id === -100 && String(call.payload.text).includes('Memory-verified'))?.payload || {};
   assert.match(groupSuccess.text, /@dmlearner/);
   assert.equal(groupSuccess.parse_mode, 'HTML');
   assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_solved' && event.payload.verification_channel === 'dm'));
@@ -844,7 +908,7 @@ test('solved join challenge ignores Telegram restriction update instead of start
     canBan: true,
     analyzer: analyzeMessage,
     dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
-    configOverrides: { joinChallenge: true },
+    configOverrides: { joinChallenge: true, joinChallengeMode: 'ual' },
     validateUal: async () => ({ ok: true, reason: 'resolved' })
   });
   const group = { id: -100, title: 'demo', type: 'supergroup' };
@@ -862,7 +926,7 @@ test('solved join challenge ignores Telegram restriction update instead of start
   const unlocks = calls.filter((call) => call.method === 'restrictChatMember' && call.payload.chat_id === -100 && call.payload.user_id === 245 && call.payload.permissions.can_send_photos === true);
   assert.equal(unlocks.length, 1);
   assert.equal(unlocks[0].payload.until_date, 0);
-  const success = calls.find((call) => call.method === 'sendMessage' && call.payload.chat_id === -100 && String(call.payload.text).includes('DKG-verified'))?.payload.text || '';
+  const success = calls.find((call) => call.method === 'sendMessage' && call.payload.chat_id === -100 && String(call.payload.text).includes('Memory-verified'))?.payload.text || '';
   assert.match(success, /@onceverified/);
 });
 
@@ -871,7 +935,7 @@ test('verified user is challenged again after leaving and rejoining', async () =
     canBan: true,
     analyzer: analyzeMessage,
     dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
-    configOverrides: { joinChallenge: true },
+    configOverrides: { joinChallenge: true, joinChallengeMode: 'ual' },
     validateUal: async () => ({ ok: true, reason: 'resolved' })
   });
   const group = { id: -100, title: 'demo', type: 'supergroup' };
@@ -1040,7 +1104,7 @@ test('invalid group-pasted DKG UAL challenge attempt is deleted and not accepted
     canBan: true,
     analyzer: analyzeMessage,
     dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
-    configOverrides: { joinChallenge: true },
+    configOverrides: { joinChallenge: true, joinChallengeMode: 'ual' },
     validateUal: async () => ({ ok: false, reason: 'not_found' })
   });
   const chat = { id: -100, title: 'demo' };
@@ -1058,7 +1122,7 @@ test('invalid DM DKG UAL is validated and rejected without unlocking', async () 
     canBan: true,
     analyzer: analyzeMessage,
     dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
-    configOverrides: { joinChallenge: true },
+    configOverrides: { joinChallenge: true, joinChallengeMode: 'ual' },
     validateUal: async () => ({ ok: false, reason: 'not_found' })
   });
   const group = { id: -100, title: 'demo', type: 'supergroup' };
@@ -1765,7 +1829,7 @@ test('/settings lets admins toggle new-user join challenge per chat', async () =
   assert.equal(bot.chatJoinChallengeEnabled(chat.id), true);
   assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_setting_changed' && event.payload.enabled === true && event.local_only));
   await bot.handleNewMembers({ chat, from: { id: 1, username: 'admin' }, new_chat_members: [{ id: 9001, username: 'new_user', is_bot: false }] });
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && /quick check before posting/.test(call.payload.text)));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && /Memory Check/.test(call.payload.text)));
   const updatedPanel = calls.filter((call) => call.method === 'editMessageText' && String(call.payload.text).includes('Tracabot settings')).at(-1)?.payload;
   await bot.handleCallbackQuery({ id: 'challenge-off', from: { id: 1, username: 'admin' }, message: { chat, message_id: 47 }, data: updatedPanel.reply_markup.inline_keyboard[0][0].callback_data });
   assert.equal(bot.chatJoinChallengeEnabled(chat.id), false);

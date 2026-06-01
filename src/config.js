@@ -100,7 +100,7 @@ export function loadConfig(env = process.env) {
   const channelMemoryMaxTextChars = Number(env.TRACABOT_CHANNEL_MEMORY_MAX_TEXT_CHARS || 1000);
   const wmArtifactMinConfidence = Number(env.TRACABOT_WM_ARTIFACT_MIN_CONFIDENCE || 40);
   const wmArtifactMaxTextChars = Number(env.TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS || 700);
-  const joinChallengeMode = /^(qa|ual)$/i.test(env.TRACABOT_JOIN_CHALLENGE_MODE || '') ? env.TRACABOT_JOIN_CHALLENGE_MODE.toLowerCase() : 'qa';
+  const joinChallengeMode = /^(memory-card|qa|ual)$/i.test(env.TRACABOT_JOIN_CHALLENGE_MODE || '') ? env.TRACABOT_JOIN_CHALLENGE_MODE.toLowerCase() : 'memory-card';
   const joinChallengeQaBank = parseChallengeBank(env.TRACABOT_JOIN_CHALLENGE_QA_BANK || '');
   const dkgMode = env.TRACABOT_DKG_MODE || 'openclaw-adapter';
   if (dkgMode !== 'openclaw-adapter') {

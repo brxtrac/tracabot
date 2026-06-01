@@ -79,6 +79,8 @@ test('loadConfig parses conversational safety settings', () => {
 });
 
 test('loadConfig parses DKG join challenge settings', () => {
+  assert.equal(loadConfig({}).joinChallengeMode, 'memory-card');
+  assert.equal(loadConfig({ TRACABOT_JOIN_CHALLENGE_MODE: 'memory-card' }).joinChallengeMode, 'memory-card');
   const config = loadConfig({
     TRACABOT_JOIN_CHALLENGE: 'true',
     TRACABOT_JOIN_CHALLENGE_TTL_SECONDS: '90',
