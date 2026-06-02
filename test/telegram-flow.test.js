@@ -1664,7 +1664,7 @@ test('trusted context graph false-positive suppresses cross-group warning even w
   const risk = await bot.assess({ chat, from: { id: 4242, username: 'safeuser', is_bot: false }, message_id: 45, text: 'support says claim now' }, { id: 4242, username: 'safeuser' }, 'support says claim now');
   assert.equal(risk.recommended_action, 'ignore');
   assert.equal(bot.store.all().some((event) => event.event_type === 'proactive_cross_group_warning'), false);
-  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('CROSS-GROUP WARNING')), false);
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('Prior community alert')), false);
 });
 
 test('untrusted context graph false-positive does not clear cross-community scam history', async () => {
@@ -1683,7 +1683,7 @@ test('untrusted context graph false-positive does not clear cross-community scam
   const risk = await bot.assess({ chat, from: { id: 5151, username: 'badactor', is_bot: false }, message_id: 46, text: 'hello' }, { id: 5151, username: 'badactor' }, 'hello');
   assert.ok((risk.confidence || 0) >= 70);
   assert.ok(bot.store.all().some((event) => event.event_type === 'proactive_cross_group_warning'));
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('CROSS-GROUP WARNING')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('Prior community alert')));
 });
 
 test('/start review panel shows active mutes and review items', async () => {
@@ -2244,6 +2244,39 @@ test('/ban bans replied user and publishes ban evidence', async () => {
   assert.match(JSON.stringify(ban.payload.evidence), /manual \/ban command/);
 });
 
+test('/ban replies before slow memory publishing finishes', async () => {
+  const { bot, calls, dkgWrites } = makeBot({ canBan: true });
+  let releaseWrite;
+  const writeStarted = new Promise((resolve) => {
+    bot.dkg.writeEvent = async (event) => {
+      dkgWrites.push(event);
+      resolve();
+      await new Promise((release) => { releaseWrite = release; });
+      return { output: 'written', eventId: event.id, ual: 'did:dkg:context-graph:tracabot/_shared_memory', shareOperation: `swm-${event.id}` };
+    };
+  });
+
+  await bot.handleCommand({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 1, username: 'admin' },
+    message_id: 12,
+    text: '/ban fake support impersonation',
+    reply_to_message: {
+      message_id: 99,
+      text: 'DM support admin to verify wallet',
+      from: { id: 55, username: 'fake_support', is_bot: false }
+    }
+  });
+
+  assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 55));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('Banned @fake_support')));
+  assert.equal(bot.store.all().some((event) => event.event_type === 'ban_executed'), false);
+  await writeStarted;
+  releaseWrite();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'ban_executed'));
+});
+
 test('/ban continues if replied message deletion fails', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   bot.call = async (method, payload) => {
@@ -2385,6 +2418,87 @@ test('/review list is compact and groups duplicate targets', async () => {
   assert.doesNotMatch(reply, /Who should I review\?/);
   assert.doesNotMatch(reply, /1 is not a scammer/);
   assert.doesNotMatch(reply, /evt-review-1 confirm reason/);
+});
+
+test('inline false-positive review clears all pending reviews for that user', async () => {
+  const { bot, calls, dkgWrites } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  const timestamp = new Date().toISOString();
+  bot.store.append({ id: 'evt-inline-1', event_type: 'risk_review_needed', timestamp, user: { id: 1505519171, username: 'molociao' }, payload: { confidence: 99, evidence: ['Crypto lure terms: giveaway'] } });
+  bot.store.append({ id: 'evt-inline-2', event_type: 'risk_review_needed', timestamp, user: { id: 1505519171, username: 'molociao' }, payload: { confidence: 90, evidence: ['Impersonation indicators: admin'] } });
+  bot.store.append({ id: 'evt-inline-other', event_type: 'risk_review_needed', timestamp, user: { id: 472024168, username: 'r4ge13' }, payload: { confidence: 75, evidence: ['Urgency language: now'] } });
+
+  const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Reviews', 'inline-review-clear');
+  const open = buttonByText(panel, 'molociao');
+  await bot.handleCallbackQuery({ id: 'inline-open', from: { id: 1, username: 'admin' }, message: { chat, message_id: 41 }, data: open.callback_data });
+  const detail = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload;
+  const reject = buttonByText(detail, 'Reject flag');
+  await bot.handleCallbackQuery({ id: 'inline-reject', from: { id: 1, username: 'admin' }, message: { chat, message_id: 41 }, data: reject.callback_data });
+
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'review_overturned').length, 2);
+  assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'molociao'), false);
+  assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'r4ge13'), true);
+  const resolved = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload.text || '';
+  assert.match(resolved, /Cleared 2 pending reviews/);
+});
+
+test('inline false-positive review clears large grouped queues at once', async () => {
+  const { bot, calls, dkgWrites } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  const timestamp = new Date().toISOString();
+  for (let i = 1; i <= 12; i += 1) {
+    bot.store.append({ id: `evt-brx-many-${i}`, event_type: 'risk_review_needed', timestamp, user: { id: 1354777145, username: 'BRX86' }, payload: { confidence: 0, evidence: [`admin false-positive review suppresses autonomous enforcement ${i}`] } });
+  }
+
+  const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Reviews', 'inline-many-clear');
+  assert.match(panel.text || '', /\(\+11 more\)/);
+  await bot.handleCallbackQuery({ id: 'open-many', from: { id: 1, username: 'admin' }, message: { chat, message_id: 42 }, data: buttonByText(panel, 'BRX86').callback_data });
+  const detail = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload;
+  await bot.handleCallbackQuery({ id: 'reject-many', from: { id: 1, username: 'admin' }, message: { chat, message_id: 42 }, data: buttonByText(detail, 'Reject flag').callback_data });
+
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'review_overturned').length, 12);
+  assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'BRX86'), false);
+  const resolved = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload.text || '';
+  assert.match(resolved, /Cleared 12 pending reviews/);
+});
+
+test('review queue bulk buttons process visible targets', async () => {
+  const { bot, calls, dkgWrites } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  const timestamp = new Date().toISOString();
+  bot.store.append({ id: 'evt-bulk-safe-1', event_type: 'risk_review_needed', timestamp, user: { id: 10, username: 'safe_one' }, payload: { confidence: 10, evidence: ['weak signal'] } });
+  bot.store.append({ id: 'evt-bulk-safe-2', event_type: 'risk_review_needed', timestamp, user: { id: 10, username: 'safe_one' }, payload: { confidence: 15, evidence: ['duplicate weak signal'] } });
+  bot.store.append({ id: 'evt-bulk-risky', event_type: 'risk_review_needed', timestamp, user: { id: 11, username: 'risky_one' }, payload: { confidence: 90, evidence: ['strong signal'] } });
+
+  const menu = await openMenu(bot, calls, chat, { id: 1, username: 'admin' }, 43);
+  await bot.handleCallbackQuery({ id: 'bulk-review', from: { id: 1, username: 'admin' }, message: { chat, message_id: menu.message_id || 43 }, data: buttonByText(menu, 'Reviews').callback_data });
+  const panel = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload;
+  await bot.handleCallbackQuery({ id: 'bulk-reject', from: { id: 1, username: 'admin' }, message: { chat, message_id: 43 }, data: buttonByText(panel, 'Reject visible').callback_data });
+
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'review_overturned').length, 3);
+  assert.equal(bot.pendingReviewItems().length, 0);
+  const resolved = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload.text || '';
+  assert.match(resolved, /Processed 2 targets and 3 pending reviews/);
+});
+
+test('single target false-positive resolution hides duplicate pending reviews', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const timestamp = new Date().toISOString();
+  bot.store.append({ id: 'evt-dup-1', event_type: 'risk_review_needed', timestamp, user: { id: 1505519171, username: 'molociao' }, payload: { confidence: 99, evidence: ['Crypto lure terms: giveaway'] } });
+  bot.store.append({ id: 'evt-dup-2', event_type: 'risk_review_needed', timestamp, user: { id: 1505519171, username: 'molociao' }, payload: { confidence: 90, evidence: ['Impersonation indicators: admin'] } });
+  bot.store.append({ id: 'evt-dup-reject', event_type: 'review_overturned', timestamp: new Date(Date.now() + 1000).toISOString(), user: { id: 1, username: 'admin' }, payload: { target_event_id: 'evt-dup-1', review_decision: 'reject', reviewed_target: { id: 1505519171, username: 'molociao' }, reviewed_target_key: 'id:1505519171', resolves_target_pending_reviews: true, evidence: ['admin rejected flag'] } });
+
+  assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'molociao'), false);
+});
+
+test('legacy same-target false-positive review clears duplicate pending reviews', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const timestamp = new Date(Date.now() - 1000).toISOString();
+  bot.store.append({ id: 'evt-legacy-dup-1', event_type: 'risk_review_needed', timestamp, user: { id: 1354777145, username: 'BRX86' }, payload: { confidence: 0, evidence: ['admin false-positive review suppresses autonomous enforcement'] } });
+  bot.store.append({ id: 'evt-legacy-dup-2', event_type: 'risk_review_needed', timestamp, user: { id: 1354777145, username: 'BRX86' }, payload: { confidence: 0, evidence: ['admin false-positive review suppresses autonomous enforcement duplicate'] } });
+  bot.store.append({ id: 'evt-legacy-reject', event_type: 'review_overturned', timestamp: new Date().toISOString(), user: { id: 1, username: 'admin' }, payload: { target_event_id: 'evt-legacy-dup-1', review_decision: 'reject', reviewed_target: { id: 1354777145, username: 'BRX86' }, reviewed_target_key: 'id:1354777145', evidence: ['admin rejected flag'] } });
+
+  assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'BRX86'), false);
 });
 
 test('/review list explains long queues without overloading buttons', async () => {
@@ -2583,11 +2697,55 @@ test('proactive cross-group warning (Option A) creates event, surfaces in-chat a
   assert.ok(w.payload?.prior_admin_events?.length > 0);
 
   // Surfacing: in-chat alert posted (captured via bot.call -> sendMessage)
-  assert.ok(calls.some((c) => c.method === 'sendMessage' && String(c.payload.text || '').includes('CROSS-GROUP WARNING')), 'expected visible cross-group alert posted in chat');
+  const alertPayload = calls.find((c) => c.method === 'sendMessage' && String(c.payload.text || '').includes('Prior community alert'))?.payload || {};
+  const alert = alertPayload.text || '';
+  assert.ok(alert, 'expected visible prior-community alert posted in chat');
+  assert.match(alert, /Risk: \d+%/);
+  assert.match(alert, /Prior reviewed evidence: 1 record/);
+  assert.match(alert, /Admins: use \/start to review, or choose an action below\./);
+  assert.doesNotMatch(alert, /<a href=/);
+  assert.doesNotMatch(alert, /Event:/);
+  assert.doesNotMatch(alert, /why event/);
+  assert.doesNotMatch(alert, /CROSS-GROUP/);
+  assert.ok(buttonByText(alertPayload, 'Open profile'));
+  assert.ok(buttonByText(alertPayload, 'Ban user'));
+  assert.ok(buttonByText(alertPayload, 'Mark safe'));
+  assert.ok(buttonByText(alertPayload, 'Review'));
 
   // Artefact for the surfacing action recorded (stored as snake_case artifact_kind)
   assert.ok(bot.store.all().some((e) => e.event_type === 'conversation_artifact' && e.payload?.artifact_kind === 'proactive_cross_group_alert'));
 
   // Risk boosted as expected from the history path
   assert.ok((risk.confidence || 0) >= 70, 'risk should be boosted by cross-group prior action');
+});
+
+test('prior-community warning buttons ban or mark target safe', async () => {
+  const { bot, calls, dkgWrites } = makeBot({
+    canBan: true,
+    configOverrides: { proactiveAlertCrossGroup: true, warnThreshold: 50 }
+  });
+  bot.dkg.queryAdminHistoryForActor = async () => ({
+    hasPriorAdminAction: true,
+    events: [{ eventType: 'ban_executed', confidence: 92, id: 'prior-ban-xyz' }]
+  });
+
+  const chat = { id: -200100, title: 'demo-group' };
+  const target = { id: 778, username: 'prior_scammer' };
+  await bot.assess({ chat, from: target, message_id: 50, text: 'hello' }, target, 'hello');
+  const alertPayload = calls.filter((c) => c.method === 'sendMessage' && String(c.payload.text || '').includes('Prior community alert') && c.payload.reply_markup).at(-1)?.payload;
+  const banButton = buttonByText(alertPayload, 'Ban user');
+  assert.ok(banButton);
+  await bot.handleCallbackQuery({ id: 'warn-ban', from: { id: 1, username: 'admin' }, message: { chat, message_id: 60 }, data: banButton.callback_data });
+  assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 778));
+  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text || '').includes('Evidence is being saved')));
+
+  const safeTarget = { id: 779, username: 'safe_prior' };
+  await bot.assess({ chat, from: safeTarget, message_id: 51, text: 'hello again' }, safeTarget, 'hello again');
+  bot.store.append({ id: 'evt-safe-extra', event_type: 'risk_review_needed', timestamp: new Date().toISOString(), chat, user: safeTarget, payload: { confidence: 75, evidence: ['duplicate pending signal'] } });
+  const safeAlertPayload = calls.filter((c) => c.method === 'sendMessage' && String(c.payload.text || '').includes('Prior community alert') && c.payload.reply_markup).at(-1)?.payload;
+  const safeButton = buttonByText(safeAlertPayload, 'Mark safe');
+  assert.ok(safeButton);
+  await bot.handleCallbackQuery({ id: 'warn-safe', from: { id: 1, username: 'admin' }, message: { chat, message_id: 61 }, data: safeButton.callback_data });
+  assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'safe_prior'), false);
+  assert.ok(dkgWrites.some((event) => event.event_type === 'review_overturned' && event.payload.reviewed_target.username === 'safe_prior'));
 });
