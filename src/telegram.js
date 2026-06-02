@@ -450,6 +450,7 @@ export class TelegramShieldBot {
     this.lastCrossGroupWarningAt = new Map(); // chatId:targetKey -> timestamp for rate limiting proactive cross-group alerts
     this.skillService = null;
     this.seenChats = new Map();
+    this.observedUserMessages = new Map();
   }
 
   conversationThreadKey(message = {}) {
@@ -470,6 +471,33 @@ export class TelegramShieldBot {
   rememberSeenChat(chat = {}) {
     if (!chat?.id || !PUBLIC_CHAT_TYPES.has(chat.type || '')) return;
     this.seenChats.set(String(chat.id), chat);
+  }
+
+  rememberUserMessage(message = {}) {
+    if (!message.chat?.id || !message.from?.id || !message.message_id || message.from?.is_bot === true) return;
+    if (!PUBLIC_CHAT_TYPES.has(message.chat.type || '')) return;
+    const key = `${message.chat.id}:${message.from.id}`;
+    const ids = this.observedUserMessages.get(key) || [];
+    ids.push(message.message_id);
+    this.observedUserMessages.set(key, [...new Set(ids)].slice(-100));
+  }
+
+  async deleteKnownUserMessages(chatId, userId, extraMessageIds = []) {
+    if (!chatId || !userId) return { attempted: 0, deleted: 0, failed: 0 };
+    const key = `${chatId}:${userId}`;
+    const ids = [...new Set([...(this.observedUserMessages.get(key) || []), ...extraMessageIds].filter(Boolean))];
+    let deleted = 0;
+    let failed = 0;
+    await Promise.all(ids.map(async (messageId) => {
+      try {
+        await this.deleteMessage(chatId, messageId);
+        deleted += 1;
+      } catch {
+        failed += 1;
+      }
+    }));
+    this.observedUserMessages.delete(key);
+    return { attempted: ids.length, deleted, failed };
   }
 
   conversationContext(message = {}) {
@@ -2014,10 +2042,12 @@ export class TelegramShieldBot {
       replied_message_id: extra.repliedMessageId || '',
       replied_message_deleted: Boolean(extra.repliedMessageDeleted),
       replied_message_delete_error: extra.repliedMessageDeleteError || '',
+      deleted_message_count: Number(extra.deletedMessageCount || 0),
+      delete_attempt_count: Number(extra.deleteAttemptCount || 0),
       confidence: Math.max(Number(risk.confidence || 0), this.config.actionThreshold || 85),
       admin_verified: true,
       scam_type: risk.scam_type || 'admin_action',
-      evidence: [...(risk.evidence || []), reason, extra.sangmataEvidence || '', extra.repliedMessageDeleted ? 'replied scam message deleted' : extra.repliedMessageId ? 'replied scam message deletion unavailable' : '', extra.source || 'admin ban action'].filter(Boolean)
+      evidence: [...(risk.evidence || []), reason, extra.sangmataEvidence || '', extra.deletedMessageCount ? `${extra.deletedMessageCount} message${extra.deletedMessageCount === 1 ? '' : 's'} deleted during ban cleanup` : extra.repliedMessageId ? 'replied scam message deletion unavailable' : '', extra.source || 'admin ban action'].filter(Boolean)
     };
     this.record('ban_executed', { ...message, from: target }, payload)
       .then(() => this.maybeRecordCampaign({ ...message, from: target, text: reason }, risk))
@@ -3238,20 +3268,18 @@ export class TelegramShieldBot {
         await this.alertAdmins({ ...message, from: replyUser, text: context }, risk, event);
         return;
       }
-      const replyMessageId = message.reply_to_message?.message_id;
-      let repliedMessageDeleted = false;
-      let repliedMessageDeleteError = '';
-      // Auto-delete of the replied scam message disabled during testing period
-      // (except for join challenge flows which keep their own deletion logic)
-      repliedMessageDeleted = false;
-      repliedMessageDeleteError = 'auto-delete disabled during testing';
       await this.ban(chatId, replyUser.id);
-      const deletionNote = replyUser.sangmata ? '' : repliedMessageDeleted ? ' Removed the replied scam message.' : '';
+      const deletedMessages = await this.deleteKnownUserMessages(chatId, replyUser.id, [message.reply_to_message?.message_id]);
+      const repliedMessageDeleted = Boolean(message.reply_to_message?.message_id && deletedMessages.deleted > 0);
+      const repliedMessageDeleteError = deletedMessages.failed ? `${deletedMessages.failed} message delete attempt${deletedMessages.failed === 1 ? '' : 's'} failed` : '';
+      const deletionNote = replyUser.sangmata ? '' : deletedMessages.deleted ? ` Removed ${deletedMessages.deleted} message${deletedMessages.deleted === 1 ? '' : 's'}.` : '';
       await this.sendCommandReply(chatId, `${formatBanReply(replyUser, '')}${deletionNote}`, { reply_to_message_id: message.message_id });
       this.recordBanEvidenceInBackground(message, replyUser, risk, reason, {
-        repliedMessageId: replyMessageId || '',
+        repliedMessageId: message.reply_to_message?.message_id || '',
         repliedMessageDeleted,
         repliedMessageDeleteError,
+        deletedMessageCount: deletedMessages.deleted,
+        deleteAttemptCount: deletedMessages.attempted,
         sangmataEvidence: replyUser.sangmata?.evidence || '',
         source: 'manual /ban command'
       });
@@ -3955,6 +3983,7 @@ export class TelegramShieldBot {
 
   async handleMessage(message) {
     this.rememberSeenChat(message.chat || {});
+    this.rememberUserMessage(message);
     if (message.new_chat_members?.length) {
       await this.handleNewMembers(message);
       return;

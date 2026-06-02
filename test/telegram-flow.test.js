@@ -2234,14 +2234,41 @@ test('/ban bans replied user and publishes ban evidence', async () => {
       from: { id: 55, username: 'fake_support', is_bot: false }
     }
   });
-  // Auto-delete of replied message disabled during testing
-  assert.equal(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 99), false);
+  assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 99));
   assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 55));
   const ban = bot.store.all().find((event) => event.event_type === 'ban_executed');
   assert.ok(ban);
-  // Auto-delete disabled during testing
-  assert.equal(ban.payload.replied_message_deleted, false);
+  assert.equal(ban.payload.replied_message_deleted, true);
+  assert.equal(ban.payload.deleted_message_count, 1);
   assert.match(JSON.stringify(ban.payload.evidence), /manual \/ban command/);
+});
+
+test('/ban deletes all known messages from the banned user', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo', type: 'supergroup' };
+  const target = { id: 55, username: 'fake_support', is_bot: false };
+  await bot.handleMessage({ chat, from: target, message_id: 97, text: 'hello' });
+  await bot.handleMessage({ chat, from: { id: 56, username: 'other', is_bot: false }, message_id: 98, text: 'unrelated' });
+  await bot.handleMessage({ chat, from: target, message_id: 99, text: 'DM support admin to verify wallet' });
+
+  await bot.handleCommand({
+    chat,
+    from: { id: 1, username: 'admin' },
+    message_id: 12,
+    text: '/ban fake support impersonation',
+    reply_to_message: {
+      message_id: 99,
+      text: 'DM support admin to verify wallet',
+      from: target
+    }
+  });
+
+  const deleted = calls.filter((call) => call.method === 'deleteMessage' && call.payload.chat_id === -100).map((call) => call.payload.message_id).sort((a, b) => a - b);
+  assert.deepEqual(deleted.filter((id) => [97, 99].includes(id)), [97, 99]);
+  assert.equal(deleted.includes(98), false);
+  const ban = bot.store.all().find((event) => event.event_type === 'ban_executed');
+  assert.equal(ban.payload.deleted_message_count, 2);
+  assert.equal(ban.payload.delete_attempt_count, 2);
 });
 
 test('/ban replies before slow memory publishing finishes', async () => {
@@ -2298,9 +2325,8 @@ test('/ban continues if replied message deletion fails', async () => {
   });
   assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 55));
   const ban = bot.store.all().find((event) => event.event_type === 'ban_executed');
-  // During testing auto-delete is disabled, so we don't attempt the delete that would fail
   assert.equal(ban.payload.replied_message_deleted, false);
-  assert.match(ban.payload.replied_message_delete_error, /auto-delete disabled during testing/);
+  assert.match(ban.payload.replied_message_delete_error, /1 message delete attempt failed/);
 });
 
 test('/ban with a plain name does not ban the sender without a replied user', async () => {
