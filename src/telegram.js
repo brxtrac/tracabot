@@ -1131,13 +1131,13 @@ export class TelegramShieldBot {
     const key = targetKey(target);
     if (!key) return null;
     return this.store.all().find((resolution) => {
-      if (!['review_overturned', 'ban_executed'].includes(resolution.event_type)) return false;
+      if (!['review_upheld', 'review_overturned', 'ban_executed'].includes(resolution.event_type)) return false;
       if (Date.parse(resolution.timestamp || '') < Date.parse(event.timestamp || '')) return false;
       if (resolution.payload?.target_event_id === event.id || resolution.payload?.report_event_id === event.id) return true;
       if (!resolution.payload?.resolves_target_pending_reviews) return false;
       const reviewed = resolution.payload?.reviewed_target || resolution.user || {};
       const reviewedKey = resolution.payload?.reviewed_target_key || targetKey(reviewed);
-      return resolution.event_type === 'review_overturned' && reviewedKey === key;
+      return reviewedKey === key;
     }) || null;
   }
 
@@ -1254,7 +1254,7 @@ export class TelegramShieldBot {
       return targetResolutions.some((resolution) => {
         if (resolution.ts < eventTs) return false;
         if (resolution.event.payload?.target_event_id === event.id || resolution.event.payload?.report_event_id === event.id) return true;
-        return resolution.key === key && resolution.event.event_type === 'review_overturned';
+        return resolution.key === key;
       });
     };
 
@@ -1406,7 +1406,7 @@ export class TelegramShieldBot {
       button('🚨 Reviews', callbackData('review-tab', requesterId, 'flags')),
       button('🔇 Mutes', callbackData('review-tab', requesterId, 'mutes'))
     ]];
-    if (filter === 'flags') rows.push(...this.pendingReviewsKeyboard(requesterId).filter((row) => !row[0]?.callback_data?.includes('menu-main')));
+    if (filter === 'flags') rows.push(...this.pendingReviewsKeyboard(requesterId).filter((row) => row[0]?.callback_data?.includes('review-open')));
     rows.push(...this.mainNavKeyboard(requesterId, { includeReview: false }));
     return rows;
   }
@@ -1992,7 +1992,7 @@ export class TelegramShieldBot {
         reviewed_target_key: targetKey(reviewedTarget),
         ...this.reviewTrustPayload(reviewer),
         false_positive_reason: decision === 'reject' ? reason : '',
-        resolves_target_pending_reviews: decision === 'reject',
+        resolves_target_pending_reviews: true,
         evidence: [`${evidencePrefix} ${reviewedEvent.id}: ${reason}`]
       });
       return { reviewedEvent, event };
@@ -3908,14 +3908,12 @@ export class TelegramShieldBot {
       const finalDecision = parsed.action === 'review-confirm' ? 'confirm' : 'reject';
       const reason = finalDecision === 'confirm' ? 'admin confirmed scam flag' : 'admin rejected scam flag as false positive';
       const target = event.user || event.payload?.target || {};
-      const events = finalDecision === 'reject'
-        ? this.pendingReviewGroupForEvent(event)
-        : [event];
+      const events = this.pendingReviewGroupForEvent(event);
       const reviewedCount = this.recordReviewDecisionInBackground(callbackMessage, events, finalDecision, reason, {
         target,
         evidencePrefix: `admin callback ${finalDecision === 'confirm' ? 'confirmed scam flag' : 'rejected scam flag'}`
       });
-      const cleared = finalDecision === 'reject' && reviewedCount > 1 ? `\nCleared ${reviewedCount} pending reviews for ${userMention(target)}.` : '';
+      const cleared = reviewedCount > 1 ? `\nCleared ${reviewedCount} pending reviews for ${userMention(target)}.` : '';
       await this.editInteractiveMessage(chatId, message.message_id, `${finalDecision === 'confirm' ? '🚫 Confirmed scam.' : '✅ Rejected flag as false positive.'}${cleared}\n\nSaving evidence to TRACaBot context memory.`, [[button('↩️ Back to queue', callbackData('review-list', requester)), button('✖️ Close', callbackData('close', requester))]], { parse_mode: 'HTML' });
       return true;
     }

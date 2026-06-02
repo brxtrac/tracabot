@@ -2445,6 +2445,28 @@ test('inline false-positive review clears all pending reviews for that user', as
   assert.equal(dkgWrites.filter((event) => event.event_type === 'review_overturned').length, 2);
 });
 
+test('inline confirmed scam review clears all pending reviews for that user', async () => {
+  const { bot, calls, dkgWrites } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  const timestamp = new Date().toISOString();
+  bot.store.append({ id: 'evt-confirm-1', event_type: 'risk_review_needed', timestamp, user: { id: 7631795279, username: 'GLOBEADMIN' }, payload: { confidence: 75, evidence: ['Impersonation indicators: admin'] } });
+  bot.store.append({ id: 'evt-confirm-2', event_type: 'risk_review_needed', timestamp, user: { id: 7631795279, username: 'GLOBEADMIN' }, payload: { confidence: 80, evidence: ['Duplicate impersonation indicators: admin'] } });
+  bot.store.append({ id: 'evt-confirm-other', event_type: 'risk_review_needed', timestamp, user: { id: 472024168, username: 'r4ge13' }, payload: { confidence: 75, evidence: ['Urgency language: now'] } });
+
+  const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Reviews', 'inline-confirm-clear');
+  await bot.handleCallbackQuery({ id: 'confirm-open', from: { id: 1, username: 'admin' }, message: { chat, message_id: 44 }, data: buttonByText(panel, 'GLOBEADMIN').callback_data });
+  const detail = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload;
+  await bot.handleCallbackQuery({ id: 'confirm-scam', from: { id: 1, username: 'admin' }, message: { chat, message_id: 44 }, data: buttonByText(detail, 'Confirm scam').callback_data });
+
+  assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'GLOBEADMIN'), false);
+  assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'r4ge13'), true);
+  const resolved = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload.text || '';
+  assert.match(resolved, /Confirmed scam/);
+  assert.match(resolved, /Cleared 2 pending reviews/);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'review_upheld').length, 2);
+});
+
 test('inline false-positive review clears large grouped queues at once', async () => {
   const { bot, calls, dkgWrites } = makeBot({ canBan: true });
   const chat = { id: -100, title: 'demo' };
@@ -2516,6 +2538,9 @@ test('/review list explains long queues without overloading buttons', async () =
   const reply = await openMenuPanel(bot, calls, { id: -100, title: 'demo' }, { id: 1, username: 'admin' }, 'Reviews', 'review-long');
   assert.match(reply.text || '', /Showing the first 5 targets/);
   assert.equal(reply.reply_markup.inline_keyboard.filter((row) => row[0]?.callback_data?.includes('review-open')).length, 5);
+  assert.equal(reply.reply_markup.inline_keyboard.flat().filter((button) => button.text === '📊 Stats').length, 1);
+  assert.equal(reply.reply_markup.inline_keyboard.flat().filter((button) => button.text === '⚙️ Settings').length, 1);
+  assert.equal(reply.reply_markup.inline_keyboard.flat().filter((button) => button.text === '✖️ Close').length, 1);
 });
 
 test('/review list does not globally hide targets previously rejected by admin', async () => {
