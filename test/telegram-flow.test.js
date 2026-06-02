@@ -2418,6 +2418,8 @@ test('/review list is compact and groups duplicate targets', async () => {
   assert.doesNotMatch(reply, /Who should I review\?/);
   assert.doesNotMatch(reply, /1 is not a scammer/);
   assert.doesNotMatch(reply, /evt-review-1 confirm reason/);
+  assert.throws(() => buttonByText(panel, 'Confirm visible'));
+  assert.throws(() => buttonByText(panel, 'Reject visible'));
 });
 
 test('inline false-positive review clears all pending reviews for that user', async () => {
@@ -2435,11 +2437,12 @@ test('inline false-positive review clears all pending reviews for that user', as
   const reject = buttonByText(detail, 'Reject flag');
   await bot.handleCallbackQuery({ id: 'inline-reject', from: { id: 1, username: 'admin' }, message: { chat, message_id: 41 }, data: reject.callback_data });
 
-  assert.equal(dkgWrites.filter((event) => event.event_type === 'review_overturned').length, 2);
   assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'molociao'), false);
   assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'r4ge13'), true);
   const resolved = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload.text || '';
   assert.match(resolved, /Cleared 2 pending reviews/);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'review_overturned').length, 2);
 });
 
 test('inline false-positive review clears large grouped queues at once', async () => {
@@ -2456,29 +2459,11 @@ test('inline false-positive review clears large grouped queues at once', async (
   const detail = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload;
   await bot.handleCallbackQuery({ id: 'reject-many', from: { id: 1, username: 'admin' }, message: { chat, message_id: 42 }, data: buttonByText(detail, 'Reject flag').callback_data });
 
-  assert.equal(dkgWrites.filter((event) => event.event_type === 'review_overturned').length, 12);
   assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'BRX86'), false);
   const resolved = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload.text || '';
   assert.match(resolved, /Cleared 12 pending reviews/);
-});
-
-test('review queue bulk buttons process visible targets', async () => {
-  const { bot, calls, dkgWrites } = makeBot({ canBan: true });
-  const chat = { id: -100, title: 'demo' };
-  const timestamp = new Date().toISOString();
-  bot.store.append({ id: 'evt-bulk-safe-1', event_type: 'risk_review_needed', timestamp, user: { id: 10, username: 'safe_one' }, payload: { confidence: 10, evidence: ['weak signal'] } });
-  bot.store.append({ id: 'evt-bulk-safe-2', event_type: 'risk_review_needed', timestamp, user: { id: 10, username: 'safe_one' }, payload: { confidence: 15, evidence: ['duplicate weak signal'] } });
-  bot.store.append({ id: 'evt-bulk-risky', event_type: 'risk_review_needed', timestamp, user: { id: 11, username: 'risky_one' }, payload: { confidence: 90, evidence: ['strong signal'] } });
-
-  const menu = await openMenu(bot, calls, chat, { id: 1, username: 'admin' }, 43);
-  await bot.handleCallbackQuery({ id: 'bulk-review', from: { id: 1, username: 'admin' }, message: { chat, message_id: menu.message_id || 43 }, data: buttonByText(menu, 'Reviews').callback_data });
-  const panel = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload;
-  await bot.handleCallbackQuery({ id: 'bulk-reject', from: { id: 1, username: 'admin' }, message: { chat, message_id: 43 }, data: buttonByText(panel, 'Reject visible').callback_data });
-
-  assert.equal(dkgWrites.filter((event) => event.event_type === 'review_overturned').length, 3);
-  assert.equal(bot.pendingReviewItems().length, 0);
-  const resolved = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload.text || '';
-  assert.match(resolved, /Processed 2 targets and 3 pending reviews/);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'review_overturned').length, 12);
 });
 
 test('single target false-positive resolution hides duplicate pending reviews', async () => {

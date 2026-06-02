@@ -1362,7 +1362,6 @@ export class TelegramShieldBot {
       const label = `🔎 ${index + 1}. ${displayName(event.user || event.payload?.target || {})}`.slice(0, 28);
       return [[button(label, callbackData('review-open', requesterId, shortId(event.id)))]];
     });
-    if (groups.length) rows.push([button('🚫 Confirm visible', callbackData('review-bulk-confirm', requesterId, 'visible')), button('✅ Reject visible', callbackData('review-bulk-reject', requesterId, 'visible'))]);
     rows.push(...this.mainNavKeyboard(requesterId, { includeReview: false }));
     return rows;
   }
@@ -1964,6 +1963,13 @@ export class TelegramShieldBot {
       return { reviewedEvent, event };
     }));
     return { reviewed: [...unique.values()], artifactWrites };
+  }
+
+  recordReviewDecisionInBackground(message, events = [], decision = 'reject', reason = '', options = {}) {
+    const expectedCount = [...new Set(events.map((event) => event?.id).filter(Boolean))].length;
+    this.recordReviewDecisionForEvents(message, events, decision, reason, options)
+      .catch((error) => console.error(`Review evidence write failed for ${expectedCount || 'unknown'} item(s): ${error instanceof Error ? error.message : String(error)}`));
+    return expectedCount;
   }
 
   async recordBanEvidenceInBackground(message, target, risk = {}, reason = 'admin requested ban', extra = {}) {
@@ -3854,20 +3860,6 @@ export class TelegramShieldBot {
       await this.editInteractiveMessage(chatId, message.message_id, this.formatReviewDetail(event), this.reviewActionKeyboard(requester, event.id), { parse_mode: 'HTML', disable_web_page_preview: true });
       return true;
     }
-    if (parsed.action === 'review-bulk-confirm' || parsed.action === 'review-bulk-reject') {
-      const groups = this.pendingReviewGroups().slice(0, 5);
-      if (!groups.length) {
-        await this.editInteractiveMessage(chatId, message.message_id, 'No pending review items.', this.pendingReviewsKeyboard(requester), { parse_mode: 'HTML', disable_web_page_preview: true });
-        return true;
-      }
-      const finalDecision = parsed.action === 'review-bulk-confirm' ? 'confirm' : 'reject';
-      const reason = finalDecision === 'confirm' ? 'admin bulk confirmed visible scam flags' : 'admin bulk rejected visible flags as false positives';
-      const events = finalDecision === 'reject' ? groups.flat() : groups.map((group) => group[0]).filter(Boolean);
-      const { reviewed } = await this.recordReviewDecisionForEvents(callbackMessage, events, finalDecision, reason, { evidencePrefix: `admin callback bulk ${finalDecision === 'confirm' ? 'confirmed scam flag' : 'rejected scam flag'}` });
-      const targets = groups.length;
-      await this.editInteractiveMessage(chatId, message.message_id, `${finalDecision === 'confirm' ? '🚫 Confirmed visible review targets.' : '✅ Rejected visible review targets as false positives.'}\n\nProcessed ${targets} target${targets === 1 ? '' : 's'} and ${reviewed.length} pending review${reviewed.length === 1 ? '' : 's'}.`, [[button('↩️ Back to queue', callbackData('review-list', requester)), button('✖️ Close', callbackData('close', requester))]], { parse_mode: 'HTML' });
-      return true;
-    }
     if (parsed.action === 'review-confirm' || parsed.action === 'review-reject') {
       const event = this.findEvent(eventId);
       if (!event) return true;
@@ -3881,13 +3873,12 @@ export class TelegramShieldBot {
       const events = finalDecision === 'reject'
         ? this.pendingReviewGroupForEvent(event)
         : [event];
-      const { reviewed, artifactWrites } = await this.recordReviewDecisionForEvents(callbackMessage, events, finalDecision, reason, {
+      const reviewedCount = this.recordReviewDecisionInBackground(callbackMessage, events, finalDecision, reason, {
         target,
         evidencePrefix: `admin callback ${finalDecision === 'confirm' ? 'confirmed scam flag' : 'rejected scam flag'}`
       });
-      const reviewEvent = artifactWrites[0]?.event;
-      const cleared = finalDecision === 'reject' && reviewed.length > 1 ? `\nCleared ${reviewed.length} pending reviews for ${userMention(target)}.` : '';
-      await this.editInteractiveMessage(chatId, message.message_id, `${finalDecision === 'confirm' ? '🚫 Confirmed scam.' : '✅ Rejected flag as false positive.'}${cleared}\n\nSaved review event: ${reviewEvent?.id || ''}`, [[button('↩️ Back to queue', callbackData('review-list', requester)), button('❔ Explain', callbackData('why', requester, shortId(reviewEvent?.id || ''))), button('✖️ Close', callbackData('close', requester))]], { parse_mode: 'HTML' });
+      const cleared = finalDecision === 'reject' && reviewedCount > 1 ? `\nCleared ${reviewedCount} pending reviews for ${userMention(target)}.` : '';
+      await this.editInteractiveMessage(chatId, message.message_id, `${finalDecision === 'confirm' ? '🚫 Confirmed scam.' : '✅ Rejected flag as false positive.'}${cleared}\n\nSaving evidence to TRACaBot context memory.`, [[button('↩️ Back to queue', callbackData('review-list', requester)), button('✖️ Close', callbackData('close', requester))]], { parse_mode: 'HTML' });
       return true;
     }
     if (parsed.action === 'warn-ban' || parsed.action === 'warn-safe') {
@@ -3904,8 +3895,8 @@ export class TelegramShieldBot {
       if (parsed.action === 'warn-safe') {
         const reason = 'admin marked prior-community warning as safe';
         const events = this.pendingReviewItems().filter((item) => eventMatchesTarget(item, target));
-        const { reviewed } = await this.recordReviewDecisionForEvents(callbackMessage, events, 'reject', reason, { target, evidencePrefix: 'admin callback marked warning safe' });
-        await this.editInteractiveMessage(chatId, message.message_id, `✅ Marked ${userMention(target)} as safe.\n\nCleared ${reviewed.length} pending review${reviewed.length === 1 ? '' : 's'}.`, [[button('↩️ Back to queue', callbackData('review-list', requester)), button('✖️ Close', callbackData('close', requester))]], { parse_mode: 'HTML' });
+        const reviewedCount = this.recordReviewDecisionInBackground(callbackMessage, events, 'reject', reason, { target, evidencePrefix: 'admin callback marked warning safe' });
+        await this.editInteractiveMessage(chatId, message.message_id, `✅ Marked ${userMention(target)} as safe.\n\nCleared ${reviewedCount} pending review${reviewedCount === 1 ? '' : 's'}. Saving evidence to TRACaBot context memory.`, [[button('↩️ Back to queue', callbackData('review-list', requester)), button('✖️ Close', callbackData('close', requester))]], { parse_mode: 'HTML' });
         return true;
       }
       if (!target.id) {
