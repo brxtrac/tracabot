@@ -1221,8 +1221,10 @@ export class TelegramShieldBot {
       return this._reviewCache.pending;
     }
 
-    const reviewEvents = this.store.all()
-      .filter((event) => ['risk_review_needed', 'risk_action_suppressed', 'report_review_needed', 'ban_requested_no_reply', 'ban_requested_no_rights', 'proactive_cross_group_warning'].includes(event.event_type));
+    const allEvents = this.store.all();
+    const pendingTypes = new Set(['risk_review_needed', 'risk_action_suppressed', 'report_review_needed', 'ban_requested_no_reply', 'ban_requested_no_rights', 'proactive_cross_group_warning']);
+    const resolutionTypes = new Set(['review_upheld', 'review_overturned', 'ban_executed']);
+    const reviewEvents = allEvents.filter((event) => pendingTypes.has(event.event_type));
 
     const candidateCounts = new Map();
     for (const event of reviewEvents) {
@@ -1230,9 +1232,42 @@ export class TelegramShieldBot {
       candidateCounts.set(key, (candidateCounts.get(key) || 0) + 1);
     }
 
+    const directResolutionByEvent = new Map();
+    const targetResolutions = [];
+    const legacyResolutions = [];
+    for (const event of allEvents) {
+      if (!resolutionTypes.has(event.event_type)) continue;
+      for (const id of [event.payload?.target_event_id, event.payload?.report_event_id].filter(Boolean)) directResolutionByEvent.set(id, event);
+      if (!['review_overturned', 'ban_executed'].includes(event.event_type)) continue;
+      const reviewed = event.payload?.reviewed_target || event.user || {};
+      const reviewedKey = event.payload?.reviewed_target_key || targetKey(reviewed);
+      if (!reviewedKey) continue;
+      if (event.event_type === 'review_overturned' && !event.payload?.resolves_target_pending_reviews) legacyResolutions.push({ event, key: reviewedKey, ts: Date.parse(event.timestamp || '') });
+      if (event.payload?.resolves_target_pending_reviews) targetResolutions.push({ event, key: reviewedKey, ts: Date.parse(event.timestamp || '') });
+    }
+
+    const hasTargetResolution = (event) => {
+      const target = event.user || event.payload?.target || {};
+      const key = targetKey(target);
+      if (!key) return false;
+      const eventTs = Date.parse(event.timestamp || '');
+      return targetResolutions.some((resolution) => {
+        if (resolution.ts < eventTs) return false;
+        if (resolution.event.payload?.target_event_id === event.id || resolution.event.payload?.report_event_id === event.id) return true;
+        return resolution.key === key && resolution.event.event_type === 'review_overturned';
+      });
+    };
+
+    const hasLegacyDuplicateResolution = (event) => {
+      const target = event.user || event.payload?.target || {};
+      const key = targetKey(target);
+      if (!key || (candidateCounts.get(key) || 0) < 2) return false;
+      const eventTs = Date.parse(event.timestamp || '');
+      return legacyResolutions.some((resolution) => resolution.key === key && resolution.ts >= eventTs);
+    };
+
     const items = reviewEvents
-      .filter((event) => this.isPendingReviewEvent(event))
-      .filter((event) => !this.legacyTargetResolutionForDuplicate(event, candidateCounts.get(targetKey(event.user || event.payload?.target || {}) || event.id) || 0))
+      .filter((event) => event?.id && !directResolutionByEvent.has(event.id) && !hasTargetResolution(event) && !hasLegacyDuplicateResolution(event))
       .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
 
     this._reviewCache.pending = items;

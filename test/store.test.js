@@ -21,7 +21,7 @@ test('ignores malformed jsonl lines', () => {
   const store = new EventStore(join(dir, 'events.jsonl'));
   store.append({ id: 'ok', timestamp: new Date().toISOString(), payload: {} });
   appendFileSync(store.path, 'not-json\n');
-  assert.deepEqual(store.all().map((event) => event.id), ['ok']);
+  assert.deepEqual(new EventStore(store.path).all().map((event) => event.id), ['ok']);
 });
 
 test('requires event store path to be a file path', () => {

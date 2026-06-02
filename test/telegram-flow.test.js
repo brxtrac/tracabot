@@ -2486,6 +2486,27 @@ test('legacy same-target false-positive review clears duplicate pending reviews'
   assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'BRX86'), false);
 });
 
+test('pending review list uses one store snapshot for large duplicate queues', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const timestamp = new Date(Date.now() - 1000).toISOString();
+  for (let i = 1; i <= 80; i += 1) {
+    bot.store.append({ id: `evt-fast-review-${i}`, event_type: 'risk_review_needed', timestamp, user: { id: 1354777145, username: 'BRX86' }, payload: { confidence: 0, evidence: [`duplicate ${i}`] } });
+  }
+  bot.store.append({ id: 'evt-fast-other', event_type: 'risk_review_needed', timestamp, user: { id: 472024168, username: 'r4ge13' }, payload: { confidence: 75, evidence: ['Urgency language: now'] } });
+
+  let allCalls = 0;
+  const originalAll = bot.store.all.bind(bot.store);
+  bot.store.all = () => {
+    allCalls += 1;
+    return originalAll();
+  };
+
+  const panel = bot.formatPendingReviews();
+  assert.match(panel, /BRX86/);
+  assert.match(panel, /\(\+79 more\)/);
+  assert.equal(allCalls, 1);
+});
+
 test('/review list explains long queues without overloading buttons', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   const timestamp = new Date().toISOString();

@@ -5,16 +5,22 @@ export class EventStore {
   constructor(path) {
     if (!path || path === '.' || path.endsWith('/')) throw new Error('EventStore path must be a file path');
     this.path = resolve(path);
+    this.events = null;
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
   }
 
   append(event) {
     appendFileSync(this.path, `${JSON.stringify(event)}\n`, { mode: 0o600 });
+    if (this.events) this.events.push(event);
   }
 
   all() {
-    if (!existsSync(this.path)) return [];
-    return readFileSync(this.path, 'utf8')
+    if (this.events) return this.events;
+    if (!existsSync(this.path)) {
+      this.events = [];
+      return this.events;
+    }
+    this.events = readFileSync(this.path, 'utf8')
       .split('\n')
       .filter(Boolean)
       .map((line) => {
@@ -25,6 +31,7 @@ export class EventStore {
         }
       })
       .filter(Boolean);
+    return this.events;
   }
 
   stats(days = 7) {
