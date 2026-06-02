@@ -3800,6 +3800,7 @@ export class TelegramShieldBot {
         return true;
       }
       if (parsed.action === 'stats' || parsed.action === 'stats-sources') {
+        await this.editInteractiveMessage(chatId, message.message_id, '📊 Loading stats...', this.statsKeyboard(requester)).catch(() => null);
         const stats = await this.dkg.getStats(7);
         const text = parsed.action === 'stats-sources' ? formatStatsSourcesReply(stats) : this.formatStatsDashboard(stats);
         await this.editInteractiveMessage(chatId, message.message_id, text, this.statsKeyboard(requester));
@@ -3814,6 +3815,7 @@ export class TelegramShieldBot {
           await this.answerCallback(query.id, 'Admin only');
           return true;
         }
+        await this.editInteractiveMessage(chatId, message.message_id, '👮 Loading enforcement status...', this.banlistKeyboard(requester), { parse_mode: 'HTML', disable_web_page_preview: true }).catch(() => null);
         await this.editInteractiveMessage(chatId, message.message_id, await this.formatBanlist(), this.banlistKeyboard(requester), { parse_mode: 'HTML', disable_web_page_preview: true });
         return true;
       }
@@ -3822,6 +3824,7 @@ export class TelegramShieldBot {
           await this.answerCallback(query.id, 'Admin only');
           return true;
         }
+        await this.editInteractiveMessage(chatId, message.message_id, '🩺 Checking status...', this.settingsKeyboard(requester, chatId)).catch(() => null);
         await this.editInteractiveMessage(chatId, message.message_id, await this.formatStatus(callbackMessage), this.settingsKeyboard(requester, chatId));
         return true;
       }
@@ -4163,15 +4166,17 @@ export class TelegramShieldBot {
       timeout: 25,
       allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member']
     });
+    const background = [];
     for (const update of updates) {
       this.offset = update.update_id + 1;
-      if (update.callback_query) await this.handleCallbackQuery(update.callback_query);
-      if (update.message) await this.handleMessage(update.message);
-      if (update.chat_member) await this.handleChatMemberUpdate(update.chat_member);
+      if (update.callback_query) background.push(this.handleCallbackQuery(update.callback_query));
+      else if (update.message) background.push(this.handleMessage(update.message));
+      else if (update.chat_member) background.push(this.handleChatMemberUpdate(update.chat_member));
     }
-    await this.proactiveScan();
-    await this.expireJoinChallenges();
-    await this.maybePostDailySafeTip();
+    if (background.length) await Promise.allSettled(background);
+    this.proactiveScan().catch((error) => console.error(`proactive scan failed: ${error instanceof Error ? error.message : String(error)}`));
+    this.expireJoinChallenges().catch((error) => console.error(`join challenge expiry failed: ${error instanceof Error ? error.message : String(error)}`));
+    this.maybePostDailySafeTip().catch((error) => console.error(`daily safe tip failed: ${error instanceof Error ? error.message : String(error)}`));
   }
 
   async maybePostDailySafeTip() {
