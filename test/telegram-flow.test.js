@@ -2693,6 +2693,35 @@ test('LLM classifies admin alert reply confirm as confirmed scam flag', async ()
   assert.ok(calls.some((call) => String(call.payload.text || '').includes('Confirmed the scam flag')));
 });
 
+test('admin alert false-positive reply clears all same-target pending reviews', async () => {
+  const llm = { async complete() { return { ok: true, text: JSON.stringify({ intent: 'admin_review', decision: 'reject', target_event_id: 'evt-alert-1', reason: 'admin says false positive', confidence: 95, user_reply: 'Rejected the scam flag for @coineazy.' }) }; } };
+  const { bot, dkgWrites } = makeBot({ canBan: true, conversational: true, llm });
+  const chat = { id: -100, title: 'demo' };
+  const timestamp = new Date().toISOString();
+  bot.store.append({ id: 'evt-alert-1', event_type: 'risk_review_needed', timestamp, chat, user: { id: 4242, username: 'coineazy' }, payload: { confidence: 80, evidence: ['claim link'] } });
+  bot.store.append({ id: 'evt-alert-2', event_type: 'risk_review_needed', timestamp, chat, user: { id: 4242, username: 'coineazy' }, payload: { confidence: 85, evidence: ['admin impersonation'] } });
+  bot.reviewMessageEvents.set(`${chat.id}:910`, 'evt-alert-1');
+
+  await bot.handleMessage({ chat, from: { id: 1, username: 'admin' }, message_id: 911, text: 'False positive, not a scam', reply_to_message: { chat, message_id: 910, from: { id: 999, username: 'tracethembot', is_bot: true }, text: 'TRACaBot flagged @coineazy for admin review.' } });
+
+  assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'coineazy'), false);
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'review_overturned').length, 2);
+  assert.ok(dkgWrites.every((event) => event.event_type !== 'review_overturned' || event.payload.resolves_target_pending_reviews === true));
+});
+
+test('LLM review reject clears mixed same-target pending reviews', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  const timestamp = new Date().toISOString();
+  bot.store.append({ id: 'evt-mixed-id', event_type: 'risk_review_needed', timestamp, chat, user: { id: 4242, username: 'coineazy' }, payload: { confidence: 80, evidence: ['claim link'] } });
+  bot.store.append({ id: 'evt-mixed-name', event_type: 'risk_review_needed', timestamp, chat, user: { username: 'coineazy' }, payload: { confidence: 85, evidence: ['admin impersonation'] } });
+
+  await bot.executeAgentAction('review', { event_id: 'evt-mixed-id', decision: 'reject', reason: 'admin false positive' }, { chat, from: { id: 1, username: 'admin' }, message_id: 912, text: '@tracethembot reject false positive' }, true, { reply_to_message_id: 912 });
+
+  assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'coineazy'), false);
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'review_overturned').length, 2);
+});
+
 test('LLM classifies non-admin alert reply dispute as appeal', async () => {
   const llm = { async complete() { return { ok: true, text: JSON.stringify({ intent: 'appeal', decision: 'reject', target_event_id: 'evt-appeal-llm', reason: 'user disputes flag', confidence: 88, user_reply: 'Appeal logged for @coineazy.' }) }; } };
   const { bot, dkgWrites, calls } = makeBot({ canBan: true, trustedUserIds: [1], conversational: true, llm });
@@ -2720,6 +2749,55 @@ test('natural language false positive review clears all matching pending reviews
   assert.ok(replies.some((text) => text.includes('cleared 12 pending reviews')));
   assert.equal(replies.some((text) => /\bleft\b/i.test(text)), false);
   assert.equal(replies.some((text) => text.includes('Processing false positive correction')), false);
+});
+
+test('admin false-positive permanently suppresses future flags even after seven days and DKG evidence', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    dkgIntel: { riskScore: 95, reportsAcrossCommunities: 3, wallets: [], domains: ['fake.example'], patterns: ['impersonation'], evidence: [{ eventId: 'old-risk' }] }
+  });
+  const chat = { id: -100, title: 'demo' };
+  bot.store.append({
+    id: 'evt-old-safe',
+    event_type: 'review_overturned',
+    timestamp: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    chat,
+    user: { id: 1, username: 'admin' },
+    payload: { target_event_id: 'evt-old-flag', review_decision: 'reject', reviewed_target: { id: 4242, username: 'coineazy' }, reviewed_target_key: 'id:4242', resolves_target_pending_reviews: true, evidence: ['admin rejected flag'] }
+  });
+
+  await bot.handleMessage({ chat, from: { id: 4242, username: 'coineazy', is_bot: false }, message_id: 913, text: 'support says claim now at fake.example' });
+
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('flagged this for admin review')), false);
+  assert.equal(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user?.id === 4242), false);
+});
+
+test('local admin false-positive suppresses prior-community warning creation', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    configOverrides: { proactiveAlertCrossGroup: true, warnThreshold: 50 },
+    dkgIntel: { riskScore: 90, reportsAcrossCommunities: 2, wallets: [], domains: [], patterns: ['impersonation'], evidence: [{ eventId: 'old-risk' }] }
+  });
+  bot.dkg.queryAdminHistoryForActor = async () => ({
+    hasPriorAdminAction: true,
+    hasPriorFalsePositive: false,
+    events: [{ eventId: 'old-ban', eventType: 'ban_executed', confidence: 95 }],
+    falsePositiveEvents: []
+  });
+  const chat = { id: -100, title: 'demo' };
+  bot.store.append({
+    id: 'evt-local-safe',
+    event_type: 'review_overturned',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 1, username: 'admin' },
+    payload: { target_event_id: 'evt-local-flag', review_decision: 'reject', reviewed_target: { id: 4242, username: 'coineazy' }, reviewed_target_key: 'id:4242', resolves_target_pending_reviews: true, evidence: ['admin rejected flag'] }
+  });
+
+  await bot.handleMessage({ chat, from: { id: 4242, username: 'coineazy', is_bot: false }, message_id: 914, text: 'support says claim now' });
+
+  assert.equal(bot.store.all().some((event) => event.event_type === 'proactive_cross_group_warning' && event.user?.id === 4242), false);
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('Prior community alert')), false);
 });
 
 test('stats sources button returns DKG event receipts', async () => {

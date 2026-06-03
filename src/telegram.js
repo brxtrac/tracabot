@@ -246,6 +246,24 @@ function targetKey(target = {}) {
   return target.id ? `id:${target.id}` : target.username ? `username:${target.username.toLowerCase()}` : target.label || '';
 }
 
+function targetIdentityKeys(target = {}) {
+  if (!target || target.kind === 'wallet') return targetKey(target) ? [targetKey(target)] : [];
+  return [...new Set([
+    target.id ? `id:${target.id}` : '',
+    target.username ? `username:${String(target.username).replace(/^@/, '').toLowerCase()}` : '',
+    target.label ? `username:${String(target.label).replace(/^@/, '').toLowerCase()}` : ''
+  ].filter(Boolean))];
+}
+
+function sameActorTarget(a = {}, b = {}) {
+  const aKeys = targetIdentityKeys(a);
+  const bKeys = new Set(targetIdentityKeys(b));
+  if (aKeys.some((key) => bKeys.has(key))) return true;
+  const aLookup = normalizedLookup(a.username || a.label || a.id || '');
+  const bLookup = normalizedLookup(b.username || b.label || b.id || '');
+  return Boolean(aLookup && bLookup && aLookup === bLookup);
+}
+
 function normalizedIdentity(user = {}) {
   return [user.username, user.first_name, user.last_name]
     .filter(Boolean)
@@ -283,11 +301,10 @@ function eventAgeMs(event = {}) {
 }
 
 function eventMatchesTarget(event = {}, target = {}) {
-  const key = targetKey(target);
   const eventUser = event.user || {};
-  const lookup = normalizedLookup(target.username || target.label || target.id || '');
-  const eventLookup = normalizedLookup(eventUser.username || eventUser.label || eventUser.id || '');
-  return actorKey(eventUser) === key || event.payload?.target_key === key || event.payload?.watch_target_key === key || (lookup && lookup === eventLookup);
+  const keys = new Set(targetIdentityKeys(target));
+  const payloadKeys = [event.payload?.target_key, event.payload?.watch_target_key].filter(Boolean);
+  return sameActorTarget(eventUser, target) || payloadKeys.some((key) => keys.has(key));
 }
 
 function textFingerprint(text = '') {
@@ -1173,31 +1190,27 @@ export class TelegramShieldBot {
 
   targetResolutionFor(event = {}) {
     const target = event.user || event.payload?.target || {};
-    const key = targetKey(target);
-    if (!key) return null;
+    if (!targetIdentityKeys(target).length) return null;
     return this.store.all().find((resolution) => {
       if (!['review_upheld', 'review_overturned', 'ban_executed'].includes(resolution.event_type)) return false;
       if (Date.parse(resolution.timestamp || '') < Date.parse(event.timestamp || '')) return false;
       if (resolution.payload?.target_event_id === event.id || resolution.payload?.report_event_id === event.id) return true;
       if (!resolution.payload?.resolves_target_pending_reviews) return false;
       const reviewed = resolution.payload?.reviewed_target || resolution.user || {};
-      const reviewedKey = resolution.payload?.reviewed_target_key || targetKey(reviewed);
-      return reviewedKey === key;
+      return sameActorTarget(reviewed, target);
     }) || null;
   }
 
   legacyTargetResolutionForDuplicate(event = {}, duplicateCount = 0) {
     if (duplicateCount < 2) return null;
     const target = event.user || event.payload?.target || {};
-    const key = targetKey(target);
-    if (!key) return null;
+    if (!targetIdentityKeys(target).length) return null;
     return this.store.all().find((resolution) => {
       if (resolution.event_type !== 'review_overturned') return false;
       if (Date.parse(resolution.timestamp || '') < Date.parse(event.timestamp || '')) return false;
       if (resolution.payload?.resolves_target_pending_reviews) return false;
       const reviewed = resolution.payload?.reviewed_target || resolution.user || {};
-      const reviewedKey = resolution.payload?.reviewed_target_key || targetKey(reviewed);
-      return reviewedKey === key;
+      return sameActorTarget(reviewed, target);
     }) || null;
   }
 
@@ -1273,7 +1286,7 @@ export class TelegramShieldBot {
 
     const candidateCounts = new Map();
     for (const event of reviewEvents) {
-      const key = targetKey(event.user || event.payload?.target || {}) || event.id;
+      const key = targetIdentityKeys(event.user || event.payload?.target || {})[0] || event.id;
       candidateCounts.set(key, (candidateCounts.get(key) || 0) + 1);
     }
 
@@ -1285,30 +1298,28 @@ export class TelegramShieldBot {
       for (const id of [event.payload?.target_event_id, event.payload?.report_event_id].filter(Boolean)) directResolutionByEvent.set(id, event);
       if (!['review_overturned', 'ban_executed'].includes(event.event_type)) continue;
       const reviewed = event.payload?.reviewed_target || event.user || {};
-      const reviewedKey = event.payload?.reviewed_target_key || targetKey(reviewed);
-      if (!reviewedKey) continue;
-      if (event.event_type === 'review_overturned' && !event.payload?.resolves_target_pending_reviews) legacyResolutions.push({ event, key: reviewedKey, ts: Date.parse(event.timestamp || '') });
-      if (event.payload?.resolves_target_pending_reviews) targetResolutions.push({ event, key: reviewedKey, ts: Date.parse(event.timestamp || '') });
+      if (!targetIdentityKeys(reviewed).length) continue;
+      if (event.event_type === 'review_overturned' && !event.payload?.resolves_target_pending_reviews) legacyResolutions.push({ event, reviewed, ts: Date.parse(event.timestamp || '') });
+      if (event.payload?.resolves_target_pending_reviews) targetResolutions.push({ event, reviewed, ts: Date.parse(event.timestamp || '') });
     }
 
     const hasTargetResolution = (event) => {
       const target = event.user || event.payload?.target || {};
-      const key = targetKey(target);
-      if (!key) return false;
+      if (!targetIdentityKeys(target).length) return false;
       const eventTs = Date.parse(event.timestamp || '');
       return targetResolutions.some((resolution) => {
         if (resolution.ts < eventTs) return false;
         if (resolution.event.payload?.target_event_id === event.id || resolution.event.payload?.report_event_id === event.id) return true;
-        return resolution.key === key;
+        return sameActorTarget(resolution.reviewed, target);
       });
     };
 
     const hasLegacyDuplicateResolution = (event) => {
       const target = event.user || event.payload?.target || {};
-      const key = targetKey(target);
+      const key = targetIdentityKeys(target)[0] || '';
       if (!key || (candidateCounts.get(key) || 0) < 2) return false;
       const eventTs = Date.parse(event.timestamp || '');
-      return legacyResolutions.some((resolution) => resolution.key === key && resolution.ts >= eventTs);
+      return legacyResolutions.some((resolution) => sameActorTarget(resolution.reviewed, target) && resolution.ts >= eventTs);
     };
 
     const items = reviewEvents
@@ -1321,22 +1332,13 @@ export class TelegramShieldBot {
   }
 
   falsePositiveReviewFor(target = {}, text = '', dkgIntel = {}) {
-    const key = targetKey(target);
-    const id = target.id ? String(target.id) : '';
-    const username = target.username ? String(target.username).replace(/^@/, '').toLowerCase() : '';
-    if (!key && !id && !username) return null;
+    if (!targetIdentityKeys(target).length) return null;
     return this.store.all().find((event) => {
       if (event.event_type !== 'review_overturned') return false;
-      if (eventAgeMs(event) > 7 * 24 * 60 * 60 * 1000) return false;
       const reviewed = event.payload?.reviewed_target || {};
-      const reviewedKey = event.payload?.reviewed_target_key || targetKey(reviewed);
-      const sameTarget = Boolean(
-        (key && reviewedKey === key)
-        || (id && reviewed.id && String(reviewed.id) === id)
-        || (username && reviewed.username && String(reviewed.username).replace(/^@/, '').toLowerCase() === username)
-      );
+      const sameTarget = sameActorTarget(reviewed, target);
       const original = this.findEvent(event.payload?.target_event_id || '');
-      const sameOriginalTarget = Boolean(original && key && targetKey(original.user || original.payload?.target || {}) === key);
+      const sameOriginalTarget = Boolean(original && sameActorTarget(original.user || original.payload?.target || {}, target));
       if (!sameTarget && !sameOriginalTarget) return false;
       const originalText = [original?.payload?.message_text, original?.payload?.evidence?.join('\n'), original?.text].filter(Boolean).join('\n');
       const originalFingerprint = textFingerprint(originalText);
@@ -1344,7 +1346,6 @@ export class TelegramShieldBot {
       const sameEvidence = Boolean(originalFingerprint && currentFingerprint && originalFingerprint === currentFingerprint);
       const concreteAdminSafeDecision = Boolean(event.payload?.reviewed_target_key || event.payload?.reviewed_target?.id || event.payload?.reviewed_target?.username);
       if (!sameEvidence && !concreteAdminSafeDecision) return false;
-      if ((dkgIntel.wallets || []).length || (dkgIntel.domains || []).length || (dkgIntel.evidence || []).length) return false;
       return true;
     }) || null;
   }
@@ -2018,7 +2019,7 @@ export class TelegramShieldBot {
     return true;
   }
 
-  async recordReviewDecisionForEvents(message, events = [], decision = 'reject', reason = '', { target = null, evidencePrefix = 'admin reviewed scam flag' } = {}) {
+  async recordReviewDecisionForEvents(message, events = [], decision = 'reject', reason = '', { target = null, evidencePrefix = 'admin reviewed scam flag', extraPayload = {} } = {}) {
     const unique = new Map();
     for (const event of events) {
       if (event?.id && this.isPendingReviewEvent(event)) unique.set(event.id, event);
@@ -2036,6 +2037,7 @@ export class TelegramShieldBot {
         reviewed_target: reviewedTarget,
         reviewed_target_key: targetKey(reviewedTarget),
         ...this.reviewTrustPayload(reviewer),
+        ...extraPayload,
         false_positive_reason: decision === 'reject' ? reason : '',
         resolves_target_pending_reviews: true,
         evidence: [`${evidencePrefix} ${reviewedEvent.id}: ${reason}`]
@@ -2047,6 +2049,7 @@ export class TelegramShieldBot {
 
   recordReviewDecisionInBackground(message, events = [], decision = 'reject', reason = '', options = {}) {
     const expectedCount = [...new Set(events.map((event) => event?.id).filter(Boolean))].length;
+    this._reviewCache = { pending: null, watches: null, lastUpdate: 0 };
     this.recordReviewDecisionForEvents(message, events, decision, reason, options)
       .catch((error) => console.error(`Review evidence write failed for ${expectedCount || 'unknown'} item(s): ${error instanceof Error ? error.message : String(error)}`));
     return expectedCount;
@@ -2491,29 +2494,27 @@ export class TelegramShieldBot {
     const reviewedTarget = targetEvent?.user || targetEvent?.payload?.target || context.target || {};
 
     if (trusted && classified.intent === 'admin_review' && classified.decision && explicitAdminDecision) {
-      const eventType = classified.decision === 'reject' ? 'review_overturned' : 'review_upheld';
-      const event = await this.record(eventType, message, {
-        target_event_id: targetEvent.id,
-        review_decision: classified.decision,
-        reason,
-        reviewer: actorFromMessage(message),
-        reviewed_target: reviewedTarget,
-        reviewed_target_key: targetKey(reviewedTarget),
-        ...this.reviewTrustPayload(actorFromMessage(message)),
-        false_positive_reason: classified.decision === 'reject' ? reason : '',
-        implicit_detection: true,
-        detection_method: 'llm_alert_reply_classifier',
-        llm_intent: classified.intent,
-        llm_confidence: classified.confidence,
-        original_flag_event: targetEvent.id,
-        evidence: [`LLM classified admin alert reply as ${classified.decision} for ${targetEvent.id}: ${reason}`]
+      const targetEvents = this.pendingReviewItems().filter((event) => eventMatchesTarget(event, reviewedTarget));
+      if (targetEvent && !targetEvents.some((event) => event.id === targetEvent.id)) targetEvents.unshift(targetEvent);
+      const { artifactWrites } = await this.recordReviewDecisionForEvents(message, targetEvents, classified.decision, reason, {
+        target: reviewedTarget,
+        evidencePrefix: `LLM classified admin alert reply as ${classified.decision}`,
+        extraPayload: {
+          implicit_detection: true,
+          detection_method: 'llm_alert_reply_classifier',
+          llm_intent: classified.intent,
+          llm_confidence: classified.confidence,
+          original_flag_event: targetEvent.id
+        }
       });
       if (classified.decision === 'reject') {
-        this.recordConversationArtifact(message, { risk: { confidence: 80, local_confidence: 80, scam_type: 'false_positive', evidence: [`false positive correction for ${targetEvent.id}: ${reason}`] }, text: reason, artifactKind: 'false_positive_signal', conversationRole: 'moderator', sourceEventIds: [targetEvent.id, event.id], operatorNote: reason, forceDkg: true })
-          .catch((error) => console.error(`False positive artifact write failed after alert reply ${event.id}: ${error instanceof Error ? error.message : String(error)}`));
+        for (const { reviewedEvent, event } of artifactWrites) {
+          this.recordConversationArtifact(message, { risk: { confidence: 80, local_confidence: 80, scam_type: 'false_positive', evidence: [`false positive correction for ${reviewedEvent.id}: ${reason}`] }, text: reason, artifactKind: 'false_positive_signal', conversationRole: 'moderator', sourceEventIds: [reviewedEvent.id, event.id], operatorNote: reason, forceDkg: true })
+            .catch((error) => console.error(`False positive artifact write failed after alert reply ${event.id}: ${error instanceof Error ? error.message : String(error)}`));
+        }
       }
       const verb = classified.decision === 'reject' ? 'Rejected' : 'Confirmed';
-      const suffix = classified.user_reply ? escapeHtml(classified.user_reply) : `${verb} the scam flag for ${userMention(reviewedTarget)}. Event: ${escapeHtml(event.id)}.`;
+      const suffix = classified.user_reply ? escapeHtml(classified.user_reply) : `${verb} the scam flag for ${userMention(reviewedTarget)}.`;
       await this.sendCommandReply(chatId, `✅ ${suffix}`, { ...replyOptions, parse_mode: 'HTML' });
       return true;
     }
@@ -2769,24 +2770,28 @@ export class TelegramShieldBot {
 
       const decision = isReject ? 'reject' : 'confirm';
       const reason = parameters.reason || `implicit review decision via LLM context: ${decisionRaw || 'admin verdict'}`;
-
-      const reviewEventType = decision === 'reject' ? 'review_overturned' : 'review_upheld';
-      const event = await this.record(reviewEventType, message, {
-        target_event_id: eventId,
-        review_decision: decision,
-        reason,
-        reviewer: actorFromMessage(message),
-        reviewed_target: targetEvent.user || targetEvent.payload?.target || {},
-        reviewed_target_key: targetKey(targetEvent.user || targetEvent.payload?.target || {}),
-        ...this.reviewTrustPayload(actorFromMessage(message)),
-        implicit_detection: true,
-        detection_method: 'llm_context_after_flag',
-        moderator: actorFromMessage(message)
+      const reviewedTarget = targetEvent.user || targetEvent.payload?.target || {};
+      const targetEvents = this.pendingReviewItems().filter((event) => eventMatchesTarget(event, reviewedTarget));
+      if (!targetEvents.some((event) => event.id === targetEvent.id)) targetEvents.unshift(targetEvent);
+      const { reviewed, artifactWrites } = await this.recordReviewDecisionForEvents(message, targetEvents, decision, reason, {
+        target: reviewedTarget,
+        evidencePrefix: 'LLM context admin review',
+        extraPayload: {
+          implicit_detection: true,
+          detection_method: 'llm_context_after_flag',
+          moderator: actorFromMessage(message)
+        }
       });
+      if (decision === 'reject') {
+        for (const { reviewedEvent, event } of artifactWrites) {
+          this.recordConversationArtifact(message, { risk: { confidence: 80, local_confidence: 80, scam_type: 'false_positive', evidence: [`false positive correction for ${reviewedEvent.id}: ${reason}`] }, text: reason, artifactKind: 'false_positive_signal', conversationRole: 'moderator', sourceEventIds: [reviewedEvent.id, event.id], operatorNote: reason, forceDkg: true })
+            .catch((error) => console.error(`False positive artifact write failed after LLM review ${event.id}: ${error instanceof Error ? error.message : String(error)}`));
+        }
+      }
 
       const msg = decision === 'reject'
-        ? `Rejected the scam flag for ${shortId(eventId)}. Correction recorded. Event: ${event.id}.`
-        : `Confirmed the scam flag for ${shortId(eventId)}. Event: ${event.id}.`;
+        ? `Rejected the scam flag for ${shortId(eventId)} and cleared ${reviewed.length} pending review${reviewed.length === 1 ? '' : 's'}. Correction recorded.`
+        : `Confirmed the scam flag for ${shortId(eventId)} and cleared ${reviewed.length} pending review${reviewed.length === 1 ? '' : 's'}.`;
       await this.sendEphemeral(chatId, msg, replyOptions);
       return { handled: true };
     }
@@ -2934,8 +2939,9 @@ export class TelegramShieldBot {
 
     let priorAdminAlertEvent = null;
     const graphFalsePositiveReview = adminHistory.hasPriorFalsePositive ? { id: adminHistory.falsePositiveEvents?.[0]?.eventId || 'context-graph-false-positive' } : null;
+    const localFalsePositiveReview = this.falsePositiveReviewFor(targetUser, bounded, dkgIntel);
 
-    if (!graphFalsePositiveReview && adminHistory.hasPriorAdminAction) {
+    if (!graphFalsePositiveReview && !localFalsePositiveReview && adminHistory.hasPriorAdminAction) {
       dkgIntel.evidence = dkgIntel.evidence || [];
       dkgIntel.evidence.push('Prior admin action/sentence found in Tracabot Context Graph for this actor');
       dkgIntel.riskScore = Math.max(dkgIntel.riskScore || 0, 75);
@@ -2963,7 +2969,7 @@ export class TelegramShieldBot {
     }
     const adminUsernames = (await this.adminIdentities(message.chat.id)).filter((id) => !/^\d+$/.test(id));
     const renameCopycat = this.adminRenameCopycat(message.chat, targetUser, adminUsernames);
-    const falsePositiveReview = this.falsePositiveReviewFor(targetUser, bounded, dkgIntel) || graphFalsePositiveReview;
+    const falsePositiveReview = localFalsePositiveReview || graphFalsePositiveReview;
     const effectiveIntel = falsePositiveReview ? { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [], artifactEvidence: [] } : dkgIntel;
     const analysis = this.analyzer({ text: bounded, user: { ...targetUser, adminUsernames, adminRenameCopycat: Boolean(renameCopycat) }, globalIntel: effectiveIntel });
     if (renameCopycat) {
