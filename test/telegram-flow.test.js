@@ -1942,6 +1942,8 @@ test('/scan checks a wallet without banning', async () => {
   });
   assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('HIGH RISK')));
+  assert.equal(calls.find((call) => call.method === 'sendMessage' && String(call.payload.text).includes('HIGH RISK'))?.payload.reply_to_message_id, undefined);
+  assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 10));
   assert.ok(bot.store.all().some((event) => event.event_type === 'risk_query'));
   assert.ok(bot.store.all().some((event) => event.event_type === 'fraud_finding'));
 });
@@ -1974,6 +1976,8 @@ test('/report sends wallet findings to admin review without attempting a Telegra
   const reply = calls.find((call) => call.method === 'sendMessage')?.payload.text || '';
   assert.match(reply, /need stronger evidence|admin review/i);
   assert.doesNotMatch(reply, /UAL|did:dkg:context-graph|event ID/);
+  assert.equal(calls.find((call) => call.method === 'sendMessage')?.payload.reply_to_message_id, undefined);
+  assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 11));
 });
 
 test('/report keeps suspicious DM support reports from non-admins local without verifiable indicator', async () => {
@@ -2238,7 +2242,9 @@ test('/ban bans replied user and publishes ban evidence', async () => {
     }
   });
   assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 99));
+  assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 12));
   assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 55));
+  assert.equal(calls.find((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('Banned @fake_support'))?.payload.reply_to_message_id, undefined);
   const ban = bot.store.all().find((event) => event.event_type === 'ban_executed');
   assert.ok(ban);
   assert.equal(ban.payload.replied_message_deleted, true);

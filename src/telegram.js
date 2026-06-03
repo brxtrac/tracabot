@@ -571,6 +571,23 @@ export class TelegramShieldBot {
     this.deleteMessage(message.chat.id, message.message_id).catch(() => null);
   }
 
+  commandResponseOptions(message = {}, extra = {}) {
+    const isPrivateChat = message.chat?.type === 'private' || Number(message.chat?.id || 0) > 0;
+    return { ...(isPrivateChat && message.message_id ? { reply_to_message_id: message.message_id } : {}), ...extra };
+  }
+
+  async sendCleanCommandReply(message = {}, text = '', extra = {}) {
+    const sent = await this.sendCommandReply(message.chat.id, text, this.commandResponseOptions(message, extra));
+    this.cleanupMenuTrigger(message);
+    return sent;
+  }
+
+  async sendCleanInteractiveCommandReply(message = {}, text = '', rows = [], extra = {}) {
+    const sent = await this.sendInteractiveReply(message.chat.id, text, rows, this.commandResponseOptions(message, extra));
+    this.cleanupMenuTrigger(message);
+    return sent;
+  }
+
   async menuIntro(message = {}) {
     if (this.llm && this.chatConversationalEnabled(message?.chat?.id)) {
       const reply = await this.generalConversationReply({ ...message, text: message.text || 'Open the Tracabot protection menu.' }).catch(() => '');
@@ -3114,24 +3131,23 @@ export class TelegramShieldBot {
 
   async handleMuteCommand(message) {
     const chatId = message.chat.id;
-    const replyOptions = { reply_to_message_id: message.message_id };
     if (!await this.isTrustedModerator(message)) {
-      await this.sendEphemeral(chatId, '⚠️ /mute is restricted to configured admins or Telegram chat admins.', replyOptions);
+      await this.sendCleanCommandReply(message, '⚠️ /mute is restricted to configured admins or Telegram chat admins.');
       return;
     }
     if (!await this.hasRestrictRights(chatId)) {
-      await this.sendEphemeral(chatId, 'I can advise and log, but I need Telegram admin restrict rights before I can mute users in this group.', replyOptions);
+      await this.sendCleanCommandReply(message, 'I can advise and log, but I need Telegram admin restrict rights before I can mute users in this group.');
       return;
     }
     const argText = this.commandText(message, 'mute');
     const { target } = this.resolveCommandTarget(message, 'mute');
     const replyUser = target?.id ? target : message.reply_to_message?.from;
     if (!replyUser?.id) {
-      await this.sendEphemeral(chatId, 'Reply to the user you want muted, mention them after /mute, or use a Telegram ID. Example: /mute 5 minutes.', replyOptions);
+      await this.sendCleanCommandReply(message, 'Reply to the user you want muted, mention them after /mute, or use a Telegram ID. Example: /mute 5 minutes.');
       return;
     }
     if (replyUser.is_bot === true || await this.isTelegramChatAdmin(chatId, replyUser.id)) {
-      await this.sendEphemeral(chatId, 'I will not mute bot accounts or Telegram chat admins.', replyOptions);
+      await this.sendCleanCommandReply(message, 'I will not mute bot accounts or Telegram chat admins.');
       return;
     }
     const seconds = parseDurationSeconds(argText);
@@ -3151,7 +3167,7 @@ export class TelegramShieldBot {
       lifecycle_stage: 'shared_memory',
       evidence: [`admin muted ${replyUser.username || replyUser.id} for ${humanDuration(seconds)}: ${reason}`]
     }, { writeDkg: true });
-    await this.sendCommandReply(chatId, `🔇 Muted ${userMention(replyUser)} for ${humanDuration(seconds)}. Event: ${event.id}.`, { ...replyOptions, parse_mode: 'HTML' });
+    await this.sendCleanCommandReply(message, `🔇 Muted ${userMention(replyUser)} for ${humanDuration(seconds)}. Event: ${event.id}.`, { parse_mode: 'HTML' });
   }
 
   async handleCommand(message) {
@@ -3172,7 +3188,7 @@ export class TelegramShieldBot {
       await this.recordConversationArtifact({ ...message, from: target }, { risk, text: targetText || message.text, artifactKind: 'safety_question', conversationRole: 'questioner', sourceEventIds: [event.id] });
       const finding = risk.confidence >= 80 ? await this.publishHighConfidenceFinding({ ...message, from: target, text: targetText }, risk) : null;
       await this.maybeRecordCampaign({ ...message, from: target, text: targetText }, risk);
-      await this.sendInteractiveReply(chatId, formatScanReply({ target, risk, eventId: event.id, findingId: finding?.id }), this.scanKeyboard(message.from?.id || message.from?.username || '', target, event.id), { reply_to_message_id: message.message_id });
+      await this.sendCleanInteractiveCommandReply(message, formatScanReply({ target, risk, eventId: event.id, findingId: finding?.id }), this.scanKeyboard(message.from?.id || message.from?.username || '', target, event.id));
       return;
     }
 
@@ -3222,13 +3238,13 @@ export class TelegramShieldBot {
         const event = await this.record(reportDecision.decision === 'weak' ? 'report_review_needed' : 'report_rejected', { ...message, from: target }, reportPayload, { writeDkg: false });
         if (reportDecision.decision === 'weak') await this.recordConversationArtifact({ ...message, from: target }, { risk: reportPayload, text: targetText || evidenceText(message), artifactKind: 'weak_report_observation', conversationRole: 'reporter', sourceEventIds: [event.id] });
         await this.maybeRecordCampaign({ ...message, from: target, text: targetText }, reportPayload);
-        await this.sendCommandReply(chatId, formatReportReply(event, reportDecision), { reply_to_message_id: message.message_id });
+        await this.sendCleanCommandReply(message, formatReportReply(event, reportDecision));
         return;
       }
       const event = await this.record('report_review_needed', { ...message, from: target }, reportPayload, { writeDkg: false });
       await this.maybeRecordCampaign({ ...message, from: target, text: targetText }, reportPayload);
       await this.recordConversationArtifact({ ...message, from: target }, { risk: reportPayload, text: targetText || evidenceText(message), artifactKind: 'report_review_observation', conversationRole: 'reporter', sourceEventIds: [event.id] });
-      await this.sendCommandReply(chatId, formatReportReply(event, reportDecision), { reply_to_message_id: message.message_id });
+      await this.sendCleanCommandReply(message, formatReportReply(event, reportDecision));
       return;
     }
     if (isCommand(text, 'mute')) {
@@ -3244,7 +3260,7 @@ export class TelegramShieldBot {
           requester: actorFromMessage(message),
           evidence: ['manual /ban requires trusted moderator privileges']
         }, { writeDkg: false });
-        await this.sendEphemeral(chatId, `⚠️ /ban is restricted to configured admins or Telegram chat admins. Request logged locally as ${event.id}.`, { reply_to_message_id: message.message_id });
+        await this.sendCleanCommandReply(message, `⚠️ /ban is restricted to configured admins or Telegram chat admins. Request logged locally as ${event.id}.`);
         return;
       }
       if (!replyUser?.id) {
@@ -3253,7 +3269,7 @@ export class TelegramShieldBot {
           ...risk,
           evidence: [...risk.evidence, 'manual /ban requested without a replied Telegram user ID']
         });
-        await this.sendEphemeral(chatId, `⚠️ I can scan or report ${target.label || target.username || 'that target'}, but Telegram needs you to reply to the exact user's message before I can ban them. I saved the evidence for admin review.`, { reply_to_message_id: message.message_id });
+        await this.sendCleanCommandReply(message, `⚠️ I can scan or report ${target.label || target.username || 'that target'}, but Telegram needs you to reply to the exact user's message before I can ban them. I saved the evidence for admin review.`);
         return;
       }
       const reason = this.commandReason(message, 'ban', 'admin requested ban');
@@ -3274,7 +3290,7 @@ export class TelegramShieldBot {
       const repliedMessageDeleted = Boolean(repliedMessageId && deletedMessages.deleted > 0);
       const repliedMessageDeleteError = deletedMessages.failed ? `${deletedMessages.failed} message delete attempt${deletedMessages.failed === 1 ? '' : 's'} failed` : '';
       const deletionNote = replyUser.sangmata ? '' : deletedMessages.deleted ? ` Removed ${deletedMessages.deleted} message${deletedMessages.deleted === 1 ? '' : 's'}.` : '';
-      await this.sendCommandReply(chatId, `${formatBanReply(replyUser, '')}${deletionNote}`, { reply_to_message_id: message.message_id });
+      await this.sendCleanCommandReply(message, `${formatBanReply(replyUser, '')}${deletionNote}`);
       this.recordBanEvidenceInBackground(message, replyUser, risk, reason, {
         repliedMessageId: repliedMessageId || '',
         repliedMessageDeleted,
