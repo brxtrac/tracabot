@@ -3269,13 +3269,14 @@ export class TelegramShieldBot {
         return;
       }
       await this.ban(chatId, replyUser.id);
-      const deletedMessages = await this.deleteKnownUserMessages(chatId, replyUser.id, [message.reply_to_message?.message_id]);
-      const repliedMessageDeleted = Boolean(message.reply_to_message?.message_id && deletedMessages.deleted > 0);
+      const repliedMessageId = String(message.reply_to_message?.from?.id || '') === String(replyUser.id || '') ? message.reply_to_message?.message_id : '';
+      const deletedMessages = await this.deleteKnownUserMessages(chatId, replyUser.id, [repliedMessageId]);
+      const repliedMessageDeleted = Boolean(repliedMessageId && deletedMessages.deleted > 0);
       const repliedMessageDeleteError = deletedMessages.failed ? `${deletedMessages.failed} message delete attempt${deletedMessages.failed === 1 ? '' : 's'} failed` : '';
       const deletionNote = replyUser.sangmata ? '' : deletedMessages.deleted ? ` Removed ${deletedMessages.deleted} message${deletedMessages.deleted === 1 ? '' : 's'}.` : '';
       await this.sendCommandReply(chatId, `${formatBanReply(replyUser, '')}${deletionNote}`, { reply_to_message_id: message.message_id });
       this.recordBanEvidenceInBackground(message, replyUser, risk, reason, {
-        repliedMessageId: message.reply_to_message?.message_id || '',
+        repliedMessageId: repliedMessageId || '',
         repliedMessageDeleted,
         repliedMessageDeleteError,
         deletedMessageCount: deletedMessages.deleted,
