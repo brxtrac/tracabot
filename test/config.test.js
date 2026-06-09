@@ -13,6 +13,15 @@ test('loadConfig accepts wallet-scoped context graph names', () => {
   assert.equal(config.contextGraph, '0x6c6ad1453153ea0dc5e0c86524e1756aa279C1Ad/tracabot');
 });
 
+test('loadConfig defaults to public tracabot graph and disables VM publish', () => {
+  const config = loadConfig({});
+  assert.equal(config.contextGraph, 'tracabot');
+  assert.equal(config.dkgReads, true);
+  assert.equal(config.dkgWrites, true);
+  assert.equal(config.dkgPublishVerified, false);
+  assert.equal(loadConfig({ TRACABOT_DKG_PUBLISH_VERIFIED: 'true' }).dkgPublishVerified, true);
+});
+
 test('loadConfig parses on-chain publish context graph id', () => {
   const config = loadConfig({ TRACABOT_PUBLISH_CONTEXT_GRAPH_ID: '13' });
   assert.equal(config.publishContextGraphId, '13');

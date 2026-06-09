@@ -33,3 +33,15 @@ test('off provider does not call fetch', async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test('LLM provider errors are returned without throwing', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: false, status: 401, statusText: 'Unauthorized', async json() { return {}; } });
+  try {
+    const result = await new LlmClient({ llmProvider: '9router', llmApiKey: 'bad', telegramTimeoutMs: 5000 }).complete({ system: 'sys', user: 'user' });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /401/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

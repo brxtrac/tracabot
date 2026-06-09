@@ -163,6 +163,23 @@ test('new high-risk join is sent to admin review when bot has admin rights', asy
   assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user.id === 42));
 });
 
+test('LLM unknown actions are constrained to safe general replies', async () => {
+  const llm = {
+    async complete() {
+      return { ok: true, text: '{"on_topic":true,"action":"ban","parameters":{"target":{"id":"42"}},"needs_clarification":null,"reasoning":"unsafe"}' };
+    }
+  };
+  const { bot, calls } = makeBot({ canBan: true, llm, conversational: true });
+  await bot.handleNaturalLanguageRequest({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 2, username: 'member', is_bot: false },
+    message_id: 500,
+    text: '@tracethembot ban 42'
+  });
+  assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
+  assert.ok(calls.some((call) => call.method === 'sendMessage'));
+});
+
 test('local-only high-risk first post is deleted and published but not banned', async () => {
   const { bot, calls } = makeBot({
     canBan: true,

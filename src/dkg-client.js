@@ -100,6 +100,7 @@ function isProductionBindingForContext(binding = {}, contextGraph = '') {
 }
 
 function shouldAutoPublishEvent(event = {}) {
+  if (event.config?.dkgPublishVerified === false) return false;
   const confidence = Number(event.payload?.confidence || 0);
   const localConfidence = Number(event.payload?.local_confidence || 0);
   const verifiedByAdmin = Boolean(event.payload?.admin_verified || event.payload?.community_verified_flag);
@@ -223,6 +224,12 @@ function eventTriples(event) {
     { subject, predicate: `${NS}commitAuthority`, object: literal(event.payload?.commit_authority || '') },
     { subject, predicate: `${NS}implicitDetection`, object: literal(event.payload?.implicit_detection ? 'true' : '') },
     { subject, predicate: `${NS}detectionMethod`, object: literal(event.payload?.detection_method || '') },
+    { subject, predicate: `${NS}llmIntent`, object: literal(event.payload?.llm_intent || '') },
+    { subject, predicate: `${NS}llmConfidence`, object: literal(event.payload?.llm_confidence ?? '') },
+    { subject, predicate: `${NS}naturalLanguageSource`, object: literal(String(event.payload?.natural_language_source || '').slice(0, MAX_EVIDENCE_LENGTH)) },
+    { subject, predicate: `${NS}replyToEventId`, object: literal(event.payload?.reply_to_event_id || event.payload?.reply_to_flag_event_id || event.payload?.original_flag_event || '') },
+    { subject, predicate: `${NS}summaryReason`, object: literal(String(event.payload?.summary_reason || '').slice(0, MAX_EVIDENCE_LENGTH)) },
+    { subject, predicate: `${NS}shortContext`, object: literal(String(event.payload?.short_context || '').slice(0, MAX_EVIDENCE_LENGTH)) },
     { subject, predicate: `${NS}targetEventId`, object: literal(event.payload?.target_event_id || '') },
     { subject, predicate: `${NS}restrictedUntil`, object: literal(event.payload?.restricted_until || '') },
     { subject, predicate: `${NS}actionDurationSeconds`, object: literal(event.payload?.action_duration_seconds || '') },
@@ -393,6 +400,10 @@ export class DkgClient {
   }
 
   async ensureContextGraph() {
+    if (this.config.dkgWrites === false) {
+      this.contextReady = true;
+      return;
+    }
     if (this.contextReady) return;
     try {
       const client = await this.client();
@@ -413,6 +424,15 @@ export class DkgClient {
   }
 
   async writeEvent(event) {
+    if (this.config.dkgWrites === false) {
+      return {
+        mode: 'dkg-disabled',
+        output: 'DKG writes disabled by TRACABOT_DKG_WRITES=false',
+        subject: `${NS}event/${event.id}`,
+        eventId: event.id,
+        triples: eventTriples(event)
+      };
+    }
     await this.ensureContextGraph();
     const triples = eventTriples(event);
     const client = await this.client();
@@ -430,7 +450,7 @@ export class DkgClient {
       eventId: event.id,
       triples
     };
-    if (!shouldAutoPublishEvent(event)) return result;
+    if (this.config.dkgPublishVerified === false || !shouldAutoPublishEvent({ ...event, config: this.config })) return result;
     try {
       result.publish = await this.publishEvent(subject);
     } catch (error) {
@@ -497,7 +517,7 @@ export class DkgClient {
     if (this.config.publishContextGraphId) {
       opts.publishContextGraphId = this.config.publishContextGraphId;
     }
-    const publish = this.config.publishContextGraphId && typeof client.post === 'function' && typeof client.getAuthToken === 'function'
+    const publish = this.config.publishContextGraphId && typeof client.post === 'function'
       ? await client.post('/api/shared-memory/publish', {
         contextGraphId: this.config.contextGraph,
         selection: opts.rootEntities,
@@ -509,6 +529,7 @@ export class DkgClient {
   }
 
   async queryBindings(sparql) {
+    if (this.config.dkgReads === false) return [];
     if (Date.now() < this.queryDisabledUntil) return [];
     try {
       const client = await this.client();
@@ -525,6 +546,7 @@ export class DkgClient {
   }
 
   async validateUal(ual = '') {
+    if (this.config.dkgReads === false) return { ok: false, reason: 'dkg_reads_disabled' };
     const value = String(ual || '').trim();
     if (!UAL_RE.test(value)) return { ok: false, reason: 'invalid_ual_format' };
     const client = await this.client();

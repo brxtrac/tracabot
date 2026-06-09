@@ -4,7 +4,7 @@ TRACaBot is an OpenClaw + Telegram + OriginTrail DKG v10 intelligent anti-scam b
 
 > **AI agents / self-hosters**: See [AGENT_INSTALL.md](./AGENT_INSTALL.md) for the best experience.
 
-The default Context Graph is `tracabot`. Every community running TRACaBot against that Context Graph contributes to the same DKG v10 Shared Memory layer. TRACaBot writes events with provenance, local/DKG confidence, stable Telegram IDs, usernames/display-name aliases, reporter metadata, scam type, wallet/pattern indicators, and moderation outcomes. High-confidence fraud findings, accepted high-confidence reports, and executed bans are automatically published from Shared Memory into the Context Graph so other communities can query them immediately.
+The default Context Graph is `tracabot`. Every community running TRACaBot against that Context Graph contributes to the same DKG v10 Shared Working Memory layer. TRACaBot writes events with provenance, local/DKG confidence, stable Telegram IDs, usernames/display-name aliases, reporter metadata, scam type, wallet/pattern indicators, and moderation outcomes. Verified Memory publishing is optional and operator-enabled because it spends TRAC/gas; fresh installs keep fraud memory in WM/SWM until the operator funds and registers a publish path.
 
 ## Quick Start For Testers
 
@@ -85,7 +85,7 @@ TRACaBot uses the official DKG/OpenClaw adapter setup as its DKG boundary. `DkgD
 - `DkgDaemonClient.createContextGraph` ensures the configured Context Graph exists.
 - `DkgDaemonClient.createAssertion`, `writeAssertion`, and `promoteAssertion` stage evidence in DKG Working Memory and promote selected roots to Shared Working Memory when available.
 - `DkgDaemonClient.share` remains the compatibility fallback for DKG v10 Shared Memory writes when an older adapter lacks assertion lifecycle methods.
-- `DkgDaemonClient.publishSharedMemory` automatically publishes only eligible high-confidence or admin-reviewed fraud memory into Verified Memory.
+- `DkgDaemonClient.publishSharedMemory` can publish eligible high-confidence or admin-reviewed fraud memory into Verified Memory when `TRACABOT_DKG_PUBLISH_VERIFIED=true` and the graph/wallet are funded.
 - `DkgDaemonClient.query` reads shared DKG evidence before scoring a target.
 
 TRACaBot maps Telegram moderation onto the DKG v10 memory model as a trust gradient:
@@ -94,7 +94,7 @@ TRACaBot maps Telegram moderation onto the DKG v10 memory model as a trust gradi
 - Shared Working Memory: moderate to high-risk evidence that should help related communities, including accepted reports, impersonation patterns, suspicious domains, reused wallets, appeals, admin reviews, and campaign signals.
 - Verified Memory readiness: high-confidence or admin-reviewed evidence, such as confirmed impersonation attempts, bans, accepted reports, and false-positive corrections, is shaped so it can later be published or consumed by context oracles without rewriting the data model.
 
-This cross-community loop is the core product behavior: observe locally, write structured evidence to DKG Shared Memory, auto-publish high-confidence events, then let every other TRACaBot instance query the same graph before the fraudster can repeat the attack in a different channel.
+This cross-community loop is the core product behavior: observe locally, write structured evidence to DKG Shared Working Memory, optionally publish high-confidence/admin-reviewed events to Verified Memory, then let every other TRACaBot instance query the same graph before the fraudster can repeat the attack in a different channel.
 
 TRACaBot's event ontology and lifecycle are documented in `docs/TRACABOT_ONTOLOGY.md`. The lifecycle is `observed -> shared_memory -> admin_reviewed -> verified_memory -> campaign_summary`; runtime events include community scope (`communityId`, optional `communityName`, `communityType`) and `policyId` so multiple communities can share one Context Graph without losing policy provenance.
 
@@ -158,7 +158,7 @@ TRACABOT_LLM_PROVIDER=off
 
 OpenClaw is still useful when 9router is the LLM backend: TRACaBot keeps using the OpenClaw DKG adapter for Context Graph/Working Memory/Shared Memory/Verified Memory operations, and the OpenClaw skill bridge (`tracabot-skill`) remains the agent-facing API for scan, monitor, curate, digest, review, appeal, and learning-loop workflows.
 
-TRACaBot treats DKG Shared Memory as collaborative evidence memory and Context Graph publication as verified/high-confidence memory. Once an event meets the publish policy through admin verification or very high confidence, the bot asks the OpenClaw DKG adapter to publish that event root. If the publish step fails, the Shared Memory write is kept and the error is recorded for audit.
+TRACaBot treats DKG Shared Working Memory as collaborative evidence memory and Verified Memory as an operator-funded permanence layer. Once an event meets the publish policy through admin verification or very high confidence, the bot may ask the OpenClaw DKG adapter to publish that event root if `TRACABOT_DKG_PUBLISH_VERIFIED=true`. If the publish step fails, the SWM write is kept and the error is recorded for audit.
 
 Transient DKG Shared Memory write failures such as temporary network errors, timeouts, 429s, and 5xx responses are retried before the bot gives up. If DKG remains unavailable, Telegram moderation continues and the local event is retained with `dkg_error` so admins can audit the downtime without losing the moderation trail.
 
@@ -237,6 +237,8 @@ npm install
 cp .env.example .env
 ```
 
+After npm publication, package installs also work with `npm install -g tracabot`; copy `.env.example` from `$(npm root -g)/tracabot/.env.example` into your runtime directory and run `tracabot`.
+
 4. Edit `.env`:
 
 ```bash
@@ -244,6 +246,9 @@ TELEGRAM_BOT_TOKEN=your-bot-token
 TRACABOT_ADMINS=123456789,@your_admin_username
 TRACABOT_CONTEXT_GRAPH=tracabot
 TRACABOT_DKG_MODE=openclaw-adapter
+TRACABOT_DKG_READS=true
+TRACABOT_DKG_WRITES=true
+TRACABOT_DKG_PUBLISH_VERIFIED=false
 TRACABOT_CHANNEL_MEMORY=true
 TRACABOT_CHANNEL_MEMORY_MIN_CONFIDENCE=80
 TRACABOT_CHANNEL_MEMORY_MAX_TEXT_CHARS=1000
@@ -288,25 +293,10 @@ TRACABOT_JOIN_CHALLENGE_DKG_VALIDATE=true
 npm start
 ```
 
-6. Optional systemd service: create a unit with `WorkingDirectory=/root/tracabot`, `EnvironmentFile=/root/tracabot/.env`, and `ExecStart=/usr/bin/node /root/tracabot/bin/tracabot.js`, then run `sudo systemctl daemon-reload` and `sudo systemctl enable --now tracabot.service`.
+6. Optional systemd service: copy `docs/tracabot.service.example` to `/etc/systemd/system/tracabot.service`, update paths/user for your install, then run `sudo systemctl daemon-reload` and `sudo systemctl enable --now tracabot.service`.
 
 ```ini
-[Unit]
-Description=TRACaBot Telegram anti-scam agent
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/root/tracabot
-EnvironmentFile=/root/tracabot/.env
-ExecStart=/usr/bin/node /root/tracabot/bin/tracabot.js
-Restart=always
-RestartSec=5
-User=root
-
-[Install]
-WantedBy=multi-user.target
+See `docs/tracabot.service.example`.
 ```
 
 ```bash
@@ -344,6 +334,10 @@ npm run test:commands
 - Bot cannot delete, restrict, ban, or run join challenge enforcement: confirm Telegram admin permissions for deleting messages, restricting users, and banning users.
 - `/ban` says admin required: add your numeric Telegram ID or username to `TRACABOT_ADMINS`, or run the command from a Telegram chat-admin account.
 - DKG evidence is missing: confirm `dkg status`, `DKG_NODE_URL`, `TRACABOT_DKG_MODE=openclaw-adapter`, and any `DKG_AUTH_TOKEN` required by your adapter.
+- Systemd cannot read DKG auth: set `DKG_AUTH_TOKEN` explicitly in `.env` when running TRACaBot as a different Unix user than the DKG daemon.
+- DKG commands hang while `/api/status` works: the local DKG RDF store may be stuck. Stop DKG, move `~/.dkg/store.nq` aside as a backup, restart DKG, then re-subscribe/recreate needed context graphs. Do not delete the backup until you confirm recovery.
+- Verified Memory publish is skipped: this is default. Run `dkg wallet`, fund the operational wallet with network gas/TRAC, register/select the publish graph, then set `TRACABOT_DKG_PUBLISH_VERIFIED=true` and `TRACABOT_PUBLISH_CONTEXT_GRAPH_ID` if your network requires a numeric publish id.
+- Telegram says `getUpdates` conflict: another bot instance is running with the same `TELEGRAM_BOT_TOKEN`. Stop the duplicate before restarting TRACaBot.
 - Skill command returns JSON error: run from the project root, pass valid JSON, and check `OPENCLAW_DKG_ADAPTER_PATH` only if the adapter is installed outside standard OpenClaw paths.
 - Conversational replies are template-only: confirm `TRACABOT_CONVERSATIONAL=true`, `TRACABOT_LLM_PROVIDER` is not `off`, and either 9router/direct `TRACABOT_LLM_*` values or OpenClaw discovery are configured. Run `/status` as an admin to see redacted backend status without exposing credentials.
 - Demo refuses to write: set `TRACABOT_TEST_MODE=true` for `npm run demo`; this prevents accidental production test writes.
@@ -358,15 +352,4 @@ dkg openclaw setup --workspace /root/.openclaw/workspace --name tracabot --port 
 
 The OpenClaw-facing skill manifest lives at `skills/tracabot/skill.json`. The CLI entrypoint is `node ./bin/tracabot-skill.js <tool> <json-input>` and returns JSON suitable for OpenClaw agent tooling.
 
-Example systemd unit:
-
-```ini
-[Service]
-Type=simple
-WorkingDirectory=/root/tracabot
-EnvironmentFile=/root/tracabot/.env
-ExecStart=/usr/bin/node /root/tracabot/bin/tracabot.js
-Restart=always
-RestartSec=5
-User=root
-```
+Example systemd unit: `docs/tracabot.service.example`.

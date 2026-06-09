@@ -56,7 +56,7 @@ dkg openclaw setup \
 Verify it worked:
 
 ```bash
-curl http://127.0.0.1:9200/status || echo "DKG node not responding yet"
+curl http://127.0.0.1:9200/api/status || echo "DKG node not responding yet"
 ```
 
 If the node is not running, ask the human to check logs in the workspace (usually under `~/.openclaw` or the workspace directory).
@@ -110,7 +110,7 @@ cd tracabot
 npm install
 ```
 
-(Alternative for agents that prefer npm consumption after packaging improvements: `npm install tracabot` and then run from the installed location. The git clone path is currently the most reliable.)
+Alternative after npm publication: `npm install -g tracabot`, copy `$(npm root -g)/tracabot/.env.example` into a runtime directory, and run `tracabot` from that directory. The git clone path remains easiest when the agent must edit or inspect source files.
 
 ---
 
@@ -138,7 +138,16 @@ TRACABOT_DKG_MODE=openclaw-adapter
 
 ### Context Graph Decision (Very Important)
 
-**Recommendation for first-time users / agents:**
+**Recommendation for production shared defense:**
+
+- Use `TRACABOT_CONTEXT_GRAPH=tracabot` to contribute to and query the shared TRACaBot intelligence graph.
+- Use a private/test graph only while validating setup or developing custom policy.
+
+```env
+TRACABOT_CONTEXT_GRAPH=tracabot
+```
+
+**Private test graph option:**
 
 - Start with a **personal or test graph** so you don't pollute the public `tracabot` graph while learning.
 - Example: `mycommunity-tracabot` or `username-test-graph`
@@ -147,7 +156,24 @@ TRACABOT_DKG_MODE=openclaw-adapter
 TRACABOT_CONTEXT_GRAPH=mycommunity-tracabot
 ```
 
-Later, when the user is confident, they can switch to the public `tracabot` graph (or a wallet-scoped one like `0xYourAddress/tracabot`) to participate in the shared intelligence network.
+Later, switch back to the public `tracabot` graph (or a wallet-scoped one like `0xYourAddress/tracabot`) to participate in shared intelligence.
+
+### Verified Memory Publishing
+
+Fresh installs keep Verified Memory publishing off because it spends TRAC/gas and requires a registered/funded graph:
+
+```env
+TRACABOT_DKG_PUBLISH_VERIFIED=false
+```
+
+When DKG v10 Verified Memory publishing is live for your network, fund the DKG operational wallet shown by `dkg wallet`, register or select the publish context graph, then enable:
+
+```env
+TRACABOT_DKG_PUBLISH_VERIFIED=true
+TRACABOT_PUBLISH_CONTEXT_GRAPH_ID=your_decimal_context_graph_id_if_needed
+```
+
+For agent-assisted setup, have the agent run `dkg wallet` and present the operational wallet address plus network name to the operator so funding can be completed without touching private keys.
 
 ### LLM Configuration (Multiple Good Options)
 
@@ -238,7 +264,7 @@ Or use the bin name after npm install: `tracabot-openclaw-learning-loop`.
 
 ### 6.2 Systemd Service (production)
 
-Create `/etc/systemd/system/tracabot.service` (see the example in the main README).
+Create `/etc/systemd/system/tracabot.service` from `docs/tracabot.service.example` and update paths/user if you did not install into `/opt/tracabot`.
 
 Then:
 

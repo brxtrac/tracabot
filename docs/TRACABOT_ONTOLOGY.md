@@ -43,6 +43,20 @@ Events move through this trust path:
 - `tracabot:adminVerified`
 - `tracabot:hasEvidence`
 
+## LLM and Agent Provenance
+
+TRACaBot can use an LLM for bounded intent routing and short safety replies, but every state-changing path remains enforced by deterministic code and Telegram/DKG permissions. When an event is created from natural-language handling or alert-reply classification, the graph can carry these provenance fields:
+
+- `tracabot:implicitDetection` - true when an action was inferred from context rather than a slash command.
+- `tracabot:detectionMethod` - `explicit_command`, `llm_alert_reply_classifier`, `llm_context_reply`, or another bounded classifier label.
+- `tracabot:llmIntent` - classifier intent/action label.
+- `tracabot:llmConfidence` - bounded confidence score emitted by the classifier.
+- `tracabot:naturalLanguageSource` - bounded source text when useful for audit, never secrets.
+- `tracabot:replyToEventId` - reviewed/appealed event id for implicit replies.
+- `tracabot:summaryReason` and `tracabot:shortContext` - concise admin-readable context for banlists, reviews, and future explanations.
+
+LLM-only output must never be treated as Verified Memory authority. Verified Memory should require explicit admin verification, high-confidence local evidence, or accepted high-confidence reports.
+
 ## Community Scope
 
 Community-specific policy must stay queryable without leaking unnecessary private data.

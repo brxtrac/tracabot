@@ -1,0 +1,21 @@
+[Unit]
+Description=TRACaBot Telegram anti-scam agent
+After=network-online.target dkg.service
+Wants=network-online.target dkg.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tracabot
+EnvironmentFile=/opt/tracabot/.env
+ExecStart=/usr/bin/node /opt/tracabot/bin/tracabot.js
+Restart=always
+RestartSec=5
+User=tracabot
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/tracabot/data
+
+[Install]
+WantedBy=multi-user.target

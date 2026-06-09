@@ -99,6 +99,17 @@ test('validates DKG UALs through adapter resolve or query', async () => {
   assert.equal((await querying.validateUal('did:dkg:another-valid-asset')).ok, true);
 });
 
+test('DKG read and write kill switches fail closed', async () => {
+  const disabledReads = new DkgClient({ contextGraph: 'tracabot', dkgReads: false }, { adapterClient: { async query() { throw new Error('query should not run'); } } });
+  assert.deepEqual(await disabledReads.queryBindings('SELECT * WHERE { ?s ?p ?o }'), []);
+  assert.deepEqual(await disabledReads.validateUal('did:dkg:valid-knowledge-asset'), { ok: false, reason: 'dkg_reads_disabled' });
+
+  const disabledWrites = new DkgClient({ contextGraph: 'tracabot', dkgWrites: false }, { adapterClient: makeAdapterClient() });
+  const result = await disabledWrites.writeEvent({ id: 'disabled', event_type: 'fraud_finding', timestamp: '2026-04-30T00:00:00.000Z', agentDid: 'did:dkg:agent:test', payload: { confidence: 90, local_confidence: 90 } });
+  assert.equal(result.mode, 'dkg-disabled');
+  assert.equal(result.eventId, 'disabled');
+});
+
 test('extracts wallet addresses and scam patterns for DKG lookups', () => {
   const text = 'URGENT official support says verify wallet 0x1111111111111111111111111111111111111111 to claim free USDT airdrop';
   assert.deepEqual(extractWallets(text), ['0x1111111111111111111111111111111111111111']);
@@ -322,6 +333,20 @@ test('auto-publishes high-confidence fraud findings to the context graph', async
   assert.ok(adapterClient.calls.some(([method, id, name]) => method === 'createContextGraph' && id === 'tracabot' && /TRACaBot/.test(name)));
   assert.ok(adapterClient.calls.some(([method, contextGraphId, opts]) => method === 'publishSharedMemory' && contextGraphId === 'tracabot' && opts.rootEntities.includes('https://tracabot.org/ontology#event/evt-auto')));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#actorAlias') && triple.object === '"badactor"'));
+});
+
+test('verified-memory publish stays off unless explicitly enabled', async () => {
+  const adapterClient = makeAdapterClient();
+  const dkg = new DkgClient({ contextGraph: 'tracabot', dkgPublishVerified: false }, { adapterClient });
+  const result = await dkg.writeEvent({
+    id: 'evt-no-vm-by-default',
+    event_type: 'fraud_finding',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    payload: { confidence: 99, local_confidence: 99, evidence: ['strong scam evidence'] }
+  });
+  assert.equal(result.publish, undefined);
+  assert.equal(adapterClient.calls.some(([method]) => method === 'publishSharedMemory'), false);
 });
 
 test('writes scam domains as DKG indicators', async () => {

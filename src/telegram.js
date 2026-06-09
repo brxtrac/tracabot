@@ -16,6 +16,13 @@ export const TELEGRAM_COMMANDS = [
 const MAX_TEXT_CHARS = 4096;
 const MAX_CONTEXT_CHARS = 500;
 const CONVERSATION_HISTORY_LIMIT = 8;
+const AGENT_ACTIONS = new Set([
+  'appeal', 'banlist', 'clarify', 'dashboard', 'digest', 'explain_event', 'false_positive_review',
+  'general_on_topic', 'generate_safe_tip', 'get_digest', 'get_stats', 'greeting', 'help', 'ignore',
+  'list_pending_reviews', 'memory_query', 'modlog', 'mute', 'recent_actions', 'reject', 'report',
+  'review', 'scan_target', 'settings', 'show_campaigns', 'show_reviews', 'show_watchlist', 'stats',
+  'overturn'
+]);
 const OBSERVED_CONTEXT_TTL_MS = 24 * 60 * 60 * 1000;
 const RECENT_JOIN_RENAME_WINDOW_MS = 30 * 60 * 1000;
 const ADMIN_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -2406,8 +2413,9 @@ export class TelegramShieldBot {
       raw = raw.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').replace(/^`+|`+$/g, '').trim();
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') {
+        const action = AGENT_ACTIONS.has(String(parsed.action || '')) ? String(parsed.action) : 'general_on_topic';
         return {
-          action: String(parsed.action || 'general_on_topic'),
+          action,
           parameters: parsed.parameters && typeof parsed.parameters === 'object' ? parsed.parameters : {},
           needs_clarification: parsed.needs_clarification || null,
           reasoning: parsed.reasoning || ''

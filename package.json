@@ -1,7 +1,7 @@
 {
   "name": "tracabot",
-  "version": "0.2.0",
-  "description": "OpenClaw-compatible Telegram anti-scam agent that writes and queries DKG v10 Shared Memory.",
+  "version": "1.0.0",
+  "description": "Telegram anti-scam agent that uses OriginTrail DKG v10 Working Memory, Shared Working Memory, and optional Verified Memory.",
   "homepage": "https://github.com/brxtrac/tracabot#readme",
   "repository": {
     "type": "git",
@@ -22,6 +22,7 @@
     "skill": "node ./bin/tracabot-skill.js",
     "test:commands": "node ./scripts/test-command-loop.js",
     "test": "node --test test/*.test.js",
+    "check:release": "npm test && npm run test:commands && npm run audit:production && npm pack --dry-run",
     "audit:production": "npm audit --omit=dev"
   },
   "keywords": [
@@ -40,12 +41,17 @@
     "node": ">=22.20.0"
   },
   "files": [
+    ".env.example",
     "bin",
+    "docs/TRACABOT_CHALLENGE_ASSET.md",
+    "docs/TRACABOT_CHALLENGE_ASSET.ttl",
     "docs/DEMO.md",
     "docs/DESIGN_BRIEF.md",
     "docs/PR_BODY.md",
     "docs/REGISTRY_ENTRY.md",
     "docs/TESTING.md",
+    "docs/TRACABOT_ONTOLOGY.md",
+    "docs/tracabot.service.example",
     "docs/demo",
     "scripts",
     "src",
