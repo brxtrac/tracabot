@@ -208,23 +208,14 @@ Copy the token into TELEGRAM_BOT_TOKEN
 Paste this command list into BotFather:
 
 ```text
-scan - Check scam risk for a user, wallet, message, or SangMata alert
-report - Report suspicious evidence to shared DKG memory
-dmreport - Report off-platform DM impersonation scams
-ban - Ban a replied target when admin safeguards pass
-stats - Show recent fraud intelligence and source activity
-why - Explain evidence behind a tracabot event
-watch - Locally watch a user, ID, username, or SangMata target
-unwatch - Remove a local watch target
-watchlist - Show active watches, mutes, and review items
-challenge - Turn new-user join challenge on or off
-conversation - Toggle natural language agent mode per group (default on)
-appeal - Submit a correction request for an event
-review - Admin review decision for an event
-digest - Summarize recent actions and campaign signals
-status - Admin status for DKG, permissions, and conversation mode
-help - Show tracabot commands and safeguards
+start - Open Tracabot protection menu
+scan - Check a user, wallet, or replied message for scam risk
+report - Report suspicious users, messages, links, wallets, or forwarded DMs
+ban - Ban a replied user and publish ban evidence (admin)
+mute - Admin: mute a replied or mentioned user for a duration
 ```
+
+Most other functions (stats, reviews, campaigns, enforcement history, explanations, settings/status, etc.) are available through the `/start` menu buttons or by speaking naturally to the bot when conversational mode is enabled.
 
 Invite the bot to your group and grant admin rights for deleting messages, restricting users, and banning users.
 
@@ -339,7 +330,7 @@ npm run test:commands
 - Verified Memory publish is skipped: this is default. Run `dkg wallet`, fund the operational wallet with network gas/TRAC, register/select the publish graph, then set `TRACABOT_DKG_PUBLISH_VERIFIED=true` and `TRACABOT_PUBLISH_CONTEXT_GRAPH_ID` if your network requires a numeric publish id.
 - Telegram says `getUpdates` conflict: another bot instance is running with the same `TELEGRAM_BOT_TOKEN`. Stop the duplicate before restarting TRACaBot.
 - Skill command returns JSON error: run from the project root, pass valid JSON, and check `OPENCLAW_DKG_ADAPTER_PATH` only if the adapter is installed outside standard OpenClaw paths.
-- Conversational replies are template-only: confirm `TRACABOT_CONVERSATIONAL=true`, `TRACABOT_LLM_PROVIDER` is not `off`, and either 9router/direct `TRACABOT_LLM_*` values or OpenClaw discovery are configured. Run `/status` as an admin to see redacted backend status without exposing credentials.
+- Conversational replies are template-only: confirm `TRACABOT_CONVERSATIONAL=true`, `TRACABOT_LLM_PROVIDER` is not `off`, and either 9router/direct `TRACABOT_LLM_*` values or OpenClaw discovery are configured. Open `/start` > Settings > Status as an admin to see redacted backend status without exposing credentials.
 - Demo refuses to write: set `TRACABOT_TEST_MODE=true` for `npm run demo`; this prevents accidental production test writes.
 
 ## OpenClaw Setup
