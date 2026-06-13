@@ -2,7 +2,12 @@
 
 Use this walkthrough for the live project demonstration or a local smoke test. The goal is to show detection, Telegram action, DKG Shared Memory write/read, explainability, OpenClaw skill access, and the DKG-native join challenge.
 
-The project is already live as `@tracethembot`; this document is the repeatable demo script for reviewers and operators. If a recorded walkthrough is added later, place its link in `docs/demo/`.
+The project is already live as `@tracethembot`; this document is the repeatable demo script for reviewers and operators. A recorded walkthrough and cover image are included in `docs/demo/`.
+
+Recorded demo assets:
+
+- `docs/demo/tracabot-demo.mp4`
+- `docs/demo/tracabot-demo-cover.jpg`
 
 ## 1. Host Setup
 
