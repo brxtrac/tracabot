@@ -34,7 +34,7 @@ npm run test:commands
 npm audit --omit=dev
 ```
 
-Expected current result: all Node tests pass, command-loop smoke test passes, and production audit reports zero vulnerabilities. Current release check: `164` Node tests pass.
+Expected current result: all Node tests pass, command-loop smoke test passes, and production audit reports zero vulnerabilities. Current release check: `240` Node tests pass.
 
 ## 3. Telegram Walkthrough
 

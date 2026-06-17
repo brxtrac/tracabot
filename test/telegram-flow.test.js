@@ -46,8 +46,8 @@ function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = nu
     },
     async runtimeStatus() {
       return {
-        dkgReleaseVersion: '10.0.0-rc.9',
-        adapterVersion: '10.0.0-rc.9',
+        dkgReleaseVersion: '10.0.0-rc.17',
+        adapterVersion: '10.0.0-rc.17',
         capabilities: { workingMemoryAssertions: true, sharedWorkingMemory: true, verifiedMemoryPublish: true, query: true }
       };
     },

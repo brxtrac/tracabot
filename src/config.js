@@ -156,8 +156,8 @@ export function loadConfig(env = process.env) {
     adminIds,
     botOwnerIds,
     autoDelete: parseBoolean(env.TRACABOT_AUTO_DELETE, true),
-    autoRestrict: parseBoolean(env.TRACABOT_AUTO_RESTRICT, true),
-    autoBan: parseBoolean(env.TRACABOT_AUTO_BAN, true),
+    autoRestrict: parseBoolean(env.TRACABOT_AUTO_RESTRICT, false),
+    autoBan: parseBoolean(env.TRACABOT_AUTO_BAN, false),
     warnThreshold,
     restrictThreshold,
     banThreshold,
@@ -219,6 +219,7 @@ export function loadConfig(env = process.env) {
     wmArtifactMaxTextChars,
     dailySafeTipIntervalHours: Number(env.TRACABOT_DAILY_SAFE_TIP_INTERVAL_HOURS ?? 0),
     artefactReviewThreshold: Number(env.TRACABOT_ARTEFACT_REVIEW_THRESHOLD || 70),
-    proactiveAlertCrossGroup: parseBoolean(env.TRACABOT_PROACTIVE_ALERT_CROSS_GROUP, true)
+    proactiveAlertCrossGroup: parseBoolean(env.TRACABOT_PROACTIVE_ALERT_CROSS_GROUP, true),
+    skillAllowUnauthenticatedWrites: parseBoolean(env.TRACABOT_SKILL_ALLOW_UNAUTHENTICATED_WRITES, false)
   };
 }

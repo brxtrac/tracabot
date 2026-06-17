@@ -48,7 +48,7 @@ Live DKG v10 / OpenClaw adapter verification:
 
 ```text
 dkg status
-Version: 10.0.0-rc.9
+Version: 10.0.0-rc.17
 
 dkg status
 Node: tracabot
@@ -68,7 +68,7 @@ Tests and audit:
 
 ```text
 npm test
-165 tests passed
+240 tests passed
 
 npm audit --omit=dev
 found 0 vulnerabilities
@@ -80,11 +80,17 @@ Telegram runtime:
 Bot command loop verified with stubbed Telegram API and live DKG v10 read/write calls. The live deployment runs as @tracethembot with public replies redacted to avoid exposing internal DKG/OpenClaw/admin details.
 ```
 
+Demo assets:
+
+- Recorded walkthrough: https://github.com/brxtrac/tracabot/blob/main/docs/demo/tracabot-demo.mp4
+- Demo cover image: https://github.com/brxtrac/tracabot/blob/main/docs/demo/tracabot-demo-cover.jpg
+- Repeatable demo script: https://github.com/brxtrac/tracabot/blob/main/docs/DEMO.md
+
 ## Security Attestation
 
 I attest that this code is my own work or properly licensed, contains no intentional backdoors, uses no dynamic remote code loading, and has no preinstall or postinstall scripts. Network egress is declared as `api.telegram.org` plus the configured local DKG node. DKG write authority is limited to Context Graph creation, Shared Memory writes, Shared Memory queries, and targeted auto-publishing of qualifying high-confidence fraud events through the configured Curator-authorized runtime.
 
-The registry install points to the published provenance-backed `tracabot@0.1.0` package, while the source, design brief, and demo links are pinned to the final reviewed commit for this PR.
+The registry install points to the published provenance-backed `tracabot@1.0.0` package, while the source, design brief, and demo links are pinned to the final reviewed commit for this PR.
 
 ## Maintenance
 

@@ -31,6 +31,7 @@ Local JSONL files are operational working memory for weak reports, watchlist sta
 - Duplicate reports and reporter bursts are rate-limited to reduce abuse.
 - Telegram message and evidence fields are bounded before analysis, local logging, and DKG writes.
 - Conversational LLM replies are bounded, topic-gated to scam/fraud/wallet safety, and cannot execute Telegram moderation actions or DKG writes.
+- Skill-origin DKG writes require `TRACABOT_SKILL_WRITE_TOKEN` unless the operator explicitly sets `TRACABOT_SKILL_ALLOW_UNAUTHENTICATED_WRITES=true` for an already-isolated local tool boundary.
 
 ## Data Handling
 

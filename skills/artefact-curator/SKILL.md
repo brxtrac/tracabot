@@ -3,7 +3,7 @@ name: artefact-curator
 description: Decides whether chat events or conversation artefacts should stay in local Working Memory, be committed to DKG Shared Memory, or queued for admin /review. Uses full Tracabot Context Graph history (including prior admin decisions) for smarter decisions.
 user-invocable: true
 tags: [openclaw, dkg-v10, artefact, review-queue, curator]
-version: 0.1.0
+version: 1.0.0
 ---
 
 # Artefact Curator Skill for Tracabot

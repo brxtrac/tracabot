@@ -45,7 +45,8 @@ test('skill service watchlist and digest stay local', () => {
 
 test('skill service appeal and review write DKG evidence', async () => {
   const { service, dkgWrites } = makeService();
-  const appeal = await service.submitAppeal({ eventId: 'evt-1', reason: 'false positive', actorUsername: 'admin' });
+  await assert.rejects(() => service.submitAppeal({ eventId: 'evt-1', reason: 'false positive', actorUsername: 'admin' }), /authorized write token/);
+  const appeal = await service.submitAppeal({ eventId: 'evt-1', reason: 'false positive', actorUsername: 'admin', writeToken: 'test-write-token' });
   await assert.rejects(() => service.reviewEvent({ eventId: 'evt-1', decision: 'overturn', reason: 'appeal accepted', actorUsername: 'admin' }), /authorized write token/);
   const review = await service.reviewEvent({ eventId: 'evt-1', decision: 'overturn', reason: 'appeal accepted', actorUsername: 'admin', writeToken: 'test-write-token' });
   assert.equal(appeal.tool, 'submit_appeal');
@@ -57,7 +58,7 @@ test('skill service appeal and review write DKG evidence', async () => {
 
 test('skill service monitors unsafe chat events through DKG working memory', async () => {
   const { service, dkgWrites } = makeService();
-  const result = await service.monitorChatEvent({ telegramUserId: '8388593201', username: 'fake_support', text: 'official support says verify wallet now', adminVerified: false });
+  const result = await service.monitorChatEvent({ telegramUserId: '8388593201', username: 'fake_support', text: 'official support says verify wallet now', adminVerified: false, writeToken: 'test-write-token' });
   assert.equal(result.tool, 'monitor_chat_event');
   assert.equal(result.monitored, true);
   assert.equal(result.writesDkg, true);
@@ -65,12 +66,21 @@ test('skill service monitors unsafe chat events through DKG working memory', asy
   assert.equal(dkgWrites[0].payload.publication_status, 'shared_memory');
 });
 
+test('skill service blocks unsafe chat DKG writes without write token', async () => {
+  const { service, dkgWrites } = makeService();
+  const result = await service.monitorChatEvent({ telegramUserId: '8388593201', username: 'fake_support', text: 'official support says verify wallet now' });
+  assert.equal(result.monitored, true);
+  assert.equal(result.writesDkg, false);
+  assert.equal(result.writeBlocked, true);
+  assert.equal(dkgWrites.length, 0);
+});
+
 test('skill service ignores untrusted adminVerified flags without write token', async () => {
   const { service, dkgWrites } = makeService();
   const result = await service.monitorChatEvent({ telegramUserId: '8388593201', username: 'fake_support', text: 'official support says verify wallet now', adminVerified: true });
-  assert.equal(result.adminVerified, false);
-  assert.equal(dkgWrites[0].payload.admin_verified, false);
-  assert.equal(dkgWrites[0].payload.publication_status, 'shared_memory');
+  assert.equal(result.writesDkg, false);
+  assert.equal(result.writeBlocked, true);
+  assert.equal(dkgWrites.length, 0);
 });
 
 test('skill service sorts high-quality conversation artifacts into DKG memory', async () => {

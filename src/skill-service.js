@@ -56,6 +56,10 @@ function writeTokenValid(input = {}, config = {}, env = process.env) {
   return Boolean(expected && input.writeToken && String(input.writeToken) === String(expected));
 }
 
+function canWriteFromSkill(input = {}, config = {}) {
+  return Boolean(config.skillAllowUnauthenticatedWrites || writeTokenValid(input, config));
+}
+
 function targetFromInput(input = {}) {
   return {
     id: input.telegramUserId || input.userId || input.id || '',
@@ -181,6 +185,7 @@ export class TracabotSkillService {
   }
 
   async submitAppeal(input = {}) {
+    if (!canWriteFromSkill(input, this.config)) throw new Error('submit_appeal requires authorized write token');
     const event = {
       id: randomUUID(),
       event_type: 'appeal_submitted',
@@ -294,6 +299,7 @@ export class TracabotSkillService {
     const risk = combineRisk({ analysis: local, dkgIntel, threshold: this.config.actionThreshold });
     const unsafe = Boolean(risk.is_scam || risk.confidence >= 60 || ['phishing', 'impersonation', 'giveaway', 'investment_scam'].includes(risk.scam_type));
     if (!unsafe) return { tool: 'monitor_chat_event', monitored: false, risk, writesDkg: false };
+    if (!canWriteFromSkill(input, this.config)) return { tool: 'monitor_chat_event', monitored: true, risk, writesDkg: false, writeBlocked: true };
     const adminVerified = writeTokenValid(input, this.config) && Boolean(input.adminVerified || input.verifiedByAdmin);
     const highConfidence = Number(risk.confidence || 0) >= 95 && Number(risk.local_confidence || 0) >= 80;
     const event = {

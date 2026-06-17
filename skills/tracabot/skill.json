@@ -1,6 +1,6 @@
 {
   "name": "tracabot",
-  "version": "0.1.1",
+  "version": "1.0.0",
   "description": "OpenClaw skill tools for DKG-powered Telegram fraud intelligence, review, and operator triage.",
   "contextGraph": "tracabot",
   "entrypoint": "node ./bin/tracabot-skill.js",

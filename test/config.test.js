@@ -48,9 +48,16 @@ test('loadConfig parses bot owner ids for global trust roots', () => {
 });
 
 test('loadConfig parses boolean environment values strictly', () => {
+  assert.equal(loadConfig({}).autoRestrict, false);
+  assert.equal(loadConfig({}).autoBan, false);
   assert.equal(loadConfig({ TRACABOT_AUTO_BAN: '0' }).autoBan, false);
   assert.equal(loadConfig({ TRACABOT_AUTO_BAN: 'yes' }).autoBan, true);
   assert.throws(() => loadConfig({ TRACABOT_AUTO_BAN: 'maybe' }), /Invalid boolean/);
+});
+
+test('loadConfig requires explicit opt-in for unauthenticated skill writes', () => {
+  assert.equal(loadConfig({}).skillAllowUnauthenticatedWrites, false);
+  assert.equal(loadConfig({ TRACABOT_SKILL_ALLOW_UNAUTHENTICATED_WRITES: 'true' }).skillAllowUnauthenticatedWrites, true);
 });
 
 test('loadConfig parses graduated autonomous enforcement thresholds', () => {

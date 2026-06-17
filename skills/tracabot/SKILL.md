@@ -3,7 +3,7 @@ name: tracabot
 description: DKG-powered OpenClaw Telegram fraud intelligence skill with scan, unsafe chat monitoring, explain, digest, watchlist, appeal, and review tools.
 user-invocable: true
 tags: [openclaw, telegram, dkg-v10, fraud-detection, shared-memory]
-version: 0.1.1
+version: 1.0.0
 author: brxtrac
 ---
 

@@ -157,4 +157,4 @@ Enforcement commands to test only in sandbox:
 - OpenClaw skill manifest: `skills/tracabot/skill.json`.
 - Package provenance workflow: `.github/workflows/publish.yml`.
 
-Current npm note: `package.json` is `0.1.1`; npm registry publishing requires either `NPM_TOKEN` secret or npm trusted publishing configured for `brxtrac/tracabot` and `.github/workflows/publish.yml`.
+Current npm note: `package.json` is `1.0.0`; npm registry publishing requires either `NPM_TOKEN` secret or npm trusted publishing configured for `brxtrac/tracabot` and `.github/workflows/publish.yml`.
