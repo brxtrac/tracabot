@@ -12,23 +12,17 @@ TRACaBot also supports bounded conversational safety replies in Telegram. It kee
 
 The differentiator is the shared persistent memory loop: one community's accepted report, DM scam report, fraud finding, or ban becomes queryable DKG intelligence for every other community running tracabot against the same Context Graph. A bad actor who tests a scam in one channel or in private DMs can be flagged elsewhere by Telegram user ID, username/display-name alias, reported alias, wallet, domain, or scam pattern before repeating the attack.
 
-Telegram commands are registered on startup:
+Current Telegram commands registered on startup:
 
-- `/scan`: check a user, wallet, or replied message for scam risk.
-- `/report`: report a suspicious user, wallet, or message to DKG.
-- `/dmreport`: report off-platform DM impersonation scams to DKG Shared Memory when accepted.
-- `/ban`: ban a replied user and publish ban evidence.
-- `/stats`: show recent fraud checks and detections, including `/stats campaigns` for repeated scam waves.
-- `/why`: explain a tracabot event decision using local evidence, DKG source refs, Shared Memory write metadata, and publish status.
-- `/watch` and `/unwatch`: admin-only scrutiny controls that accept replies, SangMata rename alerts, numeric Telegram IDs, or usernames, then boost scoring without banning by themselves.
-- `/watchlist`: admin-only local queue of active watches, temporary mutes, and pending review items.
-- `/challenge on|off|status`: admin-only per-chat join challenge toggle.
-- `/appeal`: submit a correction or appeal to DKG Shared Memory.
-- `/review`: admin-only upheld/overturned review decision written to DKG. Admins can reply directly to a bot review alert, and review confirmations remain visible for auditability.
-- `/digest`: summarize recent actions, reports, watches, appeals, reviews, and campaign signals.
-- Join challenge: low-risk new members verify with a DKG Knowledge Asset UAL or configured Knowledge Asset Q&A; challenge state, per-chat overrides, and failed attempts remain local-only and do not pollute DKG.
+- `/start`: opens the inline TRACaBot protection menu for stats, reviews, explanations, enforcement history, and settings.
+- `/scan`: checks a user, Telegram ID, wallet, replied user, or replied SangMata rename alert against local heuristics and DKG Shared Memory.
+- `/report`: queues suspicious replied messages, usernames, wallets, links, forwarded DMs, screenshots, or natural-language evidence for admin review.
+- `/ban`: admin-only command that bans a replied user or supported SangMata rename target when the bot has Telegram ban rights, then logs evidence.
+- `/mute`: admin-only command that temporarily restricts a replied or mentioned user.
 
-OpenClaw skill tools are also available: `scan_target`, `monitor_chat_event`, `sort_conversation_artifact`, `explain_event`, `get_watchlist`, `get_digest`, `query_campaigns`, `submit_appeal`, and `review_event`.
+Stats, campaigns, sources, pending reviews, settings/status, recent enforcement actions, event explanations, and per-chat join challenge toggles are available through `/start` menu buttons rather than separate public slash commands. Admins can also reply naturally to review alerts with explicit verdicts such as "confirm scam" or "reject as not a scam"; non-admin corrections are logged as appeals. Low-risk new members can be gated by the optional DKG Knowledge Asset join challenge; challenge state, per-chat overrides, and one-off failed attempts remain local-only unless repeated abuse qualifies as aggregate shared-memory intelligence.
+
+OpenClaw skill tools are also available: `scan_target`, `monitor_chat_event`, `sort_conversation_artifact`, `explain_event`, `get_watchlist`, `get_digest`, `query_campaigns`, `submit_appeal`, `review_event`, `decide_artefact_action`, and `generate_safe_tip`.
 
 ## DKG v10 Fit
 
@@ -40,7 +34,7 @@ OpenClaw skill tools are also available: `scan_target`, `monitor_chat_event`, `s
 - Adapter status: the current DKG/OpenClaw adapter exposes `createAssertion`, `writeAssertion`, and `promoteAssertion` for Working Memory to Shared Working Memory flow; `share` remains supported as a compatibility fallback.
 - Section 5 scope: TRACaBot reads from and writes to DKG v10 Shared Memory through a supported public interface boundary and connects that memory to an OpenClaw-compatible agent workflow for LLM-Wiki/autoresearch-style collaborative knowledge.
 - Exceptions respected: not Verified-Memory-only, no endorsement/voting UI, no Conviction/staking UX, no DKG v9 dependency, no Curator bypass, no internal DKG v10 package imports, no DKG node source patching, and no daemon-side code loading.
-- Governance loop: `/why`, `/appeal`, and `/review` make decisions explainable and correctable while preserving an auditable DKG trail instead of silently rewriting moderation history.
+- Governance loop: Explain Event in the `/start` menu, natural-language admin review replies, non-admin appeal logging, and OpenClaw `explain_event` / `submit_appeal` / `review_event` tools make decisions explainable and correctable while preserving an auditable DKG trail instead of silently rewriting moderation history.
 
 ## Verification
 
@@ -57,12 +51,12 @@ Network: DKG V10 Testnet
 PeerId: 12D3KooWQm9sJCkUTU7kRXsNQttHaYTQV4ZjR8QaBNVUMqVMLC6R
 
 npm run test:commands
-Core command paths exercised: /stats, /scan, /report, /ban
+Core command paths exercised: /start menu, /scan, /report, /ban, /mute, review callbacks, stats/campaign/review panels, natural-language review replies
 Graph: did:dkg:context-graph:tracabot/_shared_memory
 RetrievedIntel: riskScore 100, reportsAcrossCommunities 4
 ```
 
-Review and governance paths are covered in the automated test suite, including `/appeal`, `/review`, reply-based review inference from bot alerts, false-positive suppression after overturns, `/watchlist` review queues, and visible persistent review confirmations.
+Review and governance paths are covered in the automated test suite, including non-admin appeal logging, admin review callbacks, reply-based review inference from bot alerts, false-positive suppression after overturns, `/start` review queues, and visible persistent review confirmations.
 
 Tests and audit:
 

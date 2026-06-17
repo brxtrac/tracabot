@@ -49,7 +49,7 @@ Draft artifacts start in local working memory, then the OpenClaw learning loop c
 
 ## Write Authority
 
-The runtime operator controls the Telegram bot token, DKG adapter endpoint, and any DKG auth token. Telegram enforcement requires bot admin permissions plus either configured TRACaBot admin identity or Telegram chat-admin identity for manual `/ban` and `/review`.
+The runtime operator controls the Telegram bot token, DKG adapter endpoint, and any DKG auth token. Telegram enforcement requires bot admin permissions plus either configured TRACaBot admin identity or Telegram chat-admin identity for manual `/ban`, `/mute`, and review actions through `/start` review panels or explicit admin replies.
 
 DKG `SHARE` and `PUBLISH` operations use the configured runtime's Curator-authorized node/API token. The integration does not bypass Context Graph authority or perform publisher-side Conviction/staking UX.
 
@@ -61,7 +61,7 @@ DKG `SHARE` and `PUBLISH` operations use the configured runtime's Curator-author
 - No internal DKG v10 package imports, node daemon patches, or daemon-side code loading.
 - No endorsement/voting UI; review/appeal flows are agent/admin command surfaces.
 - Secrets remain in `.env`, service environment files, or OpenClaw local configuration.
-- OpenClaw OAuth/API information is discovered read-only from local OpenClaw config when `TRACABOT_LLM_PROVIDER=auto`; it is not copied into TRACaBot `.env` or displayed by `/status`.
+- OpenClaw OAuth/API information is discovered read-only from local OpenClaw config when `TRACABOT_LLM_PROVIDER=auto`; it is not copied into TRACaBot `.env` or displayed by the `/start` Settings > Status panel.
 - Network egress and DKG operations are documented in `SECURITY.md`; external LLM egress is disabled by default and must be declared if an operator sets `TRACABOT_LLM_BASE_URL`.
 - Production audit command: `npm audit --omit=dev`.
 - Public Telegram replies redact internal DKG UALs, event IDs, graph names, OpenClaw endpoint/model details, and admin setup details. Detailed provenance remains available through controlled local/admin explainability paths.

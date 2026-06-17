@@ -129,23 +129,22 @@ Use a private sandbox group, never a production group first.
 npm start
 ```
 
-Safe commands to test first:
+Safe flows to test first:
 
 ```text
-/help
-/status
+/start
 /scan @someuser
-/watchlist
-/review
-/digest
+Open /start > Stats
+Open /start > Reviews
+Open /start > Settings > Status
 ```
 
-Enforcement commands to test only in sandbox:
+Enforcement and moderation flows to test only in sandbox:
 
 ```text
 /ban reason here
-/challenge on
-/challenge off
+/mute 5 minutes
+Open /start > Settings > Challenge on/off
 ```
 
 ## Bounty Review Checklist

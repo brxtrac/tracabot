@@ -144,10 +144,10 @@ This prevents a single weak report or recursive campaign summary from becoming g
 
 - Member scans a suspicious reply: `/scan`.
 - Member reports a phishing link: reply with `/report fake support wallet drain`.
-- Member reports an off-platform impersonator: `/dmreport name="Fake Support" role="admin" request="verify wallet" link=https://fake.example`.
-- Admin watches a suspicious account without banning: reply with `/watch possible fake support`.
-- Admin reviews a contested event: `/review <event-id> overturn user was discussing scam prevention`.
-- Admin checks repeated waves: `/stats campaigns` or `/digest`.
+- Member reports an off-platform impersonator with `/report` plus forwarded DM context or a natural-language report.
+- Admin opens `/start` Reviews to inspect pending items and temporary mutes without exposing a public watchlist command.
+- Admin reviews a contested event by pressing review buttons or replying naturally to a bot review alert.
+- Admin checks repeated waves through `/start` Stats, Campaigns/Sources, and digest-style panels.
 
 ## Implicit Action Detection & Rich Provenance (Phase 8 Enhancements)
 

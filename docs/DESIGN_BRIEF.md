@@ -26,18 +26,18 @@ TRACaBot turns those moderation artifacts into agent-readable knowledge. It obse
 
 TRACaBot currently uses three operational memory layers:
 
-- Local working memory: bounded JSONL event store and in-memory Telegram context used for drafts, watchlists, review queues, digests, join challenges, and non-evidence monitoring. Plain `/watch`, `/unwatch`, `/watchlist`, `/digest`, and one-off join-challenge housekeeping remain local-only.
+- Local working memory: bounded JSONL event store and in-memory Telegram context used for drafts, watchlist state, review queues, digests, join challenges, and non-evidence monitoring. Menu-only review/settings panels, natural-language corrections, and one-off join-challenge housekeeping remain local-only unless evidence qualifies for Shared Memory.
 - DKG v10 Working Memory: when supported by the installed OpenClaw adapter, `createAssertion`, `writeAssertion`, and `promoteAssertion` stage evidence in DKG Working Memory before selected roots move to Shared Working Memory.
 - DKG v10 Shared Working Memory: evidence-backed artifacts promoted through the assertion lifecycle, with `share` retained as a compatibility fallback for older adapter builds. Unsafe chat observations with concrete evidence are shared as collaborative working memory; only admin-verified or very-high-confidence observations are eligible for publication.
 
-The runtime `/status` command reports whether the current adapter exposes Working Memory assertions, Shared Working Memory fallback writes, Verified Memory publish, and query capability.
+The `/start` > Settings > Status panel reports whether the current adapter exposes Working Memory assertions, Shared Working Memory fallback writes, Verified Memory publish, and query capability.
 
 ## DKG v10 Primitives
 
 - Context Graph: `tracabot`.
 - Entity: Telegram actors, wallets, domains, events, campaigns, reports, reviews.
 - Knowledge Asset-shaped events: high-confidence fraud findings, accepted reports, unsafe chat events, and bans include `http://dkg.io/ontology#KnowledgeAsset` typing.
-- UAL: returned by OpenClaw DKG adapter writes and used in `/why`, `/stats sources`, and skill outputs.
+- UAL: returned by OpenClaw DKG adapter writes and used in Explain Event, Stats/Sources panels, and skill outputs.
 - SHARE: evidence-backed events are written to Shared Memory.
 - PUBLISH: qualifying high-confidence event roots are promoted with `publishSharedMemory`.
 - Integration: `skills/tracabot/skill.json` exposes OpenClaw-callable tools.

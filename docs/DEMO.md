@@ -48,11 +48,11 @@ Urgent free USDT airdrop. Connect wallet at claim-example.test and DM support to
 
 4. Run `/scan` as a reply to the message.
 5. Run `/report` as a reply to the message.
-6. Run `/why <event-id>` using the event ID from the bot response.
+6. Open `/start`, use Explain Event, and enter the event ID from the bot response.
 7. Run `/ban` as a reply to the scam message if using a disposable test account.
-8. Run `/stats`, `/stats campaigns`, `/digest`, and `/watchlist`.
+8. Open `/start` and use Stats, Campaigns/Sources, Reviews, and Settings/Status panels.
 9. Ask a conversational safety question as a reply: `@tracabot is this a scam?`
-10. Run `/status` as an admin to show DKG version, OpenClaw adapter capabilities, permissions, thresholds, learning policy, and OpenClaw LLM discovery without exposing secrets.
+10. Open `/start` > Settings > Status as an admin to show DKG version, OpenClaw adapter capabilities, permissions, thresholds, learning policy, and OpenClaw LLM discovery without exposing secrets.
 11. Have a low-risk test account join the group, click the challenge deep link, and DM either the configured Knowledge Asset Q&A answer or a full `did:dkg:` Knowledge Asset UAL before the TTL expires.
 
 Show that the bot explains local evidence, DKG evidence, confidence, action taken, and promotion status while public group replies avoid exposing internal UALs, graph details, OpenClaw endpoints, model names, and admin setup details.
@@ -91,7 +91,7 @@ The demo refuses production writes unless `TRACABOT_TEST_MODE=true` is set.
 - 1:45 Detection: `/scan` and `/report` on a scam message.
 - 3:00 DKG: show Working Memory assertion lifecycle, Shared Memory write/read, and controlled provenance details.
 - 4:00 Enforcement: `/ban` deletes replied scam message and bans target.
-- 5:00 Explainability: `/why`, `/appeal`, `/review`.
+- 5:00 Explainability: `/start` Explain Event, review callbacks, natural-language review replies, and appeal logging.
 - 6:00 Conversation: `@tracabot is this a scam?` evidence-bound reply using OpenClaw LLM when available.
 - 7:00 OpenClaw: `tracabot-skill` JSON calls.
 - 8:00 Cross-community: second group/instance sees prior DKG evidence.
