@@ -34,6 +34,23 @@ test('skill service scans targets with local and DKG evidence', async () => {
   assert.equal(result.writesDkg, false);
 });
 
+test('skill service exposes context oracle verdicts without DKG writes', async () => {
+  const { service } = makeService();
+  service.dkg.queryContextOracle = async () => ({
+    verdict: 'verified_risk',
+    trustLayer: 'verifiable_memory',
+    confidence: 96,
+    evidence: [{ eventId: 'vm-ban', eventType: 'ban_executed', trustLayer: 'verifiable_memory' }]
+  });
+  const result = await service.queryContextOracle({ telegramUserId: '8388593201', username: 'fake_support', text: 'verify wallet now' });
+  assert.equal(result.tool, 'query_context_oracle');
+  assert.equal(result.verdict, 'verified_risk');
+  assert.equal(result.trustLayer, 'verifiable_memory');
+  assert.equal(result.confidence, 96);
+  assert.equal(result.writesDkg, false);
+  assert.equal(result.evidence[0].eventId, 'vm-ban');
+});
+
 test('skill service watchlist and digest stay local', () => {
   const { service } = makeService();
   service.store.append({ id: 'watch-a', event_type: 'watch_started', timestamp: new Date().toISOString(), user: { id: '1' }, payload: { watch_target_key: 'id:1', target: { id: '1' }, reason: 'admin watch' }, local_only: true });

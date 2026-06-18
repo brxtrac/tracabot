@@ -271,6 +271,50 @@ test('admin history escapes identifiers and ignores false-positive or non-produc
   assert.doesNotMatch(queries[0], /UNION \{ \?x \?y \?z \}/);
 });
 
+test('context oracle prefers verified clear over older risk evidence', async () => {
+  const calls = [];
+  const dkg = new DkgClient({ contextGraph: 'tracabot' });
+  dkg.queryBindings = async (sparql, options = {}) => {
+    calls.push({ sparql, options });
+    if (options.view === 'verifiable-memory') {
+      return [{
+        g: 'did:dkg:context-graph:tracabot/_verifiable_memory',
+        s: 'https://tracabot.org/ontology#event/clear',
+        eventType: 'review_overturned',
+        confidence: '100',
+        trustedGlobalClear: 'true',
+        tracBackedGlobalAuthority: 'true'
+      }];
+    }
+    return [{
+      g: 'did:dkg:context-graph:tracabot/_shared_memory',
+      s: 'https://tracabot.org/ontology#event/risk',
+      eventType: 'ban_executed',
+      confidence: '95'
+    }];
+  };
+  const result = await dkg.queryContextOracle({ username: 'safe_user' });
+  assert.equal(result.verdict, 'verified_clear');
+  assert.equal(result.trustLayer, 'verifiable_memory');
+  assert.equal(result.evidence[0].eventId, 'clear');
+  assert.deepEqual(calls.map((call) => call.options.view), ['verifiable-memory', 'shared-working-memory']);
+});
+
+test('context oracle returns shared warning for unverified SWM risk', async () => {
+  const dkg = new DkgClient({ contextGraph: 'tracabot' });
+  dkg.queryBindings = async (_sparql, options = {}) => options.view === 'verifiable-memory' ? [] : [{
+    g: 'did:dkg:context-graph:tracabot/_shared_memory',
+    s: 'https://tracabot.org/ontology#event/swm-risk',
+    eventType: 'dm_scam_report',
+    confidence: '88',
+    localConfidence: '82'
+  }];
+  const result = await dkg.queryContextOracle({ aliases: ['fake_helper'] });
+  assert.equal(result.verdict, 'shared_warning');
+  assert.equal(result.trustLayer, 'shared_memory');
+  assert.equal(result.evidence[0].eventId, 'swm-risk');
+});
+
 test('risk lookups use shared scam domains across communities', async () => {
   const queries = [];
   const dkg = new DkgClient({ contextGraph: 'tracabot' });

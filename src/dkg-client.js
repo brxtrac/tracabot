@@ -528,14 +528,15 @@ export class DkgClient {
     return { mode: 'openclaw-dkg-adapter-context-graph', output: JSON.stringify(publish), subject, ...publish };
   }
 
-  async queryBindings(sparql) {
+  async queryBindings(sparql, options = {}) {
     if (this.config.dkgReads === false) return [];
     if (Date.now() < this.queryDisabledUntil) return [];
     try {
       const client = await this.client();
       const response = await withTimeout(client.query(sparql, {
         contextGraphId: this.config.contextGraph,
-        includeSharedMemory: true
+        includeSharedMemory: options.includeSharedMemory ?? true,
+        ...(options.view ? { view: options.view } : {})
       }), this.config.dkgQueryTimeoutMs || 4000, 'DKG query');
       return response?.result?.bindings || response?.bindings || [];
     } catch (error) {
@@ -671,6 +672,60 @@ export class DkgClient {
       events: severeEvents,
       falsePositiveEvents
     };
+  }
+
+  async queryContextOracle({ userId = '', username = '', aliases = [], text = '' } = {}) {
+    const identifiers = [userId, username, ...aliases]
+      .filter(Boolean)
+      .map(v => String(v).toLowerCase().replace(/^@/, '').replace(/[^\p{L}\p{N}_-]/gu, ''))
+      .filter(Boolean);
+    const indicators = [...extractWallets(text), ...extractDomains(text), ...extractPatterns(text)];
+    const clauses = [];
+    for (const identifier of [...new Set(identifiers)]) {
+      clauses.push(`{ ?s <${NS}telegramUserId> ${literal(identifier)} . }`);
+      clauses.push(`{ ?s <${NS}username> ${literal(identifier)} . }`);
+      clauses.push(`{ ?s <${NS}actorAlias> ${literal(identifier)} . }`);
+      clauses.push(`{ ?s <${NS}targetTelegramUserId> ${literal(identifier)} . }`);
+      clauses.push(`{ ?s <${NS}targetUsername> ${literal(identifier)} . }`);
+      clauses.push(`{ ?s <${NS}targetKey> ${literal(identifier)} . }`);
+    }
+    for (const indicator of [...new Set(indicators)]) {
+      clauses.push(`{ ?s <${NS}wallet> ${literal(indicator)} . }`);
+      clauses.push(`{ ?s <${NS}scamDomain> ${literal(indicator)} . }`);
+      clauses.push(`{ ?s <${NS}scamPattern> ${literal(indicator)} . }`);
+    }
+    if (!clauses.length) return { verdict: 'insufficient_evidence', trustLayer: 'local_only', confidence: 0, evidence: [] };
+
+    const sparql = `SELECT ?g ?s ?eventType ?confidence ?localConfidence ?scamType ?evidence ?adminVerified ?trustedGlobalClear ?verifiedMemoryAuthority ?tracBackedGlobalAuthority ?communityVerifiedFlag ?chatId ?username ?eventSource ?testMode WHERE { GRAPH ?g { ${clauses.join(' UNION ')} OPTIONAL { ?s <${NS}eventType> ?eventType . } OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}localConfidence> ?localConfidence . } OPTIONAL { ?s <${NS}scamType> ?scamType . } OPTIONAL { ?s <${NS}evidence> ?evidence . } OPTIONAL { ?s <${NS}adminVerified> ?adminVerified . } OPTIONAL { ?s <${NS}trustedGlobalClear> ?trustedGlobalClear . } OPTIONAL { ?s <${NS}verifiedMemoryAuthority> ?verifiedMemoryAuthority . } OPTIONAL { ?s <${NS}tracBackedGlobalAuthority> ?tracBackedGlobalAuthority . } OPTIONAL { ?s <${NS}communityVerifiedFlag> ?communityVerifiedFlag . } OPTIONAL { ?s <${NS}telegramChatId> ?chatId . } OPTIONAL { ?s <${NS}username> ?username . } OPTIONAL { ?s <${NS}source> ?eventSource . } OPTIONAL { ?s <${NS}testMode> ?testMode . } } } LIMIT 50`;
+    const vm = await this.queryBindings(sparql, { view: 'verifiable-memory', includeSharedMemory: false });
+    const swm = await this.queryBindings(sparql, { view: 'shared-working-memory', includeSharedMemory: false });
+    const ranked = [
+      ...vm.map((binding) => ({ binding, trustLayer: 'verifiable_memory', rank: 4 })),
+      ...swm.map((binding) => {
+        const adminReviewed = cleanValue(binding.adminVerified) === 'true' || cleanValue(binding.communityVerifiedFlag) === 'group_admin_verified';
+        return { binding, trustLayer: adminReviewed ? 'admin_reviewed' : 'shared_memory', rank: adminReviewed ? 3 : 2 };
+      })
+    ].filter(({ binding }) => isProductionBindingForContext(binding, this.config.contextGraph));
+
+    const evidence = ranked.map(({ binding, trustLayer, rank }) => ({
+      eventId: eventIdFromSource(binding.s),
+      eventType: cleanValue(binding.eventType),
+      confidence: numeric(binding.confidence || '0'),
+      localConfidence: numeric(binding.localConfidence || '0'),
+      scamType: cleanValue(binding.scamType),
+      evidence: cleanValue(binding.evidence),
+      ual: cleanValue(binding.g),
+      trustLayer,
+      rank,
+      clear: cleanValue(binding.trustedGlobalClear) === 'true' || cleanValue(binding.verifiedMemoryAuthority) === 'true' || cleanValue(binding.tracBackedGlobalAuthority) === 'true' || cleanValue(binding.communityVerifiedFlag) === 'verified_memory_trac_spend'
+    })).sort((a, b) => b.rank - a.rank || b.confidence - a.confidence);
+
+    const clear = evidence.find((item) => item.eventType === 'review_overturned' && item.clear);
+    if (clear) return { verdict: 'verified_clear', trustLayer: clear.trustLayer, confidence: clear.confidence, evidence: [clear, ...evidence.filter((item) => item !== clear)].slice(0, 8) };
+    const risk = evidence.find((item) => ['ban_executed', 'review_upheld', 'fraud_finding', 'dm_scam_report', 'report_submitted'].includes(item.eventType) && item.confidence >= 80);
+    if (risk) return { verdict: risk.trustLayer === 'shared_memory' ? 'shared_warning' : 'verified_risk', trustLayer: risk.trustLayer, confidence: risk.confidence, evidence: [risk, ...evidence.filter((item) => item !== risk)].slice(0, 8) };
+    if (evidence.length) return { verdict: 'needs_review', trustLayer: evidence[0].trustLayer, confidence: evidence[0].confidence, evidence: evidence.slice(0, 8) };
+    return { verdict: 'insufficient_evidence', trustLayer: 'local_only', confidence: 0, evidence: [] };
   }
 
   async queryRiskIndicators({ username = '', userId = '', aliases = [], text = '' } = {}) {

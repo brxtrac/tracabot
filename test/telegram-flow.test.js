@@ -150,7 +150,7 @@ async function openMenuPanel(bot, calls, chat, from, buttonText, callbackId = 'm
   return lastPayload(calls, 'editMessageText');
 }
 
-test('new high-risk join is sent to admin review when bot has admin rights', async () => {
+test('new high-risk join is queued for admin review without channel alert when bot has admin rights', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   await bot.handleNewMembers({
     chat: { id: -100, title: 'demo' },
@@ -159,7 +159,7 @@ test('new high-risk join is sent to admin review when bot has admin rights', asy
   });
   assert.equal(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 42), false);
   assert.equal(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 42), false);
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')));
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')), false);
   assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user.id === 42));
 });
 
@@ -225,7 +225,7 @@ test('recent joiner renamed to admin-like identity is deleted and published befo
   assert.match(JSON.stringify(finding.payload.evidence), /changed identity to resemble admin/);
 });
 
-test('DKG-backed high-risk first post is deleted and sent to admin review when bot has rights', async () => {
+test('DKG-backed high-risk first post is queued for admin review without channel alert when bot has rights', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   await bot.handleMessage({
     chat: { id: -100, title: 'demo' },
@@ -237,10 +237,7 @@ test('DKG-backed high-risk first post is deleted and sent to admin review when b
   assert.equal(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 127), false);
   assert.equal(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 166), false);
   assert.equal(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 166), false);
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')));
-  const alert = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review'))?.payload;
-  assert.ok(buttonByText(alert, 'Confirm scam'));
-  assert.ok(buttonByText(alert, 'Reject flag'));
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')), false);
   assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user.id === 166 && event.payload.recommended_action === 'admin_review'));
 });
 
@@ -283,7 +280,7 @@ test('auto-discovered admin display names are used for rename copycat detection'
   assert.match(JSON.stringify(finding.payload.evidence), /changed identity to resemble admin/);
 });
 
-test('DKG-backed high-risk join asks for admin review without ban-rights wording', async () => {
+test('DKG-backed high-risk join is queued for admin review without ban-rights wording', async () => {
   const { bot, calls } = makeBot({ canBan: false });
   await bot.handleNewMembers({
     chat: { id: -100, title: 'demo' },
@@ -291,14 +288,8 @@ test('DKG-backed high-risk join asks for admin review without ban-rights wording
     new_chat_members: [{ id: 43, username: 'fake_support2', is_bot: false }]
   });
   assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')));
-  const alert = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review'))?.payload.text || '';
-  assert.match(alert, /for admin review.*DKG-backed|flagged .* for admin review/);
-  assert.match(alert, /use the buttons below/);
-  assert.match(alert, /Non-admin replies are logged as appeals/);
-  assert.doesNotMatch(alert, /ban rights|Recommendation: ban/i);
-  assert.doesNotMatch(alert, /DKG UAL|DKG event|did:dkg:context-graph|event ID/);
-  assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.local_only));
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')), false);
+  assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.local_only && String(event.payload.evidence || '').includes('queued for admin review without channel alert')));
 });
 
 test('join challenge is skipped when bot is not group admin', async () => {
@@ -619,13 +610,13 @@ test('review queue uses admin-scoped inline buttons and callback decisions', asy
   assert.ok(finalScreen.reply_markup.inline_keyboard.flat().some((item) => item.text.includes('Back to queue')));
 });
 
-test('scam alert review buttons can be used by any trusted admin', async () => {
+test('pending review buttons can be used by any trusted admin', async () => {
   const { bot, calls } = makeBot({ canBan: true, trustedUserIds: [1, 2] });
   const chat = { id: -100, type: 'supergroup' };
   await bot.handleMessage({ chat, from: { id: 77, username: 'suspect', is_bot: false }, message_id: 21, text: 'known scam actor returns' });
-  const alert = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('flagged this for admin review'))?.payload;
-  const rejectData = buttonByText(alert, 'Reject flag').callback_data;
-  await bot.handleCallbackQuery({ id: 'alert-review-other-admin', from: { id: 2, username: 'otheradmin' }, message: { chat, message_id: alert.message_id || 22 }, data: rejectData });
+  const flagged = bot.store.all().find((event) => event.event_type === 'risk_review_needed' && event.user.id === 77);
+  const rejectData = bot.reviewActionKeyboard(1, flagged.id)[0][1].callback_data;
+  await bot.handleCallbackQuery({ id: 'alert-review-other-admin', from: { id: 2, username: 'otheradmin' }, message: { chat, message_id: 22 }, data: rejectData });
   assert.equal(calls.some((call) => call.method === 'answerCallbackQuery' && String(call.payload.text || '').includes('Open your own panel')), false);
   const review = bot.store.all().find((event) => event.event_type === 'review_overturned' && event.payload.reviewer.id === 2);
   assert.ok(review);
@@ -642,9 +633,9 @@ test('bot owner with verified-memory publishing creates TRAC-backed global revie
   });
   const chat = { id: -100, type: 'supergroup' };
   await bot.handleMessage({ chat, from: { id: 77, username: 'suspect', is_bot: false }, message_id: 22, text: 'known scam actor returns' });
-  const alert = calls.find((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('flagged this for admin review'))?.payload;
-  const rejectData = buttonByText(alert, 'Reject flag').callback_data;
-  await bot.handleCallbackQuery({ id: 'owner-global-clear', from: { id: 1, username: 'owner' }, message: { chat, message_id: alert.message_id || 23 }, data: rejectData });
+  const flagged = bot.store.all().find((event) => event.event_type === 'risk_review_needed' && event.user.id === 77);
+  const rejectData = bot.reviewActionKeyboard(1, flagged.id)[0][1].callback_data;
+  await bot.handleCallbackQuery({ id: 'owner-global-clear', from: { id: 1, username: 'owner' }, message: { chat, message_id: 23 }, data: rejectData });
   const review = bot.store.all().find((event) => event.event_type === 'review_overturned' && event.payload.reviewer.id === 1);
   assert.ok(review);
   assert.equal(review.payload.admin_verified, true);
@@ -1600,7 +1591,7 @@ test('non-admin natural review panel requests are blocked', async () => {
   assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Review manager')), false);
 });
 
-test('natural admin review infers event when admin replies to bot review alert', async () => {
+test('natural admin review records explicit event id without bot review alert', async () => {
   const { bot, calls, dkgWrites } = makeBot({ canBan: true });
   const chat = { id: -100, title: 'demo' };
   await bot.handleMessage({
@@ -1609,16 +1600,14 @@ test('natural admin review infers event when admin replies to bot review alert',
     message_id: 127,
     text: 'known scam actor returns'
   });
-  const alertIndex = calls.findIndex((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review'));
-  assert.notEqual(alertIndex, -1);
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('flagged this for admin review')), false);
+  const reviewSource = bot.store.all().find((event) => event.event_type === 'risk_review_needed' && event.user.id === 166);
   await bot.executeAgentAction('review', { event_id: bot.store.all().find((event) => event.event_type === 'risk_review_needed' && event.user.id === 166)?.id, decision: 'reject', reason: 'long term community member' }, {
     chat,
     from: { id: 1, username: 'admin' },
     message_id: 128,
-    text: '@tracethembot reject long term community member',
-    reply_to_message: { chat, from: { id: 999, username: 'tracethembot', is_bot: true }, message_id: alertIndex + 1, text: calls[alertIndex].payload.text }
+    text: `@tracethembot reject ${reviewSource.id} long term community member`
   }, true);
-  const reviewSource = bot.store.all().find((event) => event.event_type === 'risk_review_needed' && event.user.id === 166);
   assert.ok(dkgWrites.some((event) => event.event_type === 'review_overturned' && event.payload.target_event_id === reviewSource.id));
 });
 
@@ -2548,6 +2537,16 @@ test('single target false-positive resolution hides duplicate pending reviews', 
   bot.store.append({ id: 'evt-dup-reject', event_type: 'review_overturned', timestamp: new Date(Date.now() + 1000).toISOString(), user: { id: 1, username: 'admin' }, payload: { target_event_id: 'evt-dup-1', review_decision: 'reject', reviewed_target: { id: 1505519171, username: 'molociao' }, reviewed_target_key: 'id:1505519171', resolves_target_pending_reviews: true, evidence: ['admin rejected flag'] } });
 
   assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'molociao'), false);
+});
+
+test('single target confirmed scam resolution hides duplicate pending reviews', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const timestamp = new Date().toISOString();
+  bot.store.append({ id: 'evt-upheld-dup-1', event_type: 'risk_review_needed', timestamp, user: { id: 5697282571, username: 'Rana_Dasss' }, payload: { confidence: 100, evidence: ['Crypto lure terms: airdrop'] } });
+  bot.store.append({ id: 'evt-upheld-dup-2', event_type: 'risk_review_needed', timestamp, user: { id: 5697282571, username: 'Rana_Dasss' }, payload: { confidence: 90, evidence: ['Urgency language: now'] } });
+  bot.store.append({ id: 'evt-upheld-confirm', event_type: 'review_upheld', timestamp: new Date(Date.now() + 1000).toISOString(), user: { id: 1, username: 'admin' }, payload: { target_event_id: 'evt-upheld-dup-1', review_decision: 'confirm', reviewed_target: { id: 5697282571, username: 'Rana_Dasss' }, reviewed_target_key: 'id:5697282571', resolves_target_pending_reviews: true, evidence: ['admin confirmed scam'] } });
+
+  assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'Rana_Dasss'), false);
 });
 
 test('legacy same-target false-positive review clears duplicate pending reviews', async () => {

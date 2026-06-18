@@ -103,6 +103,23 @@ export class TracabotSkillService {
     };
   }
 
+  async queryContextOracle(input = {}) {
+    const target = targetFromInput(input);
+    const text = String(input.text || input.messageText || input.context || '').slice(0, 4096);
+    const oracle = typeof this.dkg?.queryContextOracle === 'function'
+      ? await this.dkg.queryContextOracle({ username: target.username, userId: target.id, aliases: actorAliases(target), text })
+      : { verdict: 'insufficient_evidence', trustLayer: 'local_only', confidence: 0, evidence: [] };
+    return {
+      tool: 'query_context_oracle',
+      target,
+      verdict: oracle.verdict,
+      trustLayer: oracle.trustLayer,
+      confidence: oracle.confidence,
+      evidence: oracle.evidence || [],
+      writesDkg: false
+    };
+  }
+
   explainEvent(input = {}) {
     const eventId = input.eventId || input.event_id || '';
     const event = this.store.all().find((item) => item.id === eventId || item.payload?.target_event_id === eventId || item.payload?.report_event_id === eventId);
@@ -415,6 +432,7 @@ export class TracabotSkillService {
 export async function runSkillTool(tool, input = {}, env = process.env) {
   const service = TracabotSkillService.fromEnv(env);
   if (tool === 'scan_target') return service.scanTarget(input);
+  if (tool === 'query_context_oracle') return service.queryContextOracle(input);
   if (tool === 'explain_event') return service.explainEvent(input);
   if (tool === 'get_digest') return service.getDigest(input);
   if (tool === 'get_watchlist') return service.getWatchlist(input);

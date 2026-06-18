@@ -1303,7 +1303,7 @@ export class TelegramShieldBot {
     for (const event of allEvents) {
       if (!resolutionTypes.has(event.event_type)) continue;
       for (const id of [event.payload?.target_event_id, event.payload?.report_event_id].filter(Boolean)) directResolutionByEvent.set(id, event);
-      if (!['review_overturned', 'ban_executed'].includes(event.event_type)) continue;
+      if (!['review_upheld', 'review_overturned', 'ban_executed'].includes(event.event_type)) continue;
       const reviewed = event.payload?.reviewed_target || event.user || {};
       if (!targetIdentityKeys(reviewed).length) continue;
       if (event.event_type === 'review_overturned' && !event.payload?.resolves_target_pending_reviews) legacyResolutions.push({ event, reviewed, ts: Date.parse(event.timestamp || '') });
@@ -3120,9 +3120,8 @@ export class TelegramShieldBot {
     if (actor.is_bot === true || await this.isTelegramChatAdmin(message.chat.id, actor.id)) {
       const review = await this.record('risk_action_suppressed', message, {
         ...risk,
-        evidence: [...risk.evidence, actor.is_bot === true ? 'auto-action suppressed for Telegram bot account' : 'auto-action suppressed for Telegram chat admin']
+        evidence: [...risk.evidence, actor.is_bot === true ? 'auto-action suppressed for Telegram bot account' : 'auto-action suppressed for Telegram chat admin', 'queued for admin review without channel alert']
       }, { writeDkg: false });
-      await this.alertAdmins(message, risk, review);
       return review;
     }
 
@@ -3137,9 +3136,8 @@ export class TelegramShieldBot {
       ...risk,
       recommended_action: 'admin_review',
       finding_event_id: finding?.id || '',
-      evidence: [...risk.evidence, 'triggering message removal disabled during testing', 'auto ban/restrict disabled for message classifier decisions; admin review required']
+      evidence: [...risk.evidence, 'triggering message removal disabled during testing', 'auto ban/restrict disabled for message classifier decisions; admin review required', 'queued for admin review without channel alert']
     }, { writeDkg: false });
-    await this.alertAdmins(message, risk, review);
     return review;
   }
 
