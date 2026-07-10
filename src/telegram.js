@@ -111,6 +111,36 @@ function inlineKeyboard(rows = []) {
   return { inline_keyboard: rows };
 }
 
+function chatKey(chatOrId = '') {
+  if (chatOrId && typeof chatOrId === 'object') return String(chatOrId.id || '');
+  return String(chatOrId || '');
+}
+
+function eventChatKey(event = {}) {
+  return chatKey(event.payload?.target_chat_id || event.chat?.id || '');
+}
+
+function sourceMessageLink(event = {}) {
+  const messageId = event.payload?.source_message_id || event.payload?.message_id || event.message_id || '';
+  if (!messageId) return '';
+  const chat = event.chat || {};
+  const username = chat.username || event.payload?.target_chat_username || '';
+  if (username) return `https://t.me/${String(username).replace(/^@/, '')}/${encodeURIComponent(messageId)}`;
+  const id = String(event.payload?.target_chat_id || chat.id || '');
+  if (id.startsWith('-100')) return `https://t.me/c/${encodeURIComponent(id.slice(4))}/${encodeURIComponent(messageId)}`;
+  return '';
+}
+
+function sameChat(a = '', b = '') {
+  const left = chatKey(a);
+  const right = chatKey(b);
+  return Boolean(left && right && left === right);
+}
+
+function chatLabel(chat = {}) {
+  return String(chat.title || chat.username || chat.id || 'unknown chat').slice(0, 80);
+}
+
 function button(text, data) {
   return { text, callback_data: data };
 }
@@ -466,12 +496,14 @@ export class TelegramShieldBot {
     this.reviewMessageEvents = new Map();
     this.lastPendingReviewsByChat = new Map(); // chatId -> displayed review groups for natural follow-up corrections
     this._reviewCache = { pending: null, watches: null, lastUpdate: 0 };
+    this.optimisticReviewedEventIds = new Set();
     this.nextProactiveScanAt = Date.now() + this.config.proactiveScanMinutes * 60 * 1000;
     this.conversationLastReply = new Map();
     this.naturalLanguageLastReply = new Map();
     this.conversationHistory = new Map();
     this.lastBotReplyByThread = new Map();
     this.lastCrossGroupWarningAt = new Map(); // chatId:targetKey -> timestamp for rate limiting proactive cross-group alerts
+    this.lastPendingReviewNoticeAt = new Map(); // chatId -> timestamp for throttled review notices
     this.skillService = null;
     this.seenChats = new Map();
     this.observedUserMessages = new Map();
@@ -984,6 +1016,20 @@ export class TelegramShieldBot {
     return this.config.conversational !== false;
   }
 
+  chatPendingReviewNotificationsEnabled(chatId) {
+    const key = String(chatId || '');
+    const latest = [...this.store.all()].reverse().find((event) => event.event_type === 'pending_review_notification_setting_changed' && String(event.chat?.id || '') === key);
+    if (latest) return latest.payload?.enabled !== false;
+    return this.config.pendingReviewNotifications !== false;
+  }
+
+  chatPendingReviewNotificationIntervalHours(chatId) {
+    const key = String(chatId || '');
+    const latest = [...this.store.all()].reverse().find((event) => event.event_type === 'pending_review_notification_interval_changed' && String(event.chat?.id || '') === key);
+    const value = Number(latest?.payload?.interval_hours || this.config.pendingReviewNotificationIntervalHours || 12);
+    return Number.isFinite(value) && value >= 1 && value <= 168 ? value : 12;
+  }
+
   skillServiceOrNull() {
     if (this.config.testMode) return null;
     if (this.skillService) return this.skillService;
@@ -1154,6 +1200,14 @@ export class TelegramShieldBot {
     decoratedPayload.community_name = decoratedPayload.community_name || this.config.communityName || '';
     decoratedPayload.community_type = decoratedPayload.community_type || this.config.communityType || 'telegram_group';
     decoratedPayload.policy_id = decoratedPayload.policy_id || this.config.policyId || 'default';
+    if (['risk_review_needed', 'risk_action_suppressed', 'report_review_needed', 'ban_requested_no_reply', 'ban_requested_no_rights', 'proactive_cross_group_warning'].includes(eventType)) {
+      decoratedPayload.target_chat_id = decoratedPayload.target_chat_id || message.chat?.id || '';
+      decoratedPayload.target_chat_title = decoratedPayload.target_chat_title || chatLabel(message.chat || {});
+      decoratedPayload.target_chat_type = decoratedPayload.target_chat_type || message.chat?.type || '';
+      decoratedPayload.source_message_id = decoratedPayload.source_message_id || message.message_id || '';
+      decoratedPayload.detected_at = decoratedPayload.detected_at || new Date().toISOString();
+      decoratedPayload.evidence_basis = decoratedPayload.evidence_basis || (decoratedPayload.prior_admin_events?.length ? 'prior_admin_action' : 'risk_signal');
+    }
     const event = {
       id: randomUUID(),
       event_type: eventType,
@@ -1174,10 +1228,46 @@ export class TelegramShieldBot {
       event.local_only = true;
     }
     this.store.append(event);
-    if (['risk_review_needed', 'risk_action_suppressed', 'report_review_needed', 'review_upheld', 'review_overturned', 'ban_executed'].includes(eventType)) {
+    if (['risk_review_needed', 'risk_action_suppressed', 'report_review_needed', 'review_upheld', 'review_overturned', 'ban_executed', 'review_hidden', 'review_unhidden'].includes(eventType)) {
       this._reviewCache = { pending: null, watches: null, lastUpdate: 0 };
     }
+    if (['risk_review_needed', 'risk_action_suppressed', 'proactive_cross_group_warning'].includes(eventType)) {
+      this.maybeNotifyPendingReview(event).catch((error) => console.error(`Pending review notice failed: ${error instanceof Error ? error.message : String(error)}`));
+    }
     return event;
+  }
+
+  async maybeNotifyPendingReview(event = {}) {
+    const chatId = eventChatKey(event);
+    if (!chatId || !this.chatPendingReviewNotificationsEnabled(chatId)) return null;
+    const intervalMs = this.chatPendingReviewNotificationIntervalHours(chatId) * 60 * 60 * 1000;
+    const last = this.lastPendingReviewNoticeAt.get(chatId) || 0;
+    if (Date.now() - last < intervalMs) return null;
+    const count = this.pendingReviewItems({ chatId, scope: 'current' }).length || 1;
+    if (this.isReviewHiddenForChat(event, chatId)) return null;
+    const reservedAt = Date.now();
+    this.lastPendingReviewNoticeAt.set(chatId, reservedAt);
+    const text = [
+      `🛡️ ${count} pending review item${count === 1 ? '' : 's'} for this channel.`,
+      `Latest: ${userMention(event.user || event.payload?.target || {})} (${event.payload?.confidence ?? 'n/a'}%).`,
+      'Admins: open review queue for evidence and final decision.'
+    ].join('\n');
+    let sent;
+    try {
+      sent = await this.send(chatId, text, {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: inlineKeyboard([[button('🛡️ Open reviews', callbackData('review-list', 'admin'))]])
+      });
+    } catch (error) {
+      if (this.lastPendingReviewNoticeAt.get(chatId) === reservedAt) {
+        if (last) this.lastPendingReviewNoticeAt.set(chatId, last);
+        else this.lastPendingReviewNoticeAt.delete(chatId);
+      }
+      throw error;
+    }
+    if (sent?.message_id) this.reviewMessageEvents.set(`${chatId}:${sent.message_id}`, event.id);
+    return sent;
   }
 
   findEvent(eventId = '') {
@@ -1203,6 +1293,9 @@ export class TelegramShieldBot {
       if (Date.parse(resolution.timestamp || '') < Date.parse(event.timestamp || '')) return false;
       if (resolution.payload?.target_event_id === event.id || resolution.payload?.report_event_id === event.id) return true;
       if (!resolution.payload?.resolves_target_pending_reviews) return false;
+      const resolutionChat = resolution.payload?.target_chat_id || resolution.payload?.review_chat_id || resolution.chat?.id || '';
+      const targetChat = eventChatKey(event);
+      if (resolutionChat && targetChat && !sameChat(resolutionChat, targetChat)) return false;
       const reviewed = resolution.payload?.reviewed_target || resolution.user || {};
       return sameActorTarget(reviewed, target);
     }) || null;
@@ -1222,7 +1315,21 @@ export class TelegramShieldBot {
   }
 
   isPendingReviewEvent(event = {}) {
-    return Boolean(event?.id && ['risk_review_needed', 'risk_action_suppressed', 'report_review_needed', 'ban_requested_no_reply', 'ban_requested_no_rights', 'proactive_cross_group_warning'].includes(event.event_type) && !this.reviewResolutionFor(event.id) && !this.targetResolutionFor(event));
+    return Boolean(event?.id && !this.optimisticReviewedEventIds.has(event.id) && ['risk_review_needed', 'risk_action_suppressed', 'report_review_needed', 'ban_requested_no_reply', 'ban_requested_no_rights', 'proactive_cross_group_warning'].includes(event.event_type) && !this.reviewResolutionFor(event.id) && !this.targetResolutionFor(event));
+  }
+
+  reviewHiddenEventForChat(event = {}, chatId = '') {
+    const key = chatKey(chatId || eventChatKey(event));
+    if (!event?.id || !key) return null;
+    return [...this.store.all()].reverse().find((item) => {
+      if (!['review_hidden', 'review_unhidden'].includes(item.event_type)) return false;
+      if (item.payload?.target_event_id !== event.id) return false;
+      return sameChat(item.payload?.review_chat_id || item.chat?.id || '', key);
+    }) || null;
+  }
+
+  isReviewHiddenForChat(event = {}, chatId = '') {
+    return this.reviewHiddenEventForChat(event, chatId)?.event_type === 'review_hidden';
   }
 
   findAppealableEvent(message, target = {}) {
@@ -1279,17 +1386,18 @@ export class TelegramShieldBot {
       .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
   }
 
-  pendingReviewItems() {
+  pendingReviewItems(options = {}) {
+    const { chatId = '', scope = 'all', allEvents = null, includeHidden = false, hiddenOnly = false } = options || {};
     const now = Date.now();
     const CACHE_TTL = 8000; // 8 seconds — good balance for responsiveness
+    const eventsSnapshot = allEvents || this.store.all();
     if (this._reviewCache.pending && (now - this._reviewCache.lastUpdate) < CACHE_TTL) {
-      return this._reviewCache.pending;
+      return this.filterPendingReviewItems(this._reviewCache.pending, chatId, scope, eventsSnapshot, { includeHidden, hiddenOnly });
     }
 
-    const allEvents = this.store.all();
     const pendingTypes = new Set(['risk_review_needed', 'risk_action_suppressed', 'report_review_needed', 'ban_requested_no_reply', 'ban_requested_no_rights', 'proactive_cross_group_warning']);
     const resolutionTypes = new Set(['review_upheld', 'review_overturned', 'ban_executed']);
-    const reviewEvents = allEvents.filter((event) => pendingTypes.has(event.event_type));
+    const reviewEvents = eventsSnapshot.filter((event) => pendingTypes.has(event.event_type));
 
     const candidateCounts = new Map();
     for (const event of reviewEvents) {
@@ -1300,7 +1408,7 @@ export class TelegramShieldBot {
     const directResolutionByEvent = new Map();
     const targetResolutions = [];
     const legacyResolutions = [];
-    for (const event of allEvents) {
+    for (const event of eventsSnapshot) {
       if (!resolutionTypes.has(event.event_type)) continue;
       for (const id of [event.payload?.target_event_id, event.payload?.report_event_id].filter(Boolean)) directResolutionByEvent.set(id, event);
       if (!['review_upheld', 'review_overturned', 'ban_executed'].includes(event.event_type)) continue;
@@ -1317,7 +1425,10 @@ export class TelegramShieldBot {
       return targetResolutions.some((resolution) => {
         if (resolution.ts < eventTs) return false;
         if (resolution.event.payload?.target_event_id === event.id || resolution.event.payload?.report_event_id === event.id) return true;
-        return sameActorTarget(resolution.reviewed, target);
+        const resolutionChat = resolution.event.payload?.target_chat_id || resolution.event.payload?.review_chat_id || resolution.event.chat?.id || '';
+        const targetChat = eventChatKey(event);
+        const sameTargetChat = !resolutionChat || !targetChat || sameChat(resolutionChat, targetChat);
+        return sameTargetChat && sameActorTarget(resolution.reviewed, target);
       });
     };
 
@@ -1335,7 +1446,43 @@ export class TelegramShieldBot {
 
     this._reviewCache.pending = items;
     this._reviewCache.lastUpdate = now;
-    return items;
+    return this.filterPendingReviewItems(items, chatId, scope, eventsSnapshot, { includeHidden, hiddenOnly });
+  }
+
+  filterPendingReviewItems(items = [], chatId = '', scope = 'all', allEvents = null, visibility = {}) {
+    const key = chatKey(chatId);
+    const { includeHidden = false, hiddenOnly = false } = visibility || {};
+    const eventsSnapshot = allEvents || this.store.all();
+    const directResolutionByEvent = new Set();
+    const targetResolutions = [];
+    for (const event of eventsSnapshot) {
+      if (!['review_upheld', 'review_overturned', 'ban_executed'].includes(event.event_type)) continue;
+      for (const id of [event.payload?.target_event_id, event.payload?.report_event_id].filter(Boolean)) directResolutionByEvent.add(id);
+      const reviewed = event.payload?.reviewed_target || event.user || {};
+      if (event.payload?.resolves_target_pending_reviews && targetIdentityKeys(reviewed).length) {
+        targetResolutions.push({ event, reviewed, ts: Date.parse(event.timestamp || '') });
+      }
+    }
+    const activeItems = items.filter((event) => {
+      if (!event?.id || this.optimisticReviewedEventIds.has(event.id) || directResolutionByEvent.has(event.id)) return false;
+      const target = event.user || event.payload?.target || {};
+      if (!targetIdentityKeys(target).length) return true;
+      const eventTs = Date.parse(event.timestamp || '');
+      return !targetResolutions.some((resolution) => {
+        if (resolution.ts < eventTs) return false;
+        if (resolution.event.payload?.target_event_id === event.id || resolution.event.payload?.report_event_id === event.id) return true;
+        const resolutionChat = resolution.event.payload?.target_chat_id || resolution.event.payload?.review_chat_id || resolution.event.chat?.id || '';
+        const targetChat = eventChatKey(event);
+        return (!resolutionChat || !targetChat || sameChat(resolutionChat, targetChat)) && sameActorTarget(resolution.reviewed, target);
+      });
+    });
+    const scopedItems = (!key || scope === 'all') ? activeItems : activeItems.filter((event) => {
+      const eventKey = eventChatKey(event);
+      if (!eventKey) return scope !== 'other';
+      return scope === 'other' ? !sameChat(eventKey, key) : sameChat(eventKey, key);
+    });
+    if (!key || includeHidden) return hiddenOnly ? scopedItems.filter((event) => this.isReviewHiddenForChat(event, key)) : scopedItems;
+    return scopedItems.filter((event) => hiddenOnly ? this.isReviewHiddenForChat(event, key) : !this.isReviewHiddenForChat(event, key));
   }
 
   falsePositiveReviewFor(target = {}, text = '', dkgIntel = {}) {
@@ -1388,7 +1535,7 @@ export class TelegramShieldBot {
 
   formatWatchlist(filter = '') {
     const restrictions = this.recentRestrictions();
-    const reviews = this.pendingReviewItems();
+    const reviews = this.pendingReviewItems({ chatId: filter?.chatId || '', scope: filter?.scope || 'all' });
     const sections = [`🛡️ Review manager`, `${restrictions.length} active mutes | ${reviews.length} review items`];
     const addSection = (title, items, formatter) => {
       if (!items.length) return;
@@ -1400,18 +1547,19 @@ export class TelegramShieldBot {
     return sections.join('\n');
   }
 
-  formatReviewPanel(filter = 'flags') {
+  formatReviewPanel(filter = 'flags', chatId = '') {
     if (filter === 'mutes') return this.formatWatchlist('muted');
     if (filter === 'all') return this.formatWatchlist('all');
-    return this.formatPendingReviews();
+    if (filter === 'hidden') return this.formatPendingReviews(chatId, { hiddenOnly: true });
+    return this.formatPendingReviews(chatId);
   }
 
-  pendingReviewGroups() {
-    const reviews = this.pendingReviewItems();
+  pendingReviewGroups(options = {}) {
+    const reviews = this.pendingReviewItems(options);
     const groups = new Map();
     for (const event of reviews) {
       const target = event.user || event.payload?.target || {};
-      const key = targetKey(target) || event.id;
+      const key = `${eventChatKey(event) || 'legacy'}:${targetKey(target) || event.id}`;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(event);
     }
@@ -1422,13 +1570,17 @@ export class TelegramShieldBot {
     const target = event.user || event.payload?.target || {};
     const key = targetKey(target);
     if (!key) return event?.id ? [event] : [];
-    return this.pendingReviewItems().filter((item) => eventMatchesTarget(item, target));
+    return this.pendingReviewItems({ chatId: eventChatKey(event), scope: eventChatKey(event) ? 'current' : 'all' }).filter((item) => eventMatchesTarget(item, target));
   }
 
-  formatPendingReviews() {
-    const reviews = this.pendingReviewItems();
-    if (!reviews.length) return 'No pending review items.';
-    const groups = this.pendingReviewGroups();
+  formatPendingReviews(chatId = '', options = {}) {
+    const allEvents = this.store.all();
+    const { hiddenOnly = false } = options || {};
+    const reviews = this.pendingReviewItems({ chatId, scope: chatId ? 'current' : 'all', allEvents, hiddenOnly });
+    const otherReviews = chatId ? this.pendingReviewItems({ chatId, scope: 'other', allEvents }) : [];
+    if (!reviews.length && (hiddenOnly || !otherReviews.length)) return hiddenOnly ? 'No hidden review items for this channel.' : 'No pending review items.';
+    if (!reviews.length) return `No pending review items for this channel. ${otherReviews.length} item${otherReviews.length === 1 ? '' : 's'} exist in other channels as context only.`;
+    const groups = this.pendingReviewGroups({ chatId, scope: chatId ? 'current' : 'all', allEvents, hiddenOnly });
     const visibleCount = Math.min(groups.length, 5);
     const lines = groups.slice(0, 5).map((events, index) => {
       const suffix = events.length > 1 ? ` (+${events.length - 1} more)` : '';
@@ -1436,15 +1588,17 @@ export class TelegramShieldBot {
     });
     const queueNote = groups.length > visibleCount ? `Showing the first ${visibleCount} targets. Clear a few and reopen the review panel to continue through the queue.` : 'Tap a button below to open a review item.';
     return [
-      `Latest pending review items (${reviews.length})`,
+      `${hiddenOnly ? 'Hidden' : 'Latest pending'} review items for this channel (${reviews.length})`,
       ...lines,
       '',
-      queueNote
+      queueNote,
+      ...(!hiddenOnly && otherReviews.length ? ['', `Other-channel context: ${otherReviews.length} pending item${otherReviews.length === 1 ? '' : 's'} not actionable here.`] : [])
     ].join('\n');
   }
 
-  pendingReviewsKeyboard(requesterId) {
-    const groups = this.pendingReviewGroups().slice(0, 5);
+  pendingReviewsKeyboard(requesterId, chatId = '', options = {}) {
+    const { hiddenOnly = false } = options || {};
+    const groups = this.pendingReviewGroups({ chatId, scope: chatId ? 'current' : 'all', hiddenOnly }).slice(0, 5);
     const rows = groups.flatMap((events, index) => {
       const event = events[0];
       const label = `🔎 ${index + 1}. ${displayName(event.user || event.payload?.target || {})}`.slice(0, 28);
@@ -1454,12 +1608,14 @@ export class TelegramShieldBot {
     return rows;
   }
 
-  reviewPanelKeyboard(requesterId, filter = 'flags') {
+  reviewPanelKeyboard(requesterId, filter = 'flags', chatId = '') {
     const rows = [[
       button('🚨 Reviews', callbackData('review-tab', requesterId, 'flags')),
+      button('🙈 Hidden', callbackData('review-tab', requesterId, 'hidden')),
       button('🔇 Mutes', callbackData('review-tab', requesterId, 'mutes'))
     ]];
-    if (filter === 'flags') rows.push(...this.pendingReviewsKeyboard(requesterId).filter((row) => row[0]?.callback_data?.includes('review-open')));
+    if (filter === 'flags') rows.push(...this.pendingReviewsKeyboard(requesterId, chatId).filter((row) => row[0]?.callback_data?.includes('review-open')));
+    if (filter === 'hidden') rows.push(...this.pendingReviewsKeyboard(requesterId, chatId, { hiddenOnly: true }).filter((row) => row[0]?.callback_data?.includes('review-open')));
     rows.push(...this.mainNavKeyboard(requesterId, { includeReview: false }));
     return rows;
   }
@@ -1470,7 +1626,15 @@ export class TelegramShieldBot {
         button('🚫 Confirm scam', callbackData('review-confirm', requesterId, shortId(eventId))),
         button('✅ Reject flag', callbackData('review-reject', requesterId, shortId(eventId)))
       ],
+      [button('🙈 Hide here', callbackData('review-hide', requesterId, shortId(eventId)))],
       [button('↩️ Back to queue', callbackData('review-list', requesterId))]
+    ];
+  }
+
+  hiddenReviewActionKeyboard(requesterId, eventId) {
+    return [
+      [button('👁️ Unhide here', callbackData('review-unhide', requesterId, shortId(eventId)))],
+      [button('↩️ Back to hidden', callbackData('review-tab', requesterId, 'hidden'))]
     ];
   }
 
@@ -1501,23 +1665,32 @@ export class TelegramShieldBot {
 
   async sendPendingReviews(message, extra = {}) {
     const requesterId = message.from?.id || message.from?.username || '';
-    const text = this.formatPendingReviews();
-    const rows = this.pendingReviewsKeyboard(requesterId);
+    const text = this.formatPendingReviews(message.chat?.id);
+    const rows = this.pendingReviewsKeyboard(requesterId, message.chat?.id);
     const sent = await this.sendInteractiveReply(message.chat.id, text, rows, { reply_to_message_id: message.message_id, parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
-    this.lastPendingReviewsByChat.set(String(message.chat.id), this.pendingReviewGroups().slice(0, 15));
+    this.lastPendingReviewsByChat.set(String(message.chat.id), this.pendingReviewGroups({ chatId: message.chat?.id, scope: 'current' }).slice(0, 15));
     return sent;
   }
 
   formatReviewDetail(event) {
     const target = event.user || event.payload?.target || {};
     const evidence = (event.payload?.evidence || []).slice(0, 5).map((item) => `- ${escapeHtml(item)}`).join('\n') || '- No evidence recorded.';
+    const sourceLink = sourceMessageLink(event);
+    const dkgRefs = (event.payload?.dkg_evidence || []).slice(0, 3).map((item) => item?.ual || item?.eventId || '').filter(Boolean);
+    const sourceLines = [
+      sourceLink ? `- <a href="${escapeHtml(sourceLink)}">Source message</a>` : '',
+      ...dkgRefs.map((ref) => `- ${escapeHtml(ref)}`),
+      event.dkg?.ual ? `- ${escapeHtml(event.dkg.ual)}` : ''
+    ].filter(Boolean);
     return [
       `Review ${shortId(event.id)}`,
       `${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}`,
       `Confidence: ${event.payload?.confidence ?? 0}% | Type: ${escapeHtml(event.payload?.scam_type || event.event_type)}`,
+      `Channel: ${escapeHtml(event.payload?.target_chat_title || event.chat?.title || event.payload?.target_chat_id || event.chat?.id || 'unknown')}`,
       '',
       'Evidence:',
       evidence,
+      ...(sourceLines.length ? ['', 'Sources:', ...sourceLines] : []),
       '',
       'Choose the final admin decision below.'
     ].join('\n');
@@ -1605,7 +1778,7 @@ export class TelegramShieldBot {
   banlistKeyboard(requesterId) {
     return [
       [button('🛡️ Pending reviews', callbackData('review-list', requesterId)), button('🔇 Mutes', callbackData('review-tab', requesterId, 'mutes'))],
-      ...this.mainNavKeyboard(requesterId)
+      ...this.mainNavKeyboard(requesterId, { includeReview: false })
     ];
   }
 
@@ -1654,11 +1827,15 @@ export class TelegramShieldBot {
   settingsText(chatId) {
     const challengeOn = this.chatJoinChallengeEnabled(chatId);
     const languageOn = this.chatConversationalEnabled(chatId);
+    const reviewNoticesOn = this.chatPendingReviewNotificationsEnabled(chatId);
+    const reviewNoticeHours = this.chatPendingReviewNotificationIntervalHours(chatId);
     return [
       '⚙️ Tracabot settings',
       '',
       `🚪 Join challenge: ${challengeOn ? '✅ on' : '⚪ off'}`,
       `🧠 Natural language: ${languageOn ? '✅ on' : '⚪ off'}`,
+      `🛡️ Review notifications: ${reviewNoticesOn ? '✅ on' : '⚪ off'}`,
+      `⏱️ Review notification interval: ${reviewNoticeHours}h`,
       '',
       'Tap a toggle below to switch the setting for this chat.'
     ].join('\n');
@@ -1667,8 +1844,12 @@ export class TelegramShieldBot {
   settingsKeyboard(requesterId, chatId = '') {
     const challengeOn = this.chatJoinChallengeEnabled(chatId);
     const languageOn = this.chatConversationalEnabled(chatId);
+    const reviewNoticesOn = this.chatPendingReviewNotificationsEnabled(chatId);
+    const reviewNoticeHours = this.chatPendingReviewNotificationIntervalHours(chatId);
+    const nextHours = reviewNoticeHours === 6 ? 12 : reviewNoticeHours === 12 ? 24 : 6;
     return [
       [button(`${challengeOn ? '✅' : '⚪'} Join challenge`, callbackData('challenge-set', requesterId, challengeOn ? 'off' : 'on')), button(`${languageOn ? '✅' : '⚪'} Natural language`, callbackData('conversation-set', requesterId, languageOn ? 'off' : 'on'))],
+      [button(`${reviewNoticesOn ? '✅' : '⚪'} Review notices`, callbackData('review-notice-set', requesterId, reviewNoticesOn ? 'off' : 'on')), button(`⏱️ ${reviewNoticeHours}h`, callbackData('review-notice-interval', requesterId, String(nextHours)))],
       [button('🩺 Status', callbackData('status', requesterId))],
       ...this.mainNavKeyboard(requesterId)
     ];
@@ -1899,7 +2080,7 @@ export class TelegramShieldBot {
     const reports = count(['report_review_needed', 'report_submitted']);
     const decisions = count(['review_upheld', 'review_overturned']);
     const queueLine = reviews.length
-      ? `${reviews.length} admin reviews waiting. Open Reviews to clear the queue.`
+      ? `${reviews.length} admin reviews waiting across local memory. Open Reviews for this channel queue.`
       : 'Review queue clear.';
     const actionLine = [
       protectedActions ? `${protectedActions} protection actions` : '',
@@ -2008,7 +2189,7 @@ export class TelegramShieldBot {
       }
     }
 
-    let targetEvents = selectedGroup?.length ? selectedGroup : target ? this.pendingReviewItems().filter((event) => eventMatchesTarget(event, target)) : [];
+    let targetEvents = selectedGroup?.length ? selectedGroup : target ? this.pendingReviewItems({ chatId: message.chat?.id, scope: 'current' }).filter((event) => eventMatchesTarget(event, target)) : [];
 
     if (extraEvent && !targetEvents.some(e => e.id === extraEvent.id)) {
       targetEvents = [extraEvent, ...targetEvents];
@@ -2026,7 +2207,7 @@ export class TelegramShieldBot {
     return true;
   }
 
-  async recordReviewDecisionForEvents(message, events = [], decision = 'reject', reason = '', { target = null, evidencePrefix = 'admin reviewed scam flag', extraPayload = {} } = {}) {
+  async recordReviewDecisionForEvents(message, events = [], decision = 'reject', reason = '', { target = null, evidencePrefix = 'admin reviewed scam flag', extraPayload = {}, reviewChatId = '' } = {}) {
     const unique = new Map();
     for (const event of events) {
       if (event?.id && this.isPendingReviewEvent(event)) unique.set(event.id, event);
@@ -2036,6 +2217,9 @@ export class TelegramShieldBot {
     const reviewDecision = decision === 'reject' ? 'reject' : 'confirm';
     const artifactWrites = await Promise.all([...unique.values()].map(async (reviewedEvent) => {
       const reviewedTarget = reviewedEvent?.user || reviewedEvent?.payload?.target || target || {};
+      const targetChatId = eventChatKey(reviewedEvent);
+      const actualReviewChatId = chatKey(reviewChatId || message.chat?.id || '');
+      const sameChannelReview = !targetChatId || !actualReviewChatId || sameChat(targetChatId, actualReviewChatId);
       const event = await this.record(reviewEventType, message, {
         target_event_id: reviewedEvent.id,
         review_decision: reviewDecision,
@@ -2043,10 +2227,19 @@ export class TelegramShieldBot {
         reviewer,
         reviewed_target: reviewedTarget,
         reviewed_target_key: targetKey(reviewedTarget),
+        target_chat_id: targetChatId,
+        target_chat_title: reviewedEvent.payload?.target_chat_title || reviewedEvent.chat?.title || '',
+        target_chat_type: reviewedEvent.payload?.target_chat_type || reviewedEvent.chat?.type || '',
+        review_chat_id: actualReviewChatId,
+        review_chat_title: message.chat?.title || '',
+        review_scope: sameChannelReview ? 'same_channel' : 'cross_channel',
+        review_jurisdiction: sameChannelReview ? 'local_channel' : 'context_only',
+        review_weight: sameChannelReview ? 1 : 0.5,
+        decision_threshold: sameChannelReview ? 1 : 2,
         ...this.reviewTrustPayload(reviewer),
         ...extraPayload,
         false_positive_reason: decision === 'reject' ? reason : '',
-        resolves_target_pending_reviews: true,
+        resolves_target_pending_reviews: sameChannelReview,
         evidence: [`${evidencePrefix} ${reviewedEvent.id}: ${reason}`]
       });
       return { reviewedEvent, event };
@@ -2055,9 +2248,14 @@ export class TelegramShieldBot {
   }
 
   recordReviewDecisionInBackground(message, events = [], decision = 'reject', reason = '', options = {}) {
-    const expectedCount = [...new Set(events.map((event) => event?.id).filter(Boolean))].length;
+    const eventIds = [...new Set(events.filter((event) => event?.id && this.isPendingReviewEvent(event)).map((event) => event.id))];
+    const selectedEvents = events.filter((event) => eventIds.includes(event?.id));
+    const expectedCount = eventIds.length;
     this._reviewCache = { pending: null, watches: null, lastUpdate: 0 };
-    this.recordReviewDecisionForEvents(message, events, decision, reason, options)
+    const write = this.recordReviewDecisionForEvents(message, selectedEvents, decision, reason, options);
+    for (const id of eventIds) this.optimisticReviewedEventIds.add(id);
+    write
+      .then(() => { this._reviewCache = { pending: null, watches: null, lastUpdate: 0 }; })
       .catch((error) => console.error(`Review evidence write failed for ${expectedCount || 'unknown'} item(s): ${error instanceof Error ? error.message : String(error)}`));
     return expectedCount;
   }
@@ -2293,7 +2491,7 @@ export class TelegramShieldBot {
     }
     if (WATCHLIST_INTENT_RE.test(text)) {
       if (!trusted) await this.sendEphemeral(chatId, 'Mutes and review details are admin-only. I can still check scam risk for you.', replyOptions);
-      else await this.sendInteractiveReply(chatId, this.formatReviewPanel('mutes'), this.reviewPanelKeyboard(message.from?.id || message.from?.username || '', 'mutes'), { ...replyOptions, parse_mode: 'HTML', disable_web_page_preview: true });
+      else await this.sendInteractiveReply(chatId, this.formatReviewPanel('mutes', chatId), this.reviewPanelKeyboard(message.from?.id || message.from?.username || '', 'mutes', chatId), { ...replyOptions, parse_mode: 'HTML', disable_web_page_preview: true });
       return true;
     }
     if (STATS_INTENT_RE.test(text)) {
@@ -2502,10 +2700,11 @@ export class TelegramShieldBot {
     const reviewedTarget = targetEvent?.user || targetEvent?.payload?.target || context.target || {};
 
     if (trusted && classified.intent === 'admin_review' && classified.decision && explicitAdminDecision) {
-      const targetEvents = this.pendingReviewItems().filter((event) => eventMatchesTarget(event, reviewedTarget));
+      const targetEvents = this.pendingReviewItems({ chatId, scope: 'current' }).filter((event) => eventMatchesTarget(event, reviewedTarget));
       if (targetEvent && !targetEvents.some((event) => event.id === targetEvent.id)) targetEvents.unshift(targetEvent);
       const { artifactWrites } = await this.recordReviewDecisionForEvents(message, targetEvents, classified.decision, reason, {
         target: reviewedTarget,
+        reviewChatId: chatId,
         evidencePrefix: `LLM classified admin alert reply as ${classified.decision}`,
         extraPayload: {
           implicit_detection: true,
@@ -2592,7 +2791,7 @@ export class TelegramShieldBot {
       if (!trusted) {
         await this.sendEphemeral(chatId, 'Review details and mutes are admin-only. I can still check scam risk for you.', replyOptions);
       } else {
-        await this.sendInteractiveReply(chatId, this.formatReviewPanel(filter), this.reviewPanelKeyboard(message.from?.id || message.from?.username || '', filter), { ...replyOptions, parse_mode: 'HTML', disable_web_page_preview: true });
+        await this.sendInteractiveReply(chatId, this.formatReviewPanel(filter, chatId), this.reviewPanelKeyboard(message.from?.id || message.from?.username || '', filter, chatId), { ...replyOptions, parse_mode: 'HTML', disable_web_page_preview: true });
       }
       return { handled: true };
     }
@@ -2779,10 +2978,11 @@ export class TelegramShieldBot {
       const decision = isReject ? 'reject' : 'confirm';
       const reason = parameters.reason || `implicit review decision via LLM context: ${decisionRaw || 'admin verdict'}`;
       const reviewedTarget = targetEvent.user || targetEvent.payload?.target || {};
-      const targetEvents = this.pendingReviewItems().filter((event) => eventMatchesTarget(event, reviewedTarget));
+      const targetEvents = this.pendingReviewItems({ chatId, scope: 'current' }).filter((event) => eventMatchesTarget(event, reviewedTarget));
       if (!targetEvents.some((event) => event.id === targetEvent.id)) targetEvents.unshift(targetEvent);
       const { reviewed, artifactWrites } = await this.recordReviewDecisionForEvents(message, targetEvents, decision, reason, {
         target: reviewedTarget,
+        reviewChatId: chatId,
         evidencePrefix: 'LLM context admin review',
         extraPayload: {
           implicit_detection: true,
@@ -3874,7 +4074,7 @@ export class TelegramShieldBot {
     }
 
     if (parsed.action === 'review-list') {
-      await this.editInteractiveMessage(chatId, message.message_id, this.formatReviewPanel('flags'), this.reviewPanelKeyboard(requester, 'flags'), { parse_mode: 'HTML', disable_web_page_preview: true });
+      await this.editInteractiveMessage(chatId, message.message_id, this.formatReviewPanel('flags', chatId), this.reviewPanelKeyboard(requester, 'flags', chatId), { parse_mode: 'HTML', disable_web_page_preview: true });
       return true;
     }
     if (parsed.action === 'review-tab') {
@@ -3883,10 +4083,10 @@ export class TelegramShieldBot {
         return true;
       }
       const filter = parsed.parts[1] || 'flags';
-      await this.editInteractiveMessage(chatId, message.message_id, this.formatReviewPanel(filter), this.reviewPanelKeyboard(requester, filter), { parse_mode: 'HTML', disable_web_page_preview: true });
+      await this.editInteractiveMessage(chatId, message.message_id, this.formatReviewPanel(filter, chatId), this.reviewPanelKeyboard(requester, filter, chatId), { parse_mode: 'HTML', disable_web_page_preview: true });
       return true;
     }
-    if (['stats', 'stats-sources', 'campaigns', 'banlist', 'status', 'challenge-set', 'conversation-set', 'help', 'help-scan', 'why'].includes(parsed.action)) {
+    if (['stats', 'stats-sources', 'campaigns', 'banlist', 'status', 'challenge-set', 'conversation-set', 'review-notice-set', 'review-notice-interval', 'help', 'help-scan', 'why'].includes(parsed.action)) {
       if (requester && String(from.id || from.username || '') !== String(requester)) {
         await this.answerCallback(query.id, 'Open your own panel to use these buttons.');
         return true;
@@ -3920,15 +4120,23 @@ export class TelegramShieldBot {
         await this.editInteractiveMessage(chatId, message.message_id, await this.formatStatus(callbackMessage), this.settingsKeyboard(requester, chatId));
         return true;
       }
-      if (parsed.action === 'challenge-set' || parsed.action === 'conversation-set') {
+      if (parsed.action === 'challenge-set' || parsed.action === 'conversation-set' || parsed.action === 'review-notice-set' || parsed.action === 'review-notice-interval') {
         if (!trusted) {
           await this.answerCallback(query.id, 'Admin only');
           return true;
         }
         const value = parsed.parts[1] || 'status';
-        const setting = parsed.action === 'challenge-set' ? 'join_challenge_setting_changed' : 'conversational_setting_changed';
-        if (value === 'on' || value === 'off') {
-          await this.record(setting, callbackMessage, { enabled: value === 'on', moderator: from, evidence: [`admin turned ${parsed.action === 'challenge-set' ? 'new-user join challenge' : 'conversation mode'} ${value}`] }, { writeDkg: false });
+        if (parsed.action === 'review-notice-interval') {
+          const intervalHours = Number(value);
+          if ([6, 12, 24].includes(intervalHours)) {
+            await this.record('pending_review_notification_interval_changed', callbackMessage, { interval_hours: intervalHours, moderator: from, evidence: [`admin set pending review notification interval to ${intervalHours}h`] }, { writeDkg: false });
+          }
+        } else {
+          const setting = parsed.action === 'challenge-set' ? 'join_challenge_setting_changed' : parsed.action === 'conversation-set' ? 'conversational_setting_changed' : 'pending_review_notification_setting_changed';
+          const label = parsed.action === 'challenge-set' ? 'new-user join challenge' : parsed.action === 'conversation-set' ? 'conversation mode' : 'pending review notifications';
+          if (value === 'on' || value === 'off') {
+            await this.record(setting, callbackMessage, { enabled: value === 'on', moderator: from, evidence: [`admin turned ${label} ${value}`] }, { writeDkg: false });
+          }
         }
         await this.editInteractiveMessage(chatId, message.message_id, this.settingsText(chatId), this.settingsKeyboard(requester, chatId));
         return true;
@@ -3952,7 +4160,40 @@ export class TelegramShieldBot {
         await this.answerCallback(query.id, 'Already reviewed or expired');
         return true;
       }
-      await this.editInteractiveMessage(chatId, message.message_id, this.formatReviewDetail(event), this.reviewActionKeyboard(requester, event.id), { parse_mode: 'HTML', disable_web_page_preview: true });
+      if (eventChatKey(event) && !sameChat(eventChatKey(event), chatId)) {
+        await this.answerCallback(query.id, 'Review belongs to another channel');
+        return true;
+      }
+      const hidden = this.isReviewHiddenForChat(event, chatId);
+      await this.editInteractiveMessage(chatId, message.message_id, this.formatReviewDetail(event), hidden ? this.hiddenReviewActionKeyboard(requester, event.id) : this.reviewActionKeyboard(requester, event.id), { parse_mode: 'HTML', disable_web_page_preview: true });
+      return true;
+    }
+    if (parsed.action === 'review-hide' || parsed.action === 'review-unhide') {
+      const event = this.findEvent(eventId);
+      if (!event) {
+        await this.answerCallback(query.id, 'Review item not found');
+        return true;
+      }
+      if (!this.isPendingReviewEvent(event)) {
+        await this.answerCallback(query.id, 'Already reviewed or expired');
+        return true;
+      }
+      const hidden = parsed.action === 'review-hide';
+      const target = event.user || event.payload?.target || {};
+      await this.record(hidden ? 'review_hidden' : 'review_unhidden', callbackMessage, {
+        target_event_id: event.id,
+        reviewed_target: target,
+        review_chat_id: chatId,
+        moderator: from,
+        evidence: [`admin ${hidden ? 'hid' : 'unhid'} review ${shortId(event.id)} in this channel`]
+      }, { writeDkg: false });
+      await this.editInteractiveMessage(
+        chatId,
+        message.message_id,
+        hidden ? `🙈 Hidden here. This review will not notify this channel. Use Hidden to unhide it later.` : `👁️ Unhidden here. This review is back in this channel queue.`,
+        [[button(hidden ? '🙈 Hidden reviews' : '↩️ Back to queue', callbackData('review-tab', requester, hidden ? 'hidden' : 'flags')), button('✖️ Close', callbackData('close', requester))]],
+        { parse_mode: 'HTML' }
+      );
       return true;
     }
     if (parsed.action === 'review-confirm' || parsed.action === 'review-reject') {
@@ -3962,12 +4203,17 @@ export class TelegramShieldBot {
         await this.answerCallback(query.id, 'Already reviewed or expired');
         return true;
       }
+      if (eventChatKey(event) && !sameChat(eventChatKey(event), chatId)) {
+        await this.answerCallback(query.id, 'Review belongs to another channel');
+        return true;
+      }
       const finalDecision = parsed.action === 'review-confirm' ? 'confirm' : 'reject';
       const reason = finalDecision === 'confirm' ? 'admin confirmed scam flag' : 'admin rejected scam flag as false positive';
       const target = event.user || event.payload?.target || {};
       const events = this.pendingReviewGroupForEvent(event);
       const reviewedCount = this.recordReviewDecisionInBackground(callbackMessage, events, finalDecision, reason, {
         target,
+        reviewChatId: chatId,
         evidencePrefix: `admin callback ${finalDecision === 'confirm' ? 'confirmed scam flag' : 'rejected scam flag'}`
       });
       const cleared = reviewedCount > 1 ? `\nCleared ${reviewedCount} pending reviews for ${userMention(target)}.` : '';
@@ -3987,8 +4233,8 @@ export class TelegramShieldBot {
       const target = event.user || event.payload?.target || {};
       if (parsed.action === 'warn-safe') {
         const reason = 'admin marked prior-community warning as safe';
-        const events = this.pendingReviewItems().filter((item) => eventMatchesTarget(item, target));
-        const reviewedCount = this.recordReviewDecisionInBackground(callbackMessage, events, 'reject', reason, { target, evidencePrefix: 'admin callback marked warning safe' });
+        const events = this.pendingReviewItems({ chatId, scope: 'current' }).filter((item) => eventMatchesTarget(item, target));
+        const reviewedCount = this.recordReviewDecisionInBackground(callbackMessage, events, 'reject', reason, { target, reviewChatId: chatId, evidencePrefix: 'admin callback marked warning safe' });
         await this.editInteractiveMessage(chatId, message.message_id, `✅ Marked ${userMention(target)} as safe.\n\nCleared ${reviewedCount} pending review${reviewedCount === 1 ? '' : 's'}. Saving evidence to TRACaBot context memory.`, [[button('↩️ Back to queue', callbackData('review-list', requester)), button('✖️ Close', callbackData('close', requester))]], { parse_mode: 'HTML' });
         return true;
       }
@@ -4257,14 +4503,12 @@ export class TelegramShieldBot {
       timeout: 25,
       allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member']
     });
-    const background = [];
     for (const update of updates) {
+      if (update.callback_query) await this.handleCallbackQuery(update.callback_query);
+      else if (update.message) await this.handleMessage(update.message);
+      else if (update.chat_member) await this.handleChatMemberUpdate(update.chat_member);
       this.offset = update.update_id + 1;
-      if (update.callback_query) background.push(this.handleCallbackQuery(update.callback_query));
-      else if (update.message) background.push(this.handleMessage(update.message));
-      else if (update.chat_member) background.push(this.handleChatMemberUpdate(update.chat_member));
     }
-    if (background.length) await Promise.allSettled(background);
     this.proactiveScan().catch((error) => console.error(`proactive scan failed: ${error instanceof Error ? error.message : String(error)}`));
     this.expireJoinChallenges().catch((error) => console.error(`join challenge expiry failed: ${error instanceof Error ? error.message : String(error)}`));
     this.maybePostDailySafeTip().catch((error) => console.error(`daily safe tip failed: ${error instanceof Error ? error.message : String(error)}`));
@@ -4329,56 +4573,12 @@ export class TelegramShieldBot {
   }
 
   async maybeSurfaceCrossGroupWarning(warningEvent, message, targetUser) {
-    // Option A: make cross-group prior-admin intelligence visible and actionable in real time
     if (!warningEvent || !this.config.proactiveAlertCrossGroup) return null;
-
     const chatId = message?.chat?.id;
     if (!chatId) return null;
-
     const key = `${chatId}:${targetKey(targetUser)}`;
-    const intervalMs = 24 * 60 * 60 * 1000; // disciplined: once per actor per chat per day max
-    const last = this.lastCrossGroupWarningAt.get(key) || 0;
-    if (Date.now() - last < intervalMs) return null;
-
-    const alertText = this.formatPriorCommunityWarning(warningEvent, targetUser);
-    const target = targetUser || warningEvent.payload?.target || {};
-    let sent = null;
-    try {
-      sent = await this.send(chatId, alertText, {
-        reply_to_message_id: message?.message_id || undefined,
-        reply_markup: inlineKeyboard(this.warningActionKeyboard(warningEvent.id, target))
-      });
-      // Enable quick follow-up from the posted alert (same pattern as alertAdmins)
-      if (sent?.message_id) {
-        this.reviewMessageEvents.set(`${chatId}:${sent.message_id}`, warningEvent.id);
-      }
-    } catch (e) {
-      // non-fatal; still try admin DMs
-    }
-
-    // DM configured admins (best-effort; Telegram requires prior DM initiation from user)
-    const adminDms = [];
-    for (const adminId of this.config.adminIds) {
-      try {
-        await this.send(adminId, `🛡️ Cross-group alert in chat ${chatId}:\n\n${alertText}`);
-        adminDms.push(adminId);
-      } catch {
-        // silent; user must have DM'd the bot first
-      }
-    }
-
-    this.lastCrossGroupWarningAt.set(key, Date.now());
-
-    // Lightweight provenance artefact so the action of surfacing is itself part of memory
-    await this.recordConversationArtifact({ chat: { id: chatId } }, {
-      risk: { scam_type: 'cross_group_prior_action', confidence: 80 },
-      text: alertText,
-      artifactKind: 'proactive_cross_group_alert',
-      conversationRole: 'guardian',
-      sourceEventIds: [warningEvent.id]
-    }).catch(() => {});
-
-    return { sent, adminDms, warningEventId: warningEvent.id };
+    const sent = await this.maybeNotifyPendingReview(warningEvent);
+    return { sent, adminDms: [], warningEventId: warningEvent.id };
   }
 
   async dropPendingUpdates() {

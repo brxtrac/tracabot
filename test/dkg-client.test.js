@@ -18,27 +18,14 @@ function makeAdapterClient({ publishError = null } = {}) {
         triplesWritten: quads.length
       };
     },
-    async createAssertion(contextGraphId, name) {
-      calls.push(['createAssertion', contextGraphId, name]);
-      return { assertionUri: `did:dkg:context-graph:${contextGraphId}/_wm/${name}` };
+    async createKnowledgeAsset(contextGraphId, name, opts) {
+      calls.push(['createKnowledgeAsset', contextGraphId, name, opts]);
+      return { assertionUri: `did:dkg:context-graph:${contextGraphId}/_wm/${name}`, shareOperationId: 'swm-test', graph: `did:dkg:context-graph:${contextGraphId}/_shared_memory`, triplesWritten: opts.quads.length };
     },
-    async writeAssertion(contextGraphId, name, quads) {
-      calls.push(['writeAssertion', contextGraphId, name, quads]);
-      return { triplesWritten: quads.length };
-    },
-    async promoteAssertion(contextGraphId, name, opts) {
-      calls.push(['promoteAssertion', contextGraphId, name, opts]);
-      return { shareOperationId: 'swm-test', graph: `did:dkg:context-graph:${contextGraphId}/_shared_memory` };
-    },
-    async publishSharedMemory(contextGraphId, opts) {
-      calls.push(['publishSharedMemory', contextGraphId, opts]);
+    async knowledgeAssetPublish(contextGraphId, name) {
+      calls.push(['knowledgeAssetPublish', contextGraphId, name]);
       if (publishError) throw publishError;
-      return { status: 'published', rootEntities: opts.rootEntities };
-    },
-    async post(path, body) {
-      calls.push(['post', path, body]);
-      if (publishError) throw publishError;
-      return { status: 'published', rootEntities: body.selection, publishContextGraphId: body.publishContextGraphId };
+      return { status: 'published', assertionName: name };
     },
     async query() {
       return { result: { bindings: [] } };
@@ -66,23 +53,15 @@ function makeFlakyShareAdapterClient({ failures = [], success = {} } = {}) {
         ...success
       };
     },
-    async createAssertion(contextGraphId, name) {
-      calls.push(['createAssertion', contextGraphId, name]);
+    async createKnowledgeAsset(contextGraphId, name, opts) {
+      calls.push(['createKnowledgeAsset', contextGraphId, name, opts]);
       const failure = failures.shift();
       if (failure) throw failure;
-      return { assertionUri: `did:dkg:context-graph:${contextGraphId}/_wm/${name}` };
+      return { assertionUri: `did:dkg:context-graph:${contextGraphId}/_wm/${name}`, shareOperationId: 'swm-retry-test', graph: `did:dkg:context-graph:${contextGraphId}/_shared_memory`, triplesWritten: opts.quads.length };
     },
-    async writeAssertion(contextGraphId, name, quads) {
-      calls.push(['writeAssertion', contextGraphId, name, quads]);
-      return { triplesWritten: quads.length };
-    },
-    async promoteAssertion(contextGraphId, name, opts) {
-      calls.push(['promoteAssertion', contextGraphId, name, opts]);
-      return { shareOperationId: 'swm-retry-test', graph: `did:dkg:context-graph:${contextGraphId}/_shared_memory` };
-    },
-    async publishSharedMemory(contextGraphId, opts) {
-      calls.push(['publishSharedMemory', contextGraphId, opts]);
-      return { status: 'published', rootEntities: opts.rootEntities };
+    async knowledgeAssetPublish(contextGraphId, name) {
+      calls.push(['knowledgeAssetPublish', contextGraphId, name]);
+      return { status: 'published', assertionName: name };
     },
     async query() {
       return { result: { bindings: [] } };
@@ -375,7 +354,8 @@ test('auto-publishes high-confidence fraud findings to the context graph', async
   });
   assert.ok(result.publish);
   assert.ok(adapterClient.calls.some(([method, id, name]) => method === 'createContextGraph' && id === 'tracabot' && /TRACaBot/.test(name)));
-  assert.ok(adapterClient.calls.some(([method, contextGraphId, opts]) => method === 'publishSharedMemory' && contextGraphId === 'tracabot' && opts.rootEntities.includes('https://tracabot.org/ontology#event/evt-auto')));
+  assert.ok(adapterClient.calls.some(([method, contextGraphId, name]) => method === 'knowledgeAssetPublish' && contextGraphId === 'tracabot' && name === 'tracabot-event-evt-auto'));
+  assert.ok(adapterClient.calls.some(([method, contextGraphId, name, opts]) => method === 'createKnowledgeAsset' && contextGraphId === 'tracabot' && name === 'tracabot-event-evt-auto' && opts.alsoShareSwm === true));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#actorAlias') && triple.object === '"badactor"'));
 });
 
@@ -390,7 +370,7 @@ test('verified-memory publish stays off unless explicitly enabled', async () => 
     payload: { confidence: 99, local_confidence: 99, evidence: ['strong scam evidence'] }
   });
   assert.equal(result.publish, undefined);
-  assert.equal(adapterClient.calls.some(([method]) => method === 'publishSharedMemory'), false);
+  assert.equal(adapterClient.calls.some(([method]) => method === 'knowledgeAssetPublish'), false);
 });
 
 test('writes scam domains as DKG indicators', async () => {
@@ -492,6 +472,16 @@ test('writes unsafe chat event publication and review metadata', async () => {
       community_type: 'telegram_group',
       policy_id: 'strict-v1',
       message_text: 'official support says verify wallet now',
+      target_chat_id: '-100123',
+      target_chat_title: 'Example DAO',
+      target_chat_type: 'supergroup',
+      source_message_id: 42,
+      source_message_text_excerpt: 'official support says verify wallet now',
+      detected_at: '2026-04-30T00:00:00.000Z',
+      evidence_basis: 'prior_admin_action',
+      prior_admin_action_id: 'evt-prior-ban',
+      similarity_basis: 'same username and lure',
+      urgent_admin_alert: true,
       admin_verified: true,
       publication_status: 'context_graph_auto_publish_eligible',
       evidence: ['wallet verification lure'],
@@ -508,6 +498,14 @@ test('writes unsafe chat event publication and review metadata', async () => {
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#policyId') && triple.object === '"strict-v1"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#publicationStatus') && triple.object === '"context_graph_auto_publish_eligible"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#messageText') && /verify wallet/.test(triple.object)));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetChatId') && triple.object === '"-100123"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetChatTitle') && triple.object === '"Example DAO"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#sourceMessageId') && triple.object === '"42"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#sourceMessageTextExcerpt') && /verify wallet/.test(triple.object)));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#evidenceBasis') && triple.object === '"prior_admin_action"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#priorAdminActionId') && triple.object === '"evt-prior-ban"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#similarityBasis') && triple.object === '"same username and lure"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#urgentAdminAlert') && triple.object === '"true"'));
   assert.ok(result.triples.some((triple) => triple.predicate === 'rdf:type' && triple.object === 'http://dkg.io/ontology#KnowledgeAsset'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#hasEvidence')));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#evidenceText') && /wallet verification/.test(triple.object)));
@@ -542,7 +540,7 @@ test('writes channel observations to shared memory without verified publish', as
       evidence: ['Investment-profit testimonial lure']
     }
   });
-  assert.equal(adapterClient.calls.some(([method]) => method === 'publishSharedMemory'), false);
+  assert.equal(adapterClient.calls.some(([method]) => method === 'knowledgeAssetPublish'), false);
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#lifecycleStage') && triple.object === '"shared_memory"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#observationType') && triple.object === '"high_confidence_channel_message"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#messageText') && /alpha signals/.test(triple.object)));
@@ -570,7 +568,7 @@ test('auto-publishes accepted high-confidence reports to the context graph', asy
     }
   });
   assert.ok(result.publish);
-  assert.ok(adapterClient.calls.some(([method, contextGraphId, opts]) => method === 'publishSharedMemory' && contextGraphId === 'tracabot' && opts.rootEntities.includes('https://tracabot.org/ontology#event/evt-report-auto')));
+  assert.ok(adapterClient.calls.some(([method, contextGraphId, name]) => method === 'knowledgeAssetPublish' && contextGraphId === 'tracabot' && name === 'tracabot-event-evt-report-auto'));
 });
 
 test('publishes unsafe chat events only when admin verified or very high confidence', async () => {
@@ -585,7 +583,7 @@ test('publishes unsafe chat events only when admin verified or very high confide
     user: { id: 'user' },
     payload: { confidence: 75, local_confidence: 70, scam_type: 'phishing', evidence: ['phishing lure'] }
   });
-  assert.equal(sharedOnly.calls.some(([method]) => method === 'publishSharedMemory'), false);
+  assert.equal(sharedOnly.calls.some(([method]) => method === 'knowledgeAssetPublish'), false);
 
   const verified = makeAdapterClient();
   const verifiedDkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient: verified });
@@ -598,7 +596,7 @@ test('publishes unsafe chat events only when admin verified or very high confide
     user: { id: 'user' },
     payload: { confidence: 75, local_confidence: 70, admin_verified: true, scam_type: 'phishing', evidence: ['admin verified phishing lure'] }
   });
-  assert.equal(verified.calls.some(([method]) => method === 'publishSharedMemory'), true);
+  assert.equal(verified.calls.some(([method]) => method === 'knowledgeAssetPublish'), true);
 });
 
 test('review decisions require explicit admin verification before verified publish', async () => {
@@ -613,7 +611,7 @@ test('review decisions require explicit admin verification before verified publi
     user: { id: 'user' },
     payload: { review_decision: 'confirm', confidence: 90, evidence: ['admin text without explicit verification flag'] }
   });
-  assert.equal(unverifiedUpheld.calls.some(([method]) => method === 'publishSharedMemory'), false);
+  assert.equal(unverifiedUpheld.calls.some(([method]) => method === 'knowledgeAssetPublish'), false);
 
   const verifiedUpheld = makeAdapterClient();
   const verifiedDkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient: verifiedUpheld });
@@ -626,7 +624,7 @@ test('review decisions require explicit admin verification before verified publi
     user: { id: 'user' },
     payload: { review_decision: 'confirm', admin_verified: true, confidence: 90, evidence: ['explicit admin verification'] }
   });
-  assert.equal(verifiedUpheld.calls.some(([method]) => method === 'publishSharedMemory'), true);
+  assert.equal(verifiedUpheld.calls.some(([method]) => method === 'knowledgeAssetPublish'), true);
 
   const falsePositive = makeAdapterClient();
   const falsePositiveDkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient: falsePositive });
@@ -639,7 +637,7 @@ test('review decisions require explicit admin verification before verified publi
     user: { id: 'user' },
     payload: { review_decision: 'reject', admin_verified: true, publish_false_positive: true, trac_backed_global_authority: true, confidence: 90, evidence: ['false positive correction'] }
   });
-  assert.equal(falsePositive.calls.some(([method]) => method === 'publishSharedMemory'), true);
+  assert.equal(falsePositive.calls.some(([method]) => method === 'knowledgeAssetPublish'), true);
 });
 
 test('review-overturned events write reviewed target identity for global admin clears', async () => {
@@ -658,6 +656,16 @@ test('review-overturned events write reviewed target identity for global admin c
       trac_backed_global_authority: true,
       verified_memory_authority: true,
       decision_scope: 'global_verified_memory',
+      target_chat_id: '-100123',
+      target_chat_title: 'Example DAO',
+      target_chat_type: 'supergroup',
+      review_chat_id: '-100123',
+      review_chat_title: 'Example DAO',
+      review_scope: 'same_channel',
+      review_jurisdiction: 'local_channel',
+      review_weight: 1,
+      decision_threshold: 1,
+      resolves_target_pending_reviews: true,
       trust_basis: 'bot_owner_verified_memory_trac',
       confidence: 100,
       reviewed_target: { id: '4242', username: 'safeuser', first_name: 'Safe' },
@@ -671,6 +679,12 @@ test('review-overturned events write reviewed target identity for global admin c
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetKey') && triple.object === '"id:4242"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#trustedGlobalClear') && triple.object === '"true"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#decisionScope') && triple.object === '"global_verified_memory"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#reviewChatId') && triple.object === '"-100123"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#reviewScope') && triple.object === '"same_channel"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#reviewJurisdiction') && triple.object === '"local_channel"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#reviewWeight') && triple.object === '"1"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#decisionThreshold') && triple.object === '"1"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#resolvesTargetPendingReviews') && triple.object === '"true"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#tracBackedGlobalAuthority') && triple.object === '"true"'));
 });
 
@@ -700,7 +714,7 @@ test('local admin false-positive reviews are not global clears without TRAC-back
   assert.equal(result.triples.some((triple) => triple.predicate.endsWith('#trustedGlobalClear') && triple.object === '"true"'), false);
 });
 
-test('uses configured on-chain context graph id for verified publish', async () => {
+test('publishes verified events through their named Knowledge Asset', async () => {
   const adapterClient = makeAdapterClient();
   adapterClient.getAuthToken = () => 'test-token';
   const dkg = new DkgClient({ contextGraph: 'tracabot', publishContextGraphId: '13' }, { adapterClient });
@@ -715,10 +729,9 @@ test('uses configured on-chain context graph id for verified publish', async () 
     payload: { confidence: 96, local_confidence: 96, admin_verified: true },
     risk: { confidence: 96, local_confidence: 96, dkg_confidence: 0, scam_type: 'wallet-drain', evidence: [] }
   });
-  const publishCall = adapterClient.calls.find(([method]) => method === 'post');
-  assert.equal(publishCall[1], '/api/shared-memory/publish');
-  assert.equal(publishCall[2].contextGraphId, 'tracabot');
-  assert.equal(publishCall[2].publishContextGraphId, '13');
+  const publishCall = adapterClient.calls.find(([method]) => method === 'knowledgeAssetPublish');
+  assert.equal(publishCall[1], 'tracabot');
+  assert.equal(publishCall[2], 'tracabot-event-evt-on-chain-cg');
 });
 
 test('publishes campaign summaries with evidence roots', async () => {
@@ -754,12 +767,12 @@ test('publishes campaign summaries with evidence roots', async () => {
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#evidenceRoot') && triple.object.endsWith('#event/evt-a')));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#affectedCommunityId') && triple.object === '"-1002"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#campaignEventCount') && triple.object === '"2"'));
-  assert.equal(adapterClient.calls.some(([method]) => method === 'publishSharedMemory'), true);
-  const publishCall = adapterClient.calls.find(([method]) => method === 'publishSharedMemory');
+  assert.equal(adapterClient.calls.some(([method]) => method === 'knowledgeAssetPublish'), true);
+  const publishCall = adapterClient.calls.find(([method]) => method === 'knowledgeAssetPublish');
   assert.equal(publishCall[1], 'tracabot');
-  assert.deepEqual(publishCall[2].sharedMemoryResult, result.share);
+  assert.equal(publishCall[2], 'tracabot-event-campaign-1');
   assert.equal(result.publish.status, 'published');
-  assert.deepEqual(result.publish.rootEntities, ['https://tracabot.org/ontology#event/campaign-1']);
+  assert.equal(result.publish.assertionName, 'tracabot-event-campaign-1');
 });
 
 test('does not publish campaign summaries without two evidence roots', async () => {
@@ -784,7 +797,7 @@ test('does not publish campaign summaries without two evidence roots', async () 
     }
   });
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#publicationStatus') && triple.object === '"shared_memory"'));
-  assert.equal(adapterClient.calls.some(([method]) => method === 'publishSharedMemory'), false);
+  assert.equal(adapterClient.calls.some(([method]) => method === 'knowledgeAssetPublish'), false);
 });
 
 test('retries transient DKG assertion lifecycle failures', async () => {
@@ -805,8 +818,7 @@ test('retries transient DKG assertion lifecycle failures', async () => {
     }
   });
   assert.equal(result.shareOperation, 'swm-retry-test');
-  assert.equal(adapterClient.calls.filter(([method]) => method === 'createAssertion').length, 2);
-  assert.equal(adapterClient.calls.filter(([method]) => method === 'promoteAssertion').length, 1);
+  assert.equal(adapterClient.calls.filter(([method]) => method === 'createKnowledgeAsset').length, 2);
 });
 
 test('does not retry non-transient DKG assertion lifecycle failures', async () => {
@@ -826,8 +838,7 @@ test('does not retry non-transient DKG assertion lifecycle failures', async () =
       evidence: ['non-transient error should not retry']
     }
   }), /invalid RDF payload/);
-  assert.equal(adapterClient.calls.filter(([method]) => method === 'createAssertion').length, 1);
-  assert.equal(adapterClient.calls.filter(([method]) => method === 'promoteAssertion').length, 0);
+  assert.equal(adapterClient.calls.filter(([method]) => method === 'createKnowledgeAsset').length, 1);
 });
 
 test('keeps shared-memory write result when automatic context graph publish fails', async () => {

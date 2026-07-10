@@ -172,3 +172,19 @@ test('loadConfig parses conversation artifact working-memory policy', () => {
   assert.throws(() => loadConfig({ TRACABOT_WM_ARTIFACT_MIN_CONFIDENCE: '120' }), /TRACABOT_WM_ARTIFACT_MIN_CONFIDENCE/);
   assert.throws(() => loadConfig({ TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS: '80' }), /TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS/);
 });
+
+test('loadConfig parses pending review notification policy', () => {
+  const defaults = loadConfig({});
+  assert.equal(defaults.pendingReviewNotifications, true);
+  assert.equal(defaults.pendingReviewNotificationIntervalHours, 12);
+
+  const config = loadConfig({
+    TRACABOT_PENDING_REVIEW_NOTIFICATIONS: 'false',
+    TRACABOT_PENDING_REVIEW_NOTIFICATION_INTERVAL_HOURS: '24'
+  });
+  assert.equal(config.pendingReviewNotifications, false);
+  assert.equal(config.pendingReviewNotificationIntervalHours, 24);
+  assert.throws(() => loadConfig({ TRACABOT_PENDING_REVIEW_NOTIFICATIONS: 'maybe' }), /Invalid boolean/);
+  assert.throws(() => loadConfig({ TRACABOT_PENDING_REVIEW_NOTIFICATION_INTERVAL_HOURS: '0' }), /TRACABOT_PENDING_REVIEW_NOTIFICATION_INTERVAL_HOURS/);
+  assert.throws(() => loadConfig({ TRACABOT_PENDING_REVIEW_NOTIFICATION_INTERVAL_HOURS: '169' }), /TRACABOT_PENDING_REVIEW_NOTIFICATION_INTERVAL_HOURS/);
+});

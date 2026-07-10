@@ -1,4 +1,4 @@
-import { mkdirSync, appendFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, appendFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
 export class EventStore {
@@ -6,18 +6,22 @@ export class EventStore {
     if (!path || path === '.' || path.endsWith('/')) throw new Error('EventStore path must be a file path');
     this.path = resolve(path);
     this.events = null;
+    this.fileSignature = '';
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
   }
 
   append(event) {
     appendFileSync(this.path, `${JSON.stringify(event)}\n`, { mode: 0o600 });
     if (this.events) this.events.push(event);
+    this.fileSignature = this.signature();
   }
 
   all() {
-    if (this.events) return this.events;
+    const signature = this.signature();
+    if (this.events && signature === this.fileSignature) return this.events;
     if (!existsSync(this.path)) {
       this.events = [];
+      this.fileSignature = '';
       return this.events;
     }
     this.events = readFileSync(this.path, 'utf8')
@@ -31,7 +35,14 @@ export class EventStore {
         }
       })
       .filter(Boolean);
+    this.fileSignature = signature;
     return this.events;
+  }
+
+  signature() {
+    if (!existsSync(this.path)) return '';
+    const stat = statSync(this.path);
+    return `${stat.size}:${stat.mtimeMs}`;
   }
 
   stats(days = 7) {

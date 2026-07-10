@@ -32,7 +32,7 @@
     },
     {
       "name": "monitor_chat_event",
-      "description": "Classify an unsafe, scam, spam, phishing, or scam-advertisement chat event and write it to DKG v10 Shared Memory. It is only eligible for verified Context Graph publication when adminVerified is true or confidence is very high.",
+      "description": "Classify an unsafe, scam, spam, phishing, or scam-advertisement chat event. Evidence-backed events are written to DKG v10 Shared Memory; weak or unbound reports stay local. Verified Memory publication additionally requires explicit policy eligibility.",
       "inputSchema": { "type": "object", "required": ["text"], "properties": { "telegramUserId": { "type": "string" }, "username": { "type": "string" }, "text": { "type": "string" }, "chatId": { "type": "string" }, "label": { "type": "string" }, "adminVerified": { "type": "boolean" } } }
     },
     {

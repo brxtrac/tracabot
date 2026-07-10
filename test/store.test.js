@@ -27,3 +27,12 @@ test('ignores malformed jsonl lines', () => {
 test('requires event store path to be a file path', () => {
   assert.throws(() => new EventStore('.'), /file path/);
 });
+
+test('reloads events appended by another process', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tracabot-'));
+  const store = new EventStore(join(dir, 'events.jsonl'));
+  store.append({ id: 'first', timestamp: new Date().toISOString(), payload: {} });
+  assert.deepEqual(store.all().map((event) => event.id), ['first']);
+  appendFileSync(store.path, `${JSON.stringify({ id: 'external', timestamp: new Date().toISOString(), payload: {} })}\n`);
+  assert.deepEqual(store.all().map((event) => event.id), ['first', 'external']);
+});

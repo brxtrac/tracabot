@@ -100,6 +100,7 @@ export function loadConfig(env = process.env) {
   const channelMemoryMaxTextChars = Number(env.TRACABOT_CHANNEL_MEMORY_MAX_TEXT_CHARS || 1000);
   const wmArtifactMinConfidence = Number(env.TRACABOT_WM_ARTIFACT_MIN_CONFIDENCE || 40);
   const wmArtifactMaxTextChars = Number(env.TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS || 700);
+  const pendingReviewNotificationIntervalHours = Number(env.TRACABOT_PENDING_REVIEW_NOTIFICATION_INTERVAL_HOURS || 12);
   const joinChallengeMode = /^(memory-card|qa|ual)$/i.test(env.TRACABOT_JOIN_CHALLENGE_MODE || '') ? env.TRACABOT_JOIN_CHALLENGE_MODE.toLowerCase() : 'memory-card';
   const joinChallengeQaBank = parseChallengeBank(env.TRACABOT_JOIN_CHALLENGE_QA_BANK || '');
   const dkgMode = env.TRACABOT_DKG_MODE || 'openclaw-adapter';
@@ -150,6 +151,9 @@ export function loadConfig(env = process.env) {
   }
   if (!Number.isFinite(wmArtifactMaxTextChars) || wmArtifactMaxTextChars < 160 || wmArtifactMaxTextChars > 2000) {
     throw new Error('TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS must be a number from 160 to 2000');
+  }
+  if (!Number.isFinite(pendingReviewNotificationIntervalHours) || pendingReviewNotificationIntervalHours < 1 || pendingReviewNotificationIntervalHours > 168) {
+    throw new Error('TRACABOT_PENDING_REVIEW_NOTIFICATION_INTERVAL_HOURS must be a number from 1 to 168');
   }
   return {
     telegramToken: env.TELEGRAM_BOT_TOKEN || '',
@@ -217,6 +221,8 @@ export function loadConfig(env = process.env) {
     wmArtifactRedact: parseBoolean(env.TRACABOT_WM_ARTIFACT_REDACT, true),
     wmArtifactMinConfidence,
     wmArtifactMaxTextChars,
+    pendingReviewNotifications: parseBoolean(env.TRACABOT_PENDING_REVIEW_NOTIFICATIONS, true),
+    pendingReviewNotificationIntervalHours,
     dailySafeTipIntervalHours: Number(env.TRACABOT_DAILY_SAFE_TIP_INTERVAL_HOURS ?? 0),
     artefactReviewThreshold: Number(env.TRACABOT_ARTEFACT_REVIEW_THRESHOLD || 70),
     proactiveAlertCrossGroup: parseBoolean(env.TRACABOT_PROACTIVE_ALERT_CROSS_GROUP, true),

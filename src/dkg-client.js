@@ -231,6 +231,23 @@ function eventTriples(event) {
     { subject, predicate: `${NS}summaryReason`, object: literal(String(event.payload?.summary_reason || '').slice(0, MAX_EVIDENCE_LENGTH)) },
     { subject, predicate: `${NS}shortContext`, object: literal(String(event.payload?.short_context || '').slice(0, MAX_EVIDENCE_LENGTH)) },
     { subject, predicate: `${NS}targetEventId`, object: literal(event.payload?.target_event_id || '') },
+    { subject, predicate: `${NS}targetChatId`, object: literal(event.payload?.target_chat_id || event.chat?.id || '') },
+    { subject, predicate: `${NS}targetChatTitle`, object: literal(event.payload?.target_chat_title || event.chat?.title || '') },
+    { subject, predicate: `${NS}targetChatType`, object: literal(event.payload?.target_chat_type || event.chat?.type || '') },
+    { subject, predicate: `${NS}reviewChatId`, object: literal(event.payload?.review_chat_id || '') },
+    { subject, predicate: `${NS}reviewChatTitle`, object: literal(event.payload?.review_chat_title || '') },
+    { subject, predicate: `${NS}reviewScope`, object: literal(event.payload?.review_scope || '') },
+    { subject, predicate: `${NS}reviewJurisdiction`, object: literal(event.payload?.review_jurisdiction || '') },
+    { subject, predicate: `${NS}reviewWeight`, object: literal(event.payload?.review_weight ?? '') },
+    { subject, predicate: `${NS}decisionThreshold`, object: literal(event.payload?.decision_threshold ?? '') },
+    { subject, predicate: `${NS}resolvesTargetPendingReviews`, object: literal(event.payload?.resolves_target_pending_reviews ? 'true' : '') },
+    { subject, predicate: `${NS}sourceMessageId`, object: literal(event.payload?.source_message_id || event.payload?.message_id || '') },
+    { subject, predicate: `${NS}sourceMessageTextExcerpt`, object: literal(String(event.payload?.source_message_text_excerpt || event.payload?.message_text || '').slice(0, MAX_EVIDENCE_LENGTH)) },
+    { subject, predicate: `${NS}detectedAt`, object: literal(event.payload?.detected_at || '') },
+    { subject, predicate: `${NS}evidenceBasis`, object: literal(event.payload?.evidence_basis || '') },
+    { subject, predicate: `${NS}priorAdminActionId`, object: literal(event.payload?.prior_admin_action_id || '') },
+    { subject, predicate: `${NS}similarityBasis`, object: literal(event.payload?.similarity_basis || '') },
+    { subject, predicate: `${NS}urgentAdminAlert`, object: literal(event.payload?.urgent_admin_alert ? 'true' : '') },
     { subject, predicate: `${NS}restrictedUntil`, object: literal(event.payload?.restricted_until || '') },
     { subject, predicate: `${NS}actionDurationSeconds`, object: literal(event.payload?.action_duration_seconds || '') },
     { subject, predicate: `${NS}campaignKey`, object: literal(event.payload?.campaign_key || '') },
@@ -365,7 +382,7 @@ export class DkgClient {
       adapterPackage: ADAPTER_PACKAGE,
       adapterVersion: '',
       adapterPath: '',
-      dkgReleaseVersion: readPackageVersion('/root/.dkg/releases/current/node_modules/@origintrail-official/dkg/package.json'),
+      dkgReleaseVersion: readPackageVersion('/usr/lib/node_modules/@origintrail-official/dkg/package.json') || readPackageVersion('/root/.dkg/releases/current/node_modules/@origintrail-official/dkg/package.json'),
       capabilities: {
         workingMemoryAssertions: false,
         sharedWorkingMemory: false,
@@ -387,9 +404,9 @@ export class DkgClient {
     try {
       const client = await this.client();
       status.capabilities = {
-        workingMemoryAssertions: typeof client.createAssertion === 'function' && typeof client.writeAssertion === 'function' && typeof client.promoteAssertion === 'function',
-        sharedWorkingMemory: typeof client.share === 'function',
-        verifiedMemoryPublish: typeof client.publishSharedMemory === 'function',
+        workingMemoryAssertions: typeof client.createKnowledgeAsset === 'function',
+        sharedWorkingMemory: typeof client.knowledgeAssetShare === 'function' || typeof client.createKnowledgeAsset === 'function',
+        verifiedMemoryPublish: typeof client.knowledgeAssetPublish === 'function',
         query: typeof client.query === 'function'
       };
       status.ok = status.capabilities.query && (status.capabilities.workingMemoryAssertions || status.capabilities.sharedWorkingMemory);
@@ -437,7 +454,8 @@ export class DkgClient {
     const triples = eventTriples(event);
     const client = await this.client();
     const subject = `${NS}event/${event.id}`;
-    const write = await this.writeThroughMemoryLifecycle(client, event, triples, subject);
+    const assertionName = assertionNameForEvent(event);
+    const write = await this.writeThroughMemoryLifecycle(client, assertionName, triples);
     const output = JSON.stringify(write);
     const result = {
       mode: 'openclaw-dkg-adapter',
@@ -447,43 +465,43 @@ export class DkgClient {
       graph: write.graph || `did:dkg:context-graph:${this.config.contextGraph}/_shared_memory`,
       ual: write.graph || `did:dkg:context-graph:${this.config.contextGraph}/_shared_memory`,
       subject,
+      assertionName,
       eventId: event.id,
       triples
     };
     if (this.config.dkgPublishVerified === false || !shouldAutoPublishEvent({ ...event, config: this.config })) return result;
     try {
-      result.publish = await this.publishEvent(subject);
+      result.publish = await this.publishEvent(assertionName, subject);
     } catch (error) {
       result.publish_error = error instanceof Error ? error.message : String(error);
     }
     return result;
   }
 
-  async writeThroughMemoryLifecycle(client, event, triples, subject) {
-    if (typeof client.createAssertion !== 'function' || typeof client.writeAssertion !== 'function' || typeof client.promoteAssertion !== 'function') {
+  async writeThroughMemoryLifecycle(client, name, triples) {
+    if (typeof client.createKnowledgeAsset !== 'function') {
       return this.shareWithRetry(client, triples);
     }
-    const name = assertionNameForEvent(event);
-    return this.assertionWithRetry(client, name, triples, subject);
+    return this.knowledgeAssetWithRetry(client, name, triples);
   }
 
-  async assertionWithRetry(client, name, triples, subject) {
+  async knowledgeAssetWithRetry(client, name, triples) {
     const attempts = [0, ...SHARE_RETRY_DELAYS_MS];
     let lastError;
     for (let index = 0; index < attempts.length; index += 1) {
       if (attempts[index] > 0) await sleep(attempts[index]);
       try {
-        const created = await client.createAssertion(this.config.contextGraph, name);
-        const written = await client.writeAssertion(this.config.contextGraph, name, triples);
-        const promoted = await client.promoteAssertion(this.config.contextGraph, name, { entities: [subject] });
+        const created = await client.createKnowledgeAsset(this.config.contextGraph, name, {
+          quads: triples,
+          alsoShareSwm: true
+        });
         return {
           assertionName: name,
-          assertionUri: created?.assertionUri || promoted?.assertionUri || '',
-          shareOperationId: promoted?.shareOperationId || promoted?.workspaceOperationId || written?.shareOperationId || '',
-          graph: promoted?.graph || `did:dkg:context-graph:${this.config.contextGraph}/_shared_memory`,
-          triplesWritten: written?.triplesWritten ?? triples.length,
-          workingMemory: created,
-          sharedMemory: promoted
+          assertionUri: created?.assertionUri || created?.knowledgeAssetUri || '',
+          shareOperationId: created?.shareOperationId || created?.workspaceOperationId || '',
+          graph: created?.graph || `did:dkg:context-graph:${this.config.contextGraph}/_shared_memory`,
+          triplesWritten: created?.triplesWritten ?? created?.written ?? triples.length,
+          knowledgeAsset: created
         };
       } catch (error) {
         lastError = error;
@@ -508,23 +526,10 @@ export class DkgClient {
     throw lastError;
   }
 
-  async publishEvent(subject) {
+  async publishEvent(assertionName, subject) {
     const client = await this.client();
-    const opts = {
-      rootEntities: [subject],
-      clearAfter: false
-    };
-    if (this.config.publishContextGraphId) {
-      opts.publishContextGraphId = this.config.publishContextGraphId;
-    }
-    const publish = this.config.publishContextGraphId && typeof client.post === 'function'
-      ? await client.post('/api/shared-memory/publish', {
-        contextGraphId: this.config.contextGraph,
-        selection: opts.rootEntities,
-        clearAfter: opts.clearAfter,
-        publishContextGraphId: opts.publishContextGraphId
-      })
-      : await client.publishSharedMemory(this.config.contextGraph, opts);
+    if (typeof client.knowledgeAssetPublish !== 'function') throw new Error('DKG adapter does not support named Knowledge Asset publication');
+    const publish = await client.knowledgeAssetPublish(this.config.contextGraph, assertionName);
     return { mode: 'openclaw-dkg-adapter-context-graph', output: JSON.stringify(publish), subject, ...publish };
   }
 

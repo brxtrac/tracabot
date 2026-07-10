@@ -589,6 +589,47 @@ test('polling requests chat member updates for joins', async () => {
   assert.deepEqual(poll.payload.allowed_updates, ['message', 'callback_query', 'chat_member', 'my_chat_member']);
 });
 
+test('polling does not acknowledge an update whose handler failed', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const update = { update_id: 42, message: { chat: { id: -100, type: 'supergroup' }, from: { id: 77 }, message_id: 3, text: '/start' } };
+  bot.call = async (method) => method === 'getUpdates' ? [update] : { ok: true };
+  let attempts = 0;
+  bot.handleMessage = async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('temporary handler failure');
+  };
+
+  await assert.rejects(() => bot.pollOnce(), /temporary handler failure/);
+  assert.equal(bot.offset, 0);
+  await bot.pollOnce();
+  assert.equal(bot.offset, 43);
+  assert.equal(attempts, 2);
+});
+
+test('failed pending-review notification does not consume its cooldown', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const event = {
+    id: 'notice-retry',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat: { id: -100, type: 'supergroup' },
+    user: { id: 77, username: 'suspect' },
+    payload: { confidence: 90, target_chat_id: '-100' }
+  };
+  let attempts = 0;
+  bot.send = async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('temporary Telegram failure');
+    return { message_id: 10 };
+  };
+
+  await assert.rejects(() => bot.maybeNotifyPendingReview(event), /temporary Telegram failure/);
+  assert.equal(bot.lastPendingReviewNoticeAt.has('-100'), false);
+  await bot.maybeNotifyPendingReview(event);
+  assert.equal(attempts, 2);
+  assert.ok(bot.lastPendingReviewNoticeAt.has('-100'));
+});
+
 test('review queue uses admin-scoped inline buttons and callback decisions', async () => {
   const { bot, calls, dkgWrites } = makeBot({ canBan: true, trustedUserIds: [1, 2] });
   const flagged = await bot.record('risk_review_needed', { chat: { id: -100, type: 'supergroup' }, from: { id: 77, username: 'suspect' }, text: 'risk' }, { confidence: 90, evidence: ['suspicious evidence'], scam_type: 'impersonation' }, { writeDkg: false });
@@ -1689,7 +1730,8 @@ test('untrusted context graph false-positive does not clear cross-community scam
   const risk = await bot.assess({ chat, from: { id: 5151, username: 'badactor', is_bot: false }, message_id: 46, text: 'hello' }, { id: 5151, username: 'badactor' }, 'hello');
   assert.ok((risk.confidence || 0) >= 70);
   assert.ok(bot.store.all().some((event) => event.event_type === 'proactive_cross_group_warning'));
-  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('Prior community alert')));
+  assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('pending review item')));
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('Prior community alert')), false);
 });
 
 test('/start review panel shows active mutes and review items', async () => {
@@ -1716,6 +1758,8 @@ test('enforcement button sends final interactive response without waiting on LLM
   const reply = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Enforcement', 'enforcement-menu');
   assert.ok(reply);
   assert.ok(reply.reply_markup?.inline_keyboard?.length);
+  const buttons = reply.reply_markup.inline_keyboard.flat().map((item) => item.text);
+  assert.equal(buttons.filter((text) => String(text).includes('Reviews') || String(text).includes('Pending reviews')).length, 1);
   assert.equal(llmCalls, 0);
   assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Fetching recent enforcement actions')), false);
 });
@@ -2482,6 +2526,11 @@ test('inline false-positive review clears all pending reviews for that user', as
   assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'r4ge13'), true);
   const resolved = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload.text || '';
   assert.match(resolved, /Cleared 2 pending reviews/);
+  const back = buttonByText(calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload, 'Back to queue');
+  await bot.handleCallbackQuery({ id: 'inline-back', from: { id: 1, username: 'admin' }, message: { chat, message_id: 41 }, data: back.callback_data });
+  const queue = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload.text || '';
+  assert.doesNotMatch(queue, /molociao/);
+  assert.match(queue, /r4ge13/);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(dkgWrites.filter((event) => event.event_type === 'review_overturned').length, 2);
 });
@@ -2549,6 +2598,18 @@ test('single target confirmed scam resolution hides duplicate pending reviews', 
   assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'Rana_Dasss'), false);
 });
 
+test('cached pending review list drops items resolved after cache fill', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const timestamp = new Date().toISOString();
+  bot.store.append({ id: 'evt-stale-cache-1', event_type: 'risk_review_needed', timestamp, chat: { id: -100, title: 'demo' }, user: { id: 6113819633, username: 'agerysf' }, payload: { target_chat_id: -100, confidence: 95, evidence: ['Impersonation indicators: admin'] } });
+
+  assert.equal(bot.pendingReviewItems({ chatId: -100, scope: 'current' }).length, 1);
+  bot.store.append({ id: 'evt-stale-cache-review', event_type: 'review_overturned', timestamp: new Date(Date.now() + 1000).toISOString(), chat: { id: -100, title: 'demo' }, user: { id: 1, username: 'admin' }, payload: { target_event_id: 'evt-stale-cache-1', review_decision: 'reject', reviewed_target: { id: 6113819633, username: 'agerysf' }, reviewed_target_key: 'id:6113819633', target_chat_id: -100, review_chat_id: -100, resolves_target_pending_reviews: true, evidence: ['admin rejected flag'] } });
+
+  assert.equal(bot.pendingReviewItems({ chatId: -100, scope: 'current' }).length, 0);
+  assert.doesNotMatch(bot.formatPendingReviews(-100), /agerysf/);
+});
+
 test('legacy same-target false-positive review clears duplicate pending reviews', async () => {
   const { bot } = makeBot({ canBan: true });
   const timestamp = new Date(Date.now() - 1000).toISOString();
@@ -2606,6 +2667,160 @@ test('/review list does not globally hide targets previously rejected by admin',
   const reply = panel.text || '';
   assert.match(reply, /BRX86/);
   assert.match(reply, /r4ge13/);
+});
+
+test('review item can be hidden and unhidden for current channel only', async () => {
+  const { bot, calls, dkgWrites } = makeBot({ canBan: true });
+  const chat = { id: -100123, title: 'demo' };
+  const timestamp = new Date().toISOString();
+  bot.store.append({ id: 'evt-hide-review', event_type: 'risk_review_needed', timestamp, chat, user: { id: 777, username: 'hide_me' }, payload: { target_chat_id: chat.id, confidence: 91, evidence: ['hide signal'] } });
+
+  const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Reviews', 'review-hide-panel');
+  await bot.handleCallbackQuery({ id: 'review-hide-open', from: { id: 1, username: 'admin' }, message: { chat, message_id: 55 }, data: buttonByText(panel, 'hide_me').callback_data });
+  const detail = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload;
+  await bot.handleCallbackQuery({ id: 'review-hide', from: { id: 1, username: 'admin' }, message: { chat, message_id: 55 }, data: buttonByText(detail, 'Hide here').callback_data });
+
+  assert.equal(bot.pendingReviewItems({ chatId: chat.id, scope: 'current' }).length, 0);
+  assert.equal(bot.pendingReviewItems({ chatId: chat.id, scope: 'current', hiddenOnly: true }).length, 1);
+  assert.match(bot.formatPendingReviews(chat.id, { hiddenOnly: true }), /hide_me/);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'review_hidden'), false);
+
+  await bot.handleCallbackQuery({ id: 'review-hidden-tab', from: { id: 1, username: 'admin' }, message: { chat, message_id: 55 }, data: buttonByText(calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload, 'Hidden reviews').callback_data });
+  const hiddenPanel = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload;
+  assert.match(hiddenPanel.text || '', /Hidden review items/);
+  await bot.handleCallbackQuery({ id: 'review-hidden-open', from: { id: 1, username: 'admin' }, message: { chat, message_id: 55 }, data: buttonByText(hiddenPanel, 'hide_me').callback_data });
+  const hiddenDetail = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload;
+  await bot.handleCallbackQuery({ id: 'review-unhide', from: { id: 1, username: 'admin' }, message: { chat, message_id: 55 }, data: buttonByText(hiddenDetail, 'Unhide here').callback_data });
+
+  assert.equal(bot.pendingReviewItems({ chatId: chat.id, scope: 'current' }).length, 1);
+  assert.equal(bot.pendingReviewItems({ chatId: chat.id, scope: 'current', hiddenOnly: true }).length, 0);
+});
+
+test('hidden review does not send pending review notice', async () => {
+  const { bot, calls } = makeBot({ canBan: true, configOverrides: { pendingReviewNotificationIntervalHours: 0 } });
+  const chat = { id: -100333, title: 'quiet' };
+  const event = await bot.record('risk_review_needed', { chat, from: { id: 808, username: 'no_ping' }, message_id: 80 }, { confidence: 88, evidence: ['first signal'] }, { writeDkg: false });
+  await bot.record('review_hidden', { chat, from: { id: 1, username: 'admin' }, message_id: 81 }, { target_event_id: event.id, review_chat_id: chat.id, evidence: ['admin hid review'] }, { writeDkg: false });
+  const before = calls.filter((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('pending review item')).length;
+
+  const result = await bot.maybeNotifyPendingReview(event);
+
+  const after = calls.filter((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('pending review item')).length;
+  assert.equal(result, null);
+  assert.equal(after, before);
+});
+
+test('review detail includes source message and DKG refs', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const detail = bot.formatReviewDetail({
+    id: 'evt-source-review',
+    event_type: 'risk_review_needed',
+    chat: { id: -100987654321, title: 'demo' },
+    user: { id: 909, username: 'source_user' },
+    dkg: { ual: 'did:dkg:100/source-ka' },
+    payload: {
+      target_chat_id: -100987654321,
+      source_message_id: 456,
+      confidence: 93,
+      evidence: ['source signal'],
+      dkg_evidence: [{ ual: 'did:dkg:100/evidence-ka' }]
+    }
+  });
+
+  assert.match(detail, /Sources:/);
+  assert.match(detail, /Source message/);
+  assert.match(detail, /https:\/\/t\.me\/c\/987654321\/456/);
+  assert.match(detail, /did:dkg:100\/evidence-ka/);
+  assert.match(detail, /did:dkg:100\/source-ka/);
+});
+
+test('/review list separates current channel from other-channel context', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const timestamp = new Date().toISOString();
+  const current = { id: -100, title: 'current' };
+  const other = { id: -200, title: 'other' };
+  bot.store.append({ id: 'evt-current-channel', event_type: 'risk_review_needed', timestamp, chat: current, user: { id: 101, username: 'current_bad' }, payload: { target_chat_id: -100, target_chat_title: 'current', confidence: 90, evidence: ['current signal'] } });
+  bot.store.append({ id: 'evt-other-channel', event_type: 'risk_review_needed', timestamp, chat: other, user: { id: 202, username: 'other_bad' }, payload: { target_chat_id: -200, target_chat_title: 'other', confidence: 90, evidence: ['other signal'] } });
+
+  const panel = await openMenuPanel(bot, calls, current, { id: 1, username: 'admin' }, 'Reviews', 'review-channel-scope');
+  assert.match(panel.text || '', /current_bad/);
+  assert.doesNotMatch(panel.text || '', /other_bad/);
+  assert.match(panel.text || '', /Other-channel context: 1 pending item/);
+  assert.equal(bot.pendingReviewItems({ chatId: current.id, scope: 'current' }).length, 1);
+  assert.equal(bot.pendingReviewItems({ chatId: current.id, scope: 'other' }).length, 1);
+  assert.equal(panel.reply_markup.inline_keyboard.filter((row) => row[0]?.callback_data?.includes('review-open')).length, 1);
+});
+
+test('same-channel review clears only same-channel target queue', async () => {
+  const { bot, calls, dkgWrites } = makeBot({ canBan: true });
+  const timestamp = new Date().toISOString();
+  const current = { id: -100, title: 'current' };
+  const other = { id: -200, title: 'other' };
+  bot.store.append({ id: 'evt-channel-a-1', event_type: 'risk_review_needed', timestamp, chat: current, user: { id: 4242, username: 'sameuser' }, payload: { target_chat_id: -100, confidence: 90, evidence: ['current signal'] } });
+  bot.store.append({ id: 'evt-channel-b-1', event_type: 'risk_review_needed', timestamp, chat: other, user: { id: 4242, username: 'sameuser' }, payload: { target_chat_id: -200, confidence: 90, evidence: ['other signal'] } });
+
+  const panel = await openMenuPanel(bot, calls, current, { id: 1, username: 'admin' }, 'Reviews', 'review-channel-clear');
+  await bot.handleCallbackQuery({ id: 'channel-open', from: { id: 1, username: 'admin' }, message: { chat: current, message_id: 51 }, data: buttonByText(panel, 'sameuser').callback_data });
+  const detail = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload;
+  await bot.handleCallbackQuery({ id: 'channel-reject', from: { id: 1, username: 'admin' }, message: { chat: current, message_id: 51 }, data: buttonByText(detail, 'Reject flag').callback_data });
+
+  assert.equal(bot.pendingReviewItems({ chatId: current.id, scope: 'current' }).length, 0);
+  assert.equal(bot.pendingReviewItems({ chatId: other.id, scope: 'current' }).length, 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'review_overturned').length, 1);
+  assert.equal(dkgWrites[0].payload.review_scope, 'same_channel');
+  assert.equal(dkgWrites[0].payload.resolves_target_pending_reviews, true);
+});
+
+test('same-target review in another channel does not expire current-channel callback', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const timestamp = new Date().toISOString();
+  const current = { id: -100, title: 'current' };
+  const other = { id: -200, title: 'other' };
+  bot.store.append({ id: 'evt-channel-a-open', event_type: 'risk_review_needed', timestamp, chat: current, user: { id: 4242, username: 'sameuser' }, payload: { target_chat_id: -100, confidence: 90, evidence: ['current signal'] } });
+  bot.store.append({ id: 'evt-channel-b-open', event_type: 'risk_review_needed', timestamp, chat: other, user: { id: 4242, username: 'sameuser' }, payload: { target_chat_id: -200, confidence: 91, evidence: ['other signal'] } });
+  bot.store.append({
+    id: 'evt-channel-b-review',
+    event_type: 'review_overturned',
+    timestamp: new Date(Date.now() + 1000).toISOString(),
+    chat: other,
+    user: { id: 1, username: 'admin' },
+    payload: {
+      target_event_id: 'evt-channel-b-open',
+      review_decision: 'reject',
+      reviewed_target: { id: 4242, username: 'sameuser' },
+      reviewed_target_key: 'id:4242',
+      target_chat_id: -200,
+      review_chat_id: -200,
+      resolves_target_pending_reviews: true,
+      evidence: ['admin rejected flag']
+    }
+  });
+
+  assert.equal(bot.isPendingReviewEvent(bot.findEvent('evt-channel-a-open')), true);
+  const panel = await openMenuPanel(bot, calls, current, { id: 1, username: 'admin' }, 'Reviews', 'review-cross-channel-open');
+  await bot.handleCallbackQuery({ id: 'channel-a-open', from: { id: 1, username: 'admin' }, message: { chat: current, message_id: 51 }, data: buttonByText(panel, 'sameuser').callback_data });
+
+  const answers = calls.filter((call) => call.method === 'answerCallbackQuery').map((call) => call.payload.text || '');
+  const detail = calls.filter((call) => call.method === 'editMessageText').at(-1)?.payload;
+  assert.equal(answers.includes('Already reviewed or expired'), false);
+  assert.match(detail?.text || '', /current signal/);
+});
+
+test('pending review notices stay in origin channel and respect cooldown', async () => {
+  const { bot, calls } = makeBot({ canBan: true, configOverrides: { pendingReviewNotificationIntervalHours: 12 } });
+  const chat = { id: -100, title: 'origin' };
+  const other = { id: -200, title: 'other' };
+  await bot.record('risk_review_needed', { chat, from: { id: 55, username: 'flagged' }, message_id: 71 }, { confidence: 90, evidence: ['first signal'] }, { writeDkg: false });
+  await bot.record('risk_review_needed', { chat, from: { id: 55, username: 'flagged' }, message_id: 72 }, { confidence: 91, evidence: ['second signal'] }, { writeDkg: false });
+  await bot.record('risk_review_needed', { chat: other, from: { id: 66, username: 'otherflag' }, message_id: 73 }, { confidence: 92, evidence: ['other signal'] }, { writeDkg: false });
+
+  const notices = calls.filter((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('pending review item'));
+  assert.equal(notices.length, 2);
+  assert.deepEqual(notices.map((call) => String(call.payload.chat_id)), ['-100', '-200']);
+  assert.equal(notices.some((call) => String(call.payload.text || '').includes('flagged this for admin review')), false);
+  assert.equal(notices.every((call) => call.payload.parse_mode === 'HTML'), true);
+  assert.equal(notices.every((call) => call.payload.disable_web_page_preview === true), true);
 });
 
 test('natural language false positive review rejects matching user queue', async () => {
@@ -2826,8 +3041,8 @@ test('stats sources button returns DKG event receipts', async () => {
   assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text).includes('evt-stats')));
 });
 
-test('proactive cross-group warning (Option A) creates event, surfaces in-chat alert and records artefact when history present', async () => {
-  const { bot, calls, dkgWrites } = makeBot({
+test('proactive cross-group warning creates channel-local pending review notice when history present', async () => {
+  const { bot, calls } = makeBot({
     canBan: true,
     configOverrides: {
       proactiveAlertCrossGroup: true,
@@ -2841,7 +3056,6 @@ test('proactive cross-group warning (Option A) creates event, surfaces in-chat a
     events: [{ eventType: 'ban_executed', confidence: 92, id: 'prior-ban-xyz' }]
   });
 
-  // Trigger via direct assess (high risk path will create the warning + surface)
   const msg = {
     chat: { id: -200100, title: 'demo-group' },
     from: { id: 777, username: 'returning_scammer' },
@@ -2850,37 +3064,25 @@ test('proactive cross-group warning (Option A) creates event, surfaces in-chat a
   };
   const risk = await bot.assess(msg, { id: 777, username: 'returning_scammer' }, msg.text);
 
-  // Warning event must exist in store (and was eligible for DKG write)
   const warnings = bot.store.all().filter((e) => e.event_type === 'proactive_cross_group_warning');
   assert.ok(warnings.length >= 1, 'expected proactive_cross_group_warning event');
   const w = warnings[0];
   assert.ok(w.payload?.prior_admin_events?.length > 0);
-
-  // Surfacing: in-chat alert posted (captured via bot.call -> sendMessage)
-  const alertPayload = calls.find((c) => c.method === 'sendMessage' && String(c.payload.text || '').includes('Prior community alert'))?.payload || {};
-  const alert = alertPayload.text || '';
-  assert.ok(alert, 'expected visible prior-community alert posted in chat');
-  assert.match(alert, /Risk: \d+%/);
-  assert.match(alert, /Prior reviewed evidence: 1 record/);
-  assert.match(alert, /Admins: use \/start to review, or choose an action below\./);
-  assert.doesNotMatch(alert, /<a href=/);
-  assert.doesNotMatch(alert, /Event:/);
-  assert.doesNotMatch(alert, /why event/);
-  assert.doesNotMatch(alert, /CROSS-GROUP/);
-  assert.ok(buttonByText(alertPayload, 'Open profile'));
-  assert.ok(buttonByText(alertPayload, 'Ban user'));
-  assert.ok(buttonByText(alertPayload, 'Mark safe'));
-  assert.ok(buttonByText(alertPayload, 'Review'));
-
-  // Artefact for the surfacing action recorded (stored as snake_case artifact_kind)
-  assert.ok(bot.store.all().some((e) => e.event_type === 'conversation_artifact' && e.payload?.artifact_kind === 'proactive_cross_group_alert'));
+  assert.equal(w.payload?.target_chat_id, msg.chat.id);
+  assert.equal(w.payload?.evidence_basis, 'prior_admin_action');
+  const noticePayload = calls.find((c) => c.method === 'sendMessage' && String(c.payload.text || '').includes('pending review item'))?.payload || {};
+  assert.ok(noticePayload.text, 'expected channel-local pending review notice');
+  assert.match(noticePayload.text, /pending review item/);
+  assert.doesNotMatch(noticePayload.text, /Prior community alert/);
+  assert.doesNotMatch(noticePayload.text, /Ban user|Mark safe/);
+  assert.ok(buttonByText(noticePayload, 'Open reviews'));
 
   // Risk boosted as expected from the history path
   assert.ok((risk.confidence || 0) >= 70, 'risk should be boosted by cross-group prior action');
 });
 
-test('prior-community warning buttons ban or mark target safe', async () => {
-  const { bot, calls, dkgWrites } = makeBot({
+test('cross-group warning review notice opens same-channel review queue', async () => {
+  const { bot, calls } = makeBot({
     canBan: true,
     configOverrides: { proactiveAlertCrossGroup: true, warnThreshold: 50 }
   });
@@ -2892,20 +3094,10 @@ test('prior-community warning buttons ban or mark target safe', async () => {
   const chat = { id: -200100, title: 'demo-group' };
   const target = { id: 778, username: 'prior_scammer' };
   await bot.assess({ chat, from: target, message_id: 50, text: 'hello' }, target, 'hello');
-  const alertPayload = calls.filter((c) => c.method === 'sendMessage' && String(c.payload.text || '').includes('Prior community alert') && c.payload.reply_markup).at(-1)?.payload;
-  const banButton = buttonByText(alertPayload, 'Ban user');
-  assert.ok(banButton);
-  await bot.handleCallbackQuery({ id: 'warn-ban', from: { id: 1, username: 'admin' }, message: { chat, message_id: 60 }, data: banButton.callback_data });
-  assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 778));
-  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text || '').includes('Evidence is being saved')));
-
-  const safeTarget = { id: 779, username: 'safe_prior' };
-  await bot.assess({ chat, from: safeTarget, message_id: 51, text: 'hello again' }, safeTarget, 'hello again');
-  bot.store.append({ id: 'evt-safe-extra', event_type: 'risk_review_needed', timestamp: new Date().toISOString(), chat, user: safeTarget, payload: { confidence: 75, evidence: ['duplicate pending signal'] } });
-  const safeAlertPayload = calls.filter((c) => c.method === 'sendMessage' && String(c.payload.text || '').includes('Prior community alert') && c.payload.reply_markup).at(-1)?.payload;
-  const safeButton = buttonByText(safeAlertPayload, 'Mark safe');
-  assert.ok(safeButton);
-  await bot.handleCallbackQuery({ id: 'warn-safe', from: { id: 1, username: 'admin' }, message: { chat, message_id: 61 }, data: safeButton.callback_data });
-  assert.equal(bot.pendingReviewItems().some((event) => event.user?.username === 'safe_prior'), false);
-  assert.ok(dkgWrites.some((event) => event.event_type === 'review_overturned' && event.payload.reviewed_target.username === 'safe_prior'));
+  const noticePayload = calls.filter((c) => c.method === 'sendMessage' && String(c.payload.text || '').includes('pending review item') && c.payload.reply_markup).at(-1)?.payload;
+  const openButton = buttonByText(noticePayload, 'Open reviews');
+  assert.ok(openButton);
+  await bot.handleCallbackQuery({ id: 'review-list', from: { id: 1, username: 'admin' }, message: { chat, message_id: 60 }, data: openButton.callback_data });
+  assert.ok(calls.some((call) => call.method === 'editMessageText' && String(call.payload.text || '').includes('prior_scammer')));
+  assert.equal(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 778), false);
 });
