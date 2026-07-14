@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { analyzeMessage } from './scam-analyzer.js';
 import { DkgClient } from './dkg-client.js';
 import { EventStore } from './store.js';
-import { loadConfig } from './config.js';
+import { loadConfig, validateDkgPseudonymKey } from './config.js';
 import { combineRisk } from './risk-engine.js';
 import { LlmClient } from './llm-client.js';
 
@@ -80,10 +80,11 @@ export class TracabotSkillService {
 
   static fromEnv(env = process.env) {
     const config = loadConfig(env);
+    validateDkgPseudonymKey(config);
     return new TracabotSkillService({
       config,
       dkg: new DkgClient(config),
-      store: new EventStore(config.storePath)
+      store: new EventStore(config.databasePath || config.storePath, { legacyPath: config.legacyStorePath })
     });
   }
 
@@ -203,6 +204,7 @@ export class TracabotSkillService {
 
   async submitAppeal(input = {}) {
     if (!canWriteFromSkill(input, this.config)) throw new Error('submit_appeal requires authorized write token');
+    const receiptId = `appeal-${randomUUID()}`;
     const event = {
       id: randomUUID(),
       event_type: 'appeal_submitted',
@@ -210,11 +212,21 @@ export class TracabotSkillService {
       agentDid: this.config.agentDid,
       chat: input.chat || { id: input.chatId || 'openclaw-skill' },
       user: input.actor || { id: input.actorId || 'openclaw-skill', username: input.actorUsername || 'openclaw' },
-      payload: { target_event_id: input.eventId || '', reason: input.reason || 'appeal submitted via OpenClaw skill', evidence: [`OpenClaw skill appeal: ${input.reason || 'appeal submitted'}`] }
+      payload: {
+        appeal_receipt_id: receiptId,
+        target_event_id: input.eventId || '',
+        source_message_id: input.sourceMessageId || '',
+        screenshot_file_ids: Array.isArray(input.screenshotFileIds) ? input.screenshotFileIds.slice(0, 10) : [],
+        evidence_urls: Array.isArray(input.evidenceUrls) ? input.evidenceUrls.slice(0, 10) : [],
+        appellant: input.actor || { id: input.actorId || 'openclaw-skill', username: input.actorUsername || 'openclaw' },
+        reason: input.reason || 'appeal submitted via OpenClaw skill',
+        provenance: 'openclaw_skill_appeal',
+        evidence: [`OpenClaw skill appeal receipt ${receiptId}: ${input.reason || 'appeal submitted'}`]
+      }
     };
     event.dkg = await this.dkg.writeEvent(event);
     this.store.append(event);
-    return { tool: 'submit_appeal', eventId: event.id, dkg: event.dkg };
+    return { tool: 'submit_appeal', eventId: event.id, receiptId, dkg: event.dkg };
   }
 
   async reviewEvent(input = {}) {

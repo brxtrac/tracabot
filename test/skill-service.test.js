@@ -67,8 +67,10 @@ test('skill service appeal and review write DKG evidence', async () => {
   await assert.rejects(() => service.reviewEvent({ eventId: 'evt-1', decision: 'overturn', reason: 'appeal accepted', actorUsername: 'admin' }), /authorized write token/);
   const review = await service.reviewEvent({ eventId: 'evt-1', decision: 'overturn', reason: 'appeal accepted', actorUsername: 'admin', writeToken: 'test-write-token' });
   assert.equal(appeal.tool, 'submit_appeal');
+  assert.match(appeal.receiptId, /^appeal-/);
   assert.equal(review.decision, 'overturned');
   assert.ok(dkgWrites.some((event) => event.event_type === 'appeal_submitted'));
+  assert.match(dkgWrites.find((event) => event.event_type === 'appeal_submitted').payload.appeal_receipt_id, /^appeal-/);
   assert.ok(dkgWrites.some((event) => event.event_type === 'review_overturned'));
   assert.equal(dkgWrites.find((event) => event.event_type === 'review_overturned').payload.admin_verified, true);
 });
@@ -160,10 +162,19 @@ test('tracabot-skill CLI returns JSON and rejects unknown tools', async () => {
     TELEGRAM_BOT_TOKEN: 'test',
     TRACABOT_STORE_PATH: join(mkdtempSync(join(tmpdir(), 'tracabot-cli-')), 'events.jsonl'),
     TRACABOT_DKG_MODE: 'openclaw-adapter',
+    TRACABOT_DKG_WRITES: 'false',
     DKG_NODE_URL: 'http://127.0.0.1:9200'
   };
   const ok = await execFileAsync('node', ['./bin/tracabot-skill.js', 'get_digest', '{}'], { cwd: process.cwd(), env });
   const parsed = JSON.parse(ok.stdout);
   assert.equal(parsed.ok, true);
   await assert.rejects(() => execFileAsync('node', ['./bin/tracabot-skill.js', 'missing_tool', '{}'], { cwd: process.cwd(), env }), /Command failed/);
+});
+
+test('skill service requires strong pseudonym key when DKG writes are enabled', () => {
+  assert.throws(
+    () => TracabotSkillService.fromEnv({ TRACABOT_DKG_WRITES: 'true', TRACABOT_DKG_PSEUDONYM_KEY: 'short' }),
+    /TRACABOT_DKG_PSEUDONYM_KEY must be at least 32 bytes/
+  );
+  assert.doesNotThrow(() => TracabotSkillService.fromEnv({ TRACABOT_DKG_WRITES: 'false' }));
 });

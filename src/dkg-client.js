@@ -1,7 +1,9 @@
 import { existsSync, readFileSync } from 'node:fs';
+import { createHmac } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 const NS = 'https://tracabot.org/ontology#';
+const DCTERMS_CREATED = 'http://purl.org/dc/terms/created';
 const MAX_EVIDENCE_ITEMS = 12;
 const MAX_EVIDENCE_LENGTH = 500;
 const MAX_FACT_ID_LENGTH = 80;
@@ -43,6 +45,44 @@ function actorAliases(user = {}) {
     .filter(Boolean)
     .map((value) => String(value).toLowerCase().replace(/^@/, '').replace(/[^\p{L}\p{N}_-]/gu, ''))
     .filter(Boolean);
+}
+
+function normalizedIdentity(value = '') {
+  return String(value).toLowerCase().replace(/^@/, '').replace(/[^\p{L}\p{N}_-]/gu, '');
+}
+
+function pseudonym(key, kind, value = '') {
+  const normalized = normalizedIdentity(value);
+  if (!normalized) return '';
+  return `hmac:v1:${createHmac('sha256', key).update(`${kind}:${normalized}`).digest('hex')}`;
+}
+
+function actorIdentityClauses(pseudonymKey, { username = '', userId = '', aliases = [] } = {}, { includeTargets = false } = {}) {
+  const exact = [];
+  const fallback = [];
+  const normalizedUserId = normalizedIdentity(userId);
+  if (normalizedUserId) {
+    const token = pseudonym(pseudonymKey, 'telegram-user', normalizedUserId);
+    exact.push(`{ ?s <${NS}actorIdentity> ${literal(token)} . }`);
+    exact.push(`{ ?s <${NS}telegramUserId> ${literal(normalizedUserId)} . }`);
+    if (includeTargets) {
+      exact.push(`{ ?s <${NS}targetIdentity> ${literal(token)} . }`);
+      exact.push(`{ ?s <${NS}targetTelegramUserId> ${literal(normalizedUserId)} . }`);
+      exact.push(`{ ?s <${NS}targetKey> ${literal(normalizedUserId)} . }`);
+    }
+  }
+  const identifiers = [...new Set([username, ...aliases].map(normalizedIdentity).filter(Boolean))];
+  for (const identifier of identifiers) {
+    fallback.push(`{ ?s <${NS}actorAliasToken> ${literal(pseudonym(pseudonymKey, 'telegram-alias', identifier))} . }`);
+    fallback.push(`{ ?s <${NS}username> ${literal(identifier)} . }`);
+    fallback.push(`{ ?s <${NS}actorAlias> ${literal(identifier)} . }`);
+    if (includeTargets) {
+      fallback.push(`{ ?s <${NS}targetAliasToken> ${literal(pseudonym(pseudonymKey, 'telegram-alias', identifier))} . }`);
+      fallback.push(`{ ?s <${NS}targetUsername> ${literal(identifier)} . }`);
+      fallback.push(`{ ?s <${NS}targetKey> ${literal(identifier)} . }`);
+    }
+  }
+  return { exact, fallback };
 }
 
 function reviewedTarget(event = {}) {
@@ -99,6 +139,23 @@ function isProductionBindingForContext(binding = {}, contextGraph = '') {
   return graphBelongsToContext(binding, contextGraph) && !isTestStatsBinding(binding);
 }
 
+function bindingCreatedAt(binding = {}) {
+  const value = Date.parse(cleanValue(binding.created || ''));
+  return Number.isNaN(value) ? 0 : value;
+}
+
+function uniqueCredibleBindings(bindings = [], contextGraph = '') {
+  const byEvent = new Map();
+  for (const binding of bindings) {
+    if (!isProductionBindingForContext(binding, contextGraph) || !isCredibleRiskBinding(binding)) continue;
+    const eventId = eventIdFromSource(binding.s);
+    if (!eventId) continue;
+    const existing = byEvent.get(eventId);
+    if (!existing || bindingCreatedAt(binding) > bindingCreatedAt(existing)) byEvent.set(eventId, binding);
+  }
+  return [...byEvent.values()];
+}
+
 function shouldAutoPublishEvent(event = {}) {
   if (event.config?.dkgPublishVerified === false) return false;
   const confidence = Number(event.payload?.confidence || 0);
@@ -115,13 +172,11 @@ function shouldAutoPublishEvent(event = {}) {
   return false;
 }
 
-function trustedGlobalFalsePositive(event = {}) {
-  return event.event_type === 'review_overturned' && Boolean(event.payload?.trac_backed_global_authority || event.payload?.verified_memory_authority || event.payload?.community_verified_flag === 'verified_memory_trac_spend');
-}
-
 function lifecycleStage(event = {}) {
-  if (event.payload?.lifecycle_stage) return String(event.payload.lifecycle_stage);
-  if (shouldAutoPublishEvent(event)) return 'verified_memory';
+  if (event.payload?.lifecycle_stage) {
+    return event.payload.lifecycle_stage === 'verified_memory' ? 'verified_memory_candidate' : String(event.payload.lifecycle_stage);
+  }
+  if (shouldAutoPublishEvent(event)) return 'verified_memory_candidate';
   if (event.payload?.review_decision || event.payload?.report_decision) return 'admin_reviewed';
   return 'shared_memory';
 }
@@ -181,12 +236,15 @@ function adapterPackagePath(candidate = '') {
   return candidate.endsWith(marker) ? `${candidate.slice(0, -marker.length)}/package.json` : '';
 }
 
-function eventTriples(event) {
+function eventTriples(event, pseudonymKey = '') {
   const subject = `${NS}event/${event.id}`;
   const evidence = boundedList(event.payload?.evidence || [], MAX_EVIDENCE_ITEMS, MAX_EVIDENCE_LENGTH);
   const status = shouldAutoPublishEvent(event) ? 'context_graph_auto_publish_eligible' : 'shared_memory';
   const reviewed = reviewedTarget(event);
   const reviewedKey = event.payload?.reviewed_target_key || event.payload?.target_key || event.payload?.watch_target_key || '';
+  const verifiedMemoryCandidate = Boolean(event.payload?.verified_memory_authority || event.payload?.trac_backed_global_authority);
+  const decisionScope = verifiedMemoryCandidate ? 'global_verified_memory_candidate' : event.payload?.decision_scope || '';
+  const trustBasis = verifiedMemoryCandidate ? 'bot_owner_verified_memory_candidate' : event.payload?.trust_basis || '';
   const triples = [
     { subject, predicate: 'rdf:type', object: `${NS}${event.event_type}` },
     { subject, predicate: `${NS}eventId`, object: literal(event.id) },
@@ -211,17 +269,20 @@ function eventTriples(event) {
     { subject, predicate: `${NS}moderatorTelegramUserId`, object: literal(event.payload?.moderator?.id || event.payload?.reviewer?.id || '') },
     { subject, predicate: `${NS}moderatorUsername`, object: literal(event.payload?.moderator?.username || event.payload?.reviewer?.username || '') },
     { subject, predicate: `${NS}reviewDecision`, object: literal(event.payload?.review_decision || '') },
-    { subject, predicate: `${NS}adminVerified`, object: literal(event.payload?.admin_verified ? 'true' : '') },
+    { subject, predicate: `${NS}adminVerified`, object: literal(event.payload?.admin_verified && !verifiedMemoryCandidate ? 'true' : '') },
     { subject, predicate: `${NS}localAdminVerified`, object: literal(event.payload?.local_admin_verified ? 'true' : '') },
-    { subject, predicate: `${NS}trustedGlobalClear`, object: literal(trustedGlobalFalsePositive(event) ? 'true' : '') },
-    { subject, predicate: `${NS}decisionScope`, object: literal(event.payload?.decision_scope || '') },
-    { subject, predicate: `${NS}trustBasis`, object: literal(event.payload?.trust_basis || '') },
-    { subject, predicate: `${NS}verifiedMemoryAuthority`, object: literal(event.payload?.verified_memory_authority ? 'true' : '') },
-    { subject, predicate: `${NS}tracBackedGlobalAuthority`, object: literal(event.payload?.trac_backed_global_authority ? 'true' : '') },
+    { subject, predicate: `${NS}trustedGlobalClear`, object: literal('') },
+    { subject, predicate: `${NS}decisionScope`, object: literal(decisionScope) },
+    { subject, predicate: `${NS}trustBasis`, object: literal(trustBasis) },
+    { subject, predicate: `${NS}verifiedMemoryAuthority`, object: literal('') },
+    { subject, predicate: `${NS}tracBackedGlobalAuthority`, object: literal('') },
+    { subject, predicate: `${NS}verifiedMemoryCandidate`, object: literal(verifiedMemoryCandidate ? 'true' : '') },
     { subject, predicate: `${NS}publicationStatus`, object: literal(event.payload?.publication_status || status) },
     { subject, predicate: `${NS}commitReceiptId`, object: literal(event.payload?.commit_receipt_id || '') },
     { subject, predicate: `${NS}commitPolicy`, object: literal(event.payload?.commit_policy || '') },
     { subject, predicate: `${NS}commitAuthority`, object: literal(event.payload?.commit_authority || '') },
+    { subject, predicate: `${NS}appealReceiptId`, object: literal(event.payload?.appeal_receipt_id || '') },
+    { subject, predicate: `${NS}provenance`, object: literal(event.payload?.provenance || '') },
     { subject, predicate: `${NS}implicitDetection`, object: literal(event.payload?.implicit_detection ? 'true' : '') },
     { subject, predicate: `${NS}detectionMethod`, object: literal(event.payload?.detection_method || '') },
     { subject, predicate: `${NS}llmIntent`, object: literal(event.payload?.llm_intent || '') },
@@ -255,7 +316,6 @@ function eventTriples(event) {
     { subject, predicate: `${NS}claimedRole`, object: literal(event.payload?.claimed_role || event.payload?.claimedRole || '') },
     { subject, predicate: `${NS}claimedOrganization`, object: literal(event.payload?.claimed_organization || event.payload?.claimedOrganization || '') },
     { subject, predicate: `${NS}dmPlatform`, object: literal(event.payload?.dm_platform || '') },
-    { subject, predicate: `${NS}scamRequest`, object: literal(event.payload?.scam_request || event.payload?.scamRequest || '') },
     { subject, predicate: `${NS}screenshotCaption`, object: literal(event.payload?.screenshot_caption || '') },
     { subject, predicate: `${NS}sangmataOldName`, object: literal(event.payload?.target?.sangmata?.oldName || '') },
     { subject, predicate: `${NS}sangmataNewName`, object: literal(event.payload?.target?.sangmata?.newName || '') },
@@ -273,7 +333,7 @@ function eventTriples(event) {
     { subject, predicate: `${NS}evidence`, object: literal(JSON.stringify(evidence)) },
     { subject, predicate: `${NS}status`, object: literal(event.payload?.publication_status || status) }
   ];
-  if (['fraud_finding', 'ban_executed', 'report_submitted', 'dm_scam_report', 'unsafe_chat_event', 'fraud_campaign', 'channel_observation', 'conversation_artifact'].includes(event.event_type)) {
+  if (['fraud_finding', 'ban_executed', 'report_submitted', 'dm_scam_report', 'unsafe_chat_event', 'fraud_campaign', 'channel_observation', 'conversation_artifact', 'appeal_submitted'].includes(event.event_type)) {
     triples.push({ subject, predicate: 'rdf:type', object: 'http://dkg.io/ontology#KnowledgeAsset' });
   }
   if (event.event_type === 'fraud_campaign') {
@@ -322,6 +382,7 @@ function eventTriples(event) {
   }
   for (const domain of boundedList(event.payload?.domains || [])) {
     const normalized = normalizeDomain(domain);
+    if (!normalized) continue;
     const domainSubject = `${NS}domain/${encodeURIComponent(normalized).slice(0, MAX_FACT_ID_LENGTH)}`;
     triples.push({ subject, predicate: `${NS}scamDomain`, object: literal(normalized) });
     triples.push({ subject, predicate: `${NS}observedDomain`, object: domainSubject });
@@ -342,21 +403,53 @@ function eventTriples(event) {
     triples.push({ subject, predicate: `${NS}evidenceRootId`, object: literal(rootId) });
     triples.push({ subject, predicate: `${NS}evidenceRoot`, object: `${NS}event/${rootId}` });
   }
-  for (const communityId of boundedList(event.payload?.affected_community_ids || [])) {
-    triples.push({ subject, predicate: `${NS}affectedCommunityId`, object: literal(communityId) });
-  }
   for (const fileId of boundedList(event.payload?.screenshot_file_ids || [])) {
     triples.push({ subject, predicate: `${NS}screenshotFileId`, object: literal(fileId) });
+  }
+  for (const url of boundedList(event.payload?.evidence_urls || [], MAX_EVIDENCE_ITEMS, MAX_EVIDENCE_LENGTH)) {
+    triples.push({ subject, predicate: `${NS}appealEvidenceUrl`, object: literal(url) });
   }
   if (event.payload?.community_verified_flag) {
     triples.push({ subject, predicate: `${NS}communityVerifiedFlag`, object: literal(event.payload.community_verified_flag) });
   }
-  return triples;
+  const privatePredicates = new Set([
+    'communityId', 'communityName', 'telegramChatId', 'telegramUserId', 'username',
+    'reporterTelegramUserId', 'reporterUsername', 'targetTelegramUserId', 'targetUsername',
+    'targetLabel', 'targetKey', 'moderatorTelegramUserId', 'moderatorUsername',
+    'naturalLanguageSource', 'summaryReason', 'shortContext', 'targetChatId', 'targetChatTitle',
+    'reviewChatId', 'reviewChatTitle', 'sourceMessageId', 'sourceMessageTextExcerpt',
+    'reportedAlias', 'screenshotCaption', 'sangmataOldName', 'sangmataNewName', 'messageText',
+    'messageId', 'replyToMessageId', 'actorAlias', 'hasEvidence', 'evidenceText', 'evidenceIndex', 'screenshotFileId',
+    'appealEvidenceUrl', 'operatorNote', 'falsePositiveReason', 'normalizedText', 'evidence', 'suspiciousUrl'
+  ].map((name) => `${NS}${name}`));
+  const evidenceSubjectPrefix = `${subject}/evidence/`;
+  const shared = triples.filter((triple) => !privatePredicates.has(triple.predicate) && !triple.subject.startsWith(evidenceSubjectPrefix));
+  const addToken = (predicate, kind, value) => {
+    const token = pseudonym(pseudonymKey, kind, value);
+    if (token) shared.push({ subject, predicate: `${NS}${predicate}`, object: literal(token) });
+  };
+  const communityId = event.payload?.community_id || event.chat?.id || '';
+  const targetId = reviewed?.id || event.payload?.target_user_id || event.user?.id || '';
+  addToken('communityToken', 'community', communityId);
+  addToken('actorIdentity', 'telegram-user', event.user?.id);
+  addToken('reporterIdentity', 'telegram-user', event.payload?.reporter?.id);
+  addToken('targetIdentity', 'telegram-user', targetId);
+  addToken('moderatorIdentity', 'telegram-user', event.payload?.moderator?.id || event.payload?.reviewer?.id);
+  for (const alias of boundedList(actorAliases(event.user))) addToken('actorAliasToken', 'telegram-alias', alias);
+  for (const alias of boundedList(actorAliases(reviewed))) addToken('targetAliasToken', 'telegram-alias', alias);
+  if (reportedAlias) {
+    for (const alias of boundedList(actorAliases({ username: reportedAlias, first_name: reportedAlias }))) addToken('actorAliasToken', 'telegram-alias', alias);
+  }
+  for (const affectedCommunityId of boundedList(event.payload?.affected_community_ids || [])) {
+    addToken('affectedCommunityToken', 'community', affectedCommunityId);
+  }
+  return shared;
 }
 
 export class DkgClient {
   constructor(config, { adapterClient = null, adapterLoader = loadOpenClawAdapter } = {}) {
     this.config = config;
+    this.pseudonymKey = config.dkgPseudonymKey || `tracabot-context:${config.contextGraph}`;
     this.contextReady = false;
     this.adapterClient = adapterClient;
     this.adapterLoader = adapterLoader;
@@ -447,11 +540,14 @@ export class DkgClient {
         output: 'DKG writes disabled by TRACABOT_DKG_WRITES=false',
         subject: `${NS}event/${event.id}`,
         eventId: event.id,
-        triples: eventTriples(event)
+        triples: eventTriples(event, this.pseudonymKey)
       };
     }
+    if (Buffer.byteLength(this.config.dkgPseudonymKey || '', 'utf8') < 32) {
+      throw new Error('TRACABOT_DKG_PSEUDONYM_KEY must be at least 32 bytes when DKG writes are enabled');
+    }
     await this.ensureContextGraph();
-    const triples = eventTriples(event);
+    const triples = eventTriples(event, this.pseudonymKey);
     const client = await this.client();
     const subject = `${NS}event/${event.id}`;
     const assertionName = assertionNameForEvent(event);
@@ -529,8 +625,19 @@ export class DkgClient {
   async publishEvent(assertionName, subject) {
     const client = await this.client();
     if (typeof client.knowledgeAssetPublish !== 'function') throw new Error('DKG adapter does not support named Knowledge Asset publication');
-    const publish = await client.knowledgeAssetPublish(this.config.contextGraph, assertionName);
-    return { mode: 'openclaw-dkg-adapter-context-graph', output: JSON.stringify(publish), subject, ...publish };
+    const attempts = [0, ...SHARE_RETRY_DELAYS_MS];
+    let lastError;
+    for (let index = 0; index < attempts.length; index += 1) {
+      if (attempts[index] > 0) await sleep(attempts[index]);
+      try {
+        const publish = await client.knowledgeAssetPublish(this.config.contextGraph, assertionName);
+        return { mode: 'openclaw-dkg-adapter-context-graph', output: JSON.stringify(publish), subject, ...publish };
+      } catch (error) {
+        lastError = error;
+        if (!isRetryableDkgError(error) || index === attempts.length - 1) throw error;
+      }
+    }
+    throw lastError;
   }
 
   async queryBindings(sparql, options = {}) {
@@ -574,28 +681,15 @@ export class DkgClient {
   }
 
   async queryActor({ username = '', userId = '', aliases = [] } = {}) {
-    const identifiers = [username, ...aliases]
-      .filter(Boolean)
-      .map((value) => String(value).toLowerCase().replace(/^@/, '').replace(/[^\p{L}\p{N}_-]/gu, ''));
-    const clauses = [];
-    for (const identifier of [...new Set(identifiers)]) {
-      clauses.push(`{ ?s <${NS}username> ${literal(identifier)} . }`);
-      clauses.push(`{ ?s <${NS}actorAlias> ${literal(identifier)} . }`);
-    }
-    if (userId) clauses.push(`{ ?s <${NS}telegramUserId> ${literal(userId)} . }`);
-    if (!clauses.length) return { reportsAcrossCommunities: 0, evidence: [] };
-    const sparql = `SELECT ?g ?s ?eventType ?type ?confidence ?localConfidence ?evidence ?chatId ?eventSource ?testMode WHERE { GRAPH ?g { ${clauses.join(' UNION ')} OPTIONAL { ?s <${NS}eventType> ?eventType . } OPTIONAL { ?s <${NS}scamType> ?type . } OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}localConfidence> ?localConfidence . } OPTIONAL { ?s <${NS}evidence> ?evidence . } OPTIONAL { ?s <${NS}telegramChatId> ?chatId . } OPTIONAL { ?s <${NS}source> ?eventSource . } OPTIONAL { ?s <${NS}testMode> ?testMode . } } } LIMIT 50`;
-    const bindings = await this.queryBindings(sparql);
-    const seen = new Set();
-    const credible = bindings.filter((binding) => {
-      const eventId = eventIdFromSource(binding.s);
-      if (seen.has(eventId)) return false;
-      if (!isProductionBindingForContext(binding, this.config.contextGraph) || !isCredibleRiskBinding(binding)) return false;
-      seen.add(eventId);
-      return true;
-    });
+    const { exact, fallback } = actorIdentityClauses(this.pseudonymKey, { username, userId, aliases });
+    if (!exact.length && !fallback.length) return { reportsAcrossCommunities: 0, evidence: [] };
+    const query = (clauses) => this.queryBindings(`SELECT ?g ?s ?eventType ?type ?confidence ?localConfidence ?evidence ?chatId ?communityToken ?eventSource ?testMode ?created WHERE { GRAPH ?g { ${clauses.join(' UNION ')} OPTIONAL { ?s <${NS}eventType> ?eventType . } OPTIONAL { ?s <${NS}scamType> ?type . } OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}localConfidence> ?localConfidence . } OPTIONAL { ?s <${NS}evidence> ?evidence . } OPTIONAL { ?s <${NS}telegramChatId> ?chatId . } OPTIONAL { ?s <${NS}communityToken> ?communityToken . } OPTIONAL { ?s <${NS}source> ?eventSource . } OPTIONAL { ?s <${NS}testMode> ?testMode . } OPTIONAL { ?s <${DCTERMS_CREATED}> ?created . } } } LIMIT 50`, { view: 'verifiable-memory', includeSharedMemory: false });
+    let bindings = exact.length ? await query(exact) : [];
+    if (!bindings.length && fallback.length) bindings = await query(fallback);
+    const credible = uniqueCredibleBindings(bindings, this.config.contextGraph);
+    const communities = new Set(credible.map((binding) => cleanValue(binding.communityToken || binding.chatId || '')).filter(Boolean));
     return {
-      reportsAcrossCommunities: credible.length,
+      reportsAcrossCommunities: communities.size,
       evidence: credible.map((binding) => ({
         source: binding.s,
         eventId: eventIdFromSource(binding.s),
@@ -610,25 +704,18 @@ export class DkgClient {
 
   // Phase 4: Query prior high-severity admin actions on this actor across the Tracabot graph
   async queryAdminHistoryForActor({ userId = '', username = '', aliases = [] } = {}) {
-    const identifiers = [userId, username, ...aliases]
-      .filter(Boolean)
-      .map(v => String(v).toLowerCase().replace(/^@/, '').replace(/[^\p{L}\p{N}_-]/gu, ''))
-      .filter(Boolean);
-    if (!identifiers.length) return { hasPriorAdminAction: false, events: [] };
+    const { exact, fallback } = actorIdentityClauses(this.pseudonymKey, { userId, username, aliases }, { includeTargets: true });
+    if (!exact.length && !fallback.length) return { hasPriorAdminAction: false, events: [] };
 
     // Build SPARQL to find high-severity events involving this actor
-    const valueClauses = [...new Set(identifiers)].map(id =>
-      `{ ?s <${NS}telegramUserId> ${literal(id)} . } UNION { ?s <${NS}username> ${literal(id)} . } UNION { ?s <${NS}actorAlias> ${literal(id)} . } UNION { ?s <${NS}targetTelegramUserId> ${literal(id)} . } UNION { ?s <${NS}targetUsername> ${literal(id)} . } UNION { ?s <${NS}targetKey> ${literal(id)} . }`
-    ).join(' UNION ');
-
-    const sparql = `
-      SELECT ?g ?s ?eventType ?confidence ?scamType ?created ?chatId ?username ?eventSource ?testMode ?adminVerified ?trustedGlobalClear ?verifiedMemoryAuthority ?tracBackedGlobalAuthority ?communityVerifiedFlag WHERE {
+    const query = (clauses) => this.queryBindings(`
+      SELECT ?g ?s ?eventType ?confidence ?scamType ?created ?chatId ?username ?eventSource ?testMode ?adminVerified ?trustedGlobalClear ?verifiedMemoryAuthority ?tracBackedGlobalAuthority ?verifiedMemoryCandidate ?communityVerifiedFlag WHERE {
         GRAPH ?g {
-          { ${valueClauses} }
+          ${clauses.join(' UNION ')}
           OPTIONAL { ?s <${NS}eventType> ?eventType . }
           OPTIONAL { ?s <${NS}confidence> ?confidence . }
           OPTIONAL { ?s <${NS}scamType> ?scamType . }
-          OPTIONAL { ?s <dcterms:created> ?created . }
+          OPTIONAL { ?s <${DCTERMS_CREATED}> ?created . }
           OPTIONAL { ?s <${NS}telegramChatId> ?chatId . }
           OPTIONAL { ?s <${NS}username> ?username . }
           OPTIONAL { ?s <${NS}source> ?eventSource . }
@@ -637,12 +724,14 @@ export class DkgClient {
           OPTIONAL { ?s <${NS}trustedGlobalClear> ?trustedGlobalClear . }
           OPTIONAL { ?s <${NS}verifiedMemoryAuthority> ?verifiedMemoryAuthority . }
           OPTIONAL { ?s <${NS}tracBackedGlobalAuthority> ?tracBackedGlobalAuthority . }
+          OPTIONAL { ?s <${NS}verifiedMemoryCandidate> ?verifiedMemoryCandidate . }
           OPTIONAL { ?s <${NS}communityVerifiedFlag> ?communityVerifiedFlag . }
         }
       } LIMIT 30
-    `;
+    `, { view: 'verifiable-memory', includeSharedMemory: false });
 
-    const bindings = await this.queryBindings(sparql);
+    let bindings = exact.length ? await query(exact) : [];
+    if (!bindings.length && fallback.length) bindings = await query(fallback);
 
     const severeTypes = ['ban_executed', 'review_upheld', 'fraud_finding'];
     const severeEvents = bindings
@@ -652,7 +741,8 @@ export class DkgClient {
         eventType: cleanValue(b.eventType),
         confidence: Number(cleanValue(b.confidence)) || 0,
         scamType: cleanValue(b.scamType),
-        ual: cleanValue(b.g)
+        ual: cleanValue(b.g),
+        created: cleanValue(b.created)
       }))
       .filter(e => severeTypes.includes(e.eventType) && e.confidence >= 70);
     const falsePositiveEvents = bindings
@@ -666,44 +756,46 @@ export class DkgClient {
         trustedGlobalClear: cleanValue(b.trustedGlobalClear) === 'true',
         verifiedMemoryAuthority: cleanValue(b.verifiedMemoryAuthority) === 'true',
         tracBackedGlobalAuthority: cleanValue(b.tracBackedGlobalAuthority) === 'true',
+        verifiedMemoryCandidate: cleanValue(b.verifiedMemoryCandidate) === 'true',
         communityVerifiedFlag: cleanValue(b.communityVerifiedFlag),
-        ual: cleanValue(b.g)
+        ual: cleanValue(b.g),
+        created: cleanValue(b.created)
       }))
-      .filter(e => e.eventType === 'review_overturned' && (e.trustedGlobalClear || e.verifiedMemoryAuthority || e.tracBackedGlobalAuthority || e.communityVerifiedFlag === 'verified_memory_trac_spend'));
+      .filter(e => e.eventType === 'review_overturned' && (e.adminVerified || e.trustedGlobalClear || e.verifiedMemoryAuthority || e.tracBackedGlobalAuthority || e.verifiedMemoryCandidate || e.communityVerifiedFlag === 'verified_memory_trac_spend'));
+
+    const datedDecisions = [...severeEvents, ...falsePositiveEvents]
+      .filter((event) => !Number.isNaN(Date.parse(event.created || '')))
+      .sort((a, b) => Date.parse(b.created) - Date.parse(a.created));
+    const latestDecision = datedDecisions[0];
 
     return {
-      hasPriorAdminAction: severeEvents.length > 0,
-      hasPriorFalsePositive: falsePositiveEvents.length > 0,
+      hasPriorAdminAction: severeEvents.length > 0 && (!latestDecision || latestDecision.eventType !== 'review_overturned'),
+      hasPriorFalsePositive: falsePositiveEvents.length > 0 && (!latestDecision || latestDecision.eventType === 'review_overturned'),
       events: severeEvents,
       falsePositiveEvents
     };
   }
 
   async queryContextOracle({ userId = '', username = '', aliases = [], text = '' } = {}) {
-    const identifiers = [userId, username, ...aliases]
-      .filter(Boolean)
-      .map(v => String(v).toLowerCase().replace(/^@/, '').replace(/[^\p{L}\p{N}_-]/gu, ''))
-      .filter(Boolean);
     const indicators = [...extractWallets(text), ...extractDomains(text), ...extractPatterns(text)];
-    const clauses = [];
-    for (const identifier of [...new Set(identifiers)]) {
-      clauses.push(`{ ?s <${NS}telegramUserId> ${literal(identifier)} . }`);
-      clauses.push(`{ ?s <${NS}username> ${literal(identifier)} . }`);
-      clauses.push(`{ ?s <${NS}actorAlias> ${literal(identifier)} . }`);
-      clauses.push(`{ ?s <${NS}targetTelegramUserId> ${literal(identifier)} . }`);
-      clauses.push(`{ ?s <${NS}targetUsername> ${literal(identifier)} . }`);
-      clauses.push(`{ ?s <${NS}targetKey> ${literal(identifier)} . }`);
-    }
+    const identity = actorIdentityClauses(this.pseudonymKey, { userId, username, aliases }, { includeTargets: true });
+    const indicatorClauses = [];
     for (const indicator of [...new Set(indicators)]) {
-      clauses.push(`{ ?s <${NS}wallet> ${literal(indicator)} . }`);
-      clauses.push(`{ ?s <${NS}scamDomain> ${literal(indicator)} . }`);
-      clauses.push(`{ ?s <${NS}scamPattern> ${literal(indicator)} . }`);
+      indicatorClauses.push(`{ ?s <${NS}wallet> ${literal(indicator)} . }`);
+      indicatorClauses.push(`{ ?s <${NS}scamDomain> ${literal(indicator)} . }`);
+      indicatorClauses.push(`{ ?s <${NS}scamPattern> ${literal(indicator)} . }`);
     }
-    if (!clauses.length) return { verdict: 'insufficient_evidence', trustLayer: 'local_only', confidence: 0, evidence: [] };
+    if (!identity.exact.length && !identity.fallback.length && !indicatorClauses.length) return { verdict: 'insufficient_evidence', trustLayer: 'local_only', confidence: 0, evidence: [] };
 
-    const sparql = `SELECT ?g ?s ?eventType ?confidence ?localConfidence ?scamType ?evidence ?adminVerified ?trustedGlobalClear ?verifiedMemoryAuthority ?tracBackedGlobalAuthority ?communityVerifiedFlag ?chatId ?username ?eventSource ?testMode WHERE { GRAPH ?g { ${clauses.join(' UNION ')} OPTIONAL { ?s <${NS}eventType> ?eventType . } OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}localConfidence> ?localConfidence . } OPTIONAL { ?s <${NS}scamType> ?scamType . } OPTIONAL { ?s <${NS}evidence> ?evidence . } OPTIONAL { ?s <${NS}adminVerified> ?adminVerified . } OPTIONAL { ?s <${NS}trustedGlobalClear> ?trustedGlobalClear . } OPTIONAL { ?s <${NS}verifiedMemoryAuthority> ?verifiedMemoryAuthority . } OPTIONAL { ?s <${NS}tracBackedGlobalAuthority> ?tracBackedGlobalAuthority . } OPTIONAL { ?s <${NS}communityVerifiedFlag> ?communityVerifiedFlag . } OPTIONAL { ?s <${NS}telegramChatId> ?chatId . } OPTIONAL { ?s <${NS}username> ?username . } OPTIONAL { ?s <${NS}source> ?eventSource . } OPTIONAL { ?s <${NS}testMode> ?testMode . } } } LIMIT 50`;
-    const vm = await this.queryBindings(sparql, { view: 'verifiable-memory', includeSharedMemory: false });
-    const swm = await this.queryBindings(sparql, { view: 'shared-working-memory', includeSharedMemory: false });
+    const query = (clauses, view) => this.queryBindings(`SELECT ?g ?s ?eventType ?confidence ?localConfidence ?scamType ?evidence ?adminVerified ?trustedGlobalClear ?verifiedMemoryAuthority ?tracBackedGlobalAuthority ?verifiedMemoryCandidate ?communityVerifiedFlag ?chatId ?username ?eventSource ?testMode ?created WHERE { GRAPH ?g { ${clauses.join(' UNION ')} OPTIONAL { ?s <${NS}eventType> ?eventType . } OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}localConfidence> ?localConfidence . } OPTIONAL { ?s <${NS}scamType> ?scamType . } OPTIONAL { ?s <${NS}evidence> ?evidence . } OPTIONAL { ?s <${NS}adminVerified> ?adminVerified . } OPTIONAL { ?s <${NS}trustedGlobalClear> ?trustedGlobalClear . } OPTIONAL { ?s <${NS}verifiedMemoryAuthority> ?verifiedMemoryAuthority . } OPTIONAL { ?s <${NS}tracBackedGlobalAuthority> ?tracBackedGlobalAuthority . } OPTIONAL { ?s <${NS}verifiedMemoryCandidate> ?verifiedMemoryCandidate . } OPTIONAL { ?s <${NS}communityVerifiedFlag> ?communityVerifiedFlag . } OPTIONAL { ?s <${NS}telegramChatId> ?chatId . } OPTIONAL { ?s <${NS}username> ?username . } OPTIONAL { ?s <${NS}source> ?eventSource . } OPTIONAL { ?s <${NS}testMode> ?testMode . } OPTIONAL { ?s <${DCTERMS_CREATED}> ?created . } } } LIMIT 50`, { view, includeSharedMemory: false });
+    let clauses = [...identity.exact, ...indicatorClauses];
+    let vm = clauses.length ? await query(clauses, 'verifiable-memory') : [];
+    let swm = clauses.length ? await query(clauses, 'shared-working-memory') : [];
+    if (!vm.length && !swm.length && identity.fallback.length) {
+      clauses = [...identity.fallback, ...indicatorClauses];
+      vm = await query(clauses, 'verifiable-memory');
+      swm = await query(clauses, 'shared-working-memory');
+    }
     const ranked = [
       ...vm.map((binding) => ({ binding, trustLayer: 'verifiable_memory', rank: 4 })),
       ...swm.map((binding) => {
@@ -720,15 +812,22 @@ export class DkgClient {
       scamType: cleanValue(binding.scamType),
       evidence: cleanValue(binding.evidence),
       ual: cleanValue(binding.g),
+      created: cleanValue(binding.created),
       trustLayer,
       rank,
-      clear: cleanValue(binding.trustedGlobalClear) === 'true' || cleanValue(binding.verifiedMemoryAuthority) === 'true' || cleanValue(binding.tracBackedGlobalAuthority) === 'true' || cleanValue(binding.communityVerifiedFlag) === 'verified_memory_trac_spend'
-    })).sort((a, b) => b.rank - a.rank || b.confidence - a.confidence);
+      clear: trustLayer === 'verifiable_memory' && (cleanValue(binding.adminVerified) === 'true' || cleanValue(binding.trustedGlobalClear) === 'true' || cleanValue(binding.verifiedMemoryAuthority) === 'true' || cleanValue(binding.tracBackedGlobalAuthority) === 'true' || cleanValue(binding.verifiedMemoryCandidate) === 'true' || cleanValue(binding.communityVerifiedFlag) === 'verified_memory_trac_spend')
+    })).sort((a, b) => b.rank - a.rank || Date.parse(b.created || '') - Date.parse(a.created || '') || b.confidence - a.confidence);
 
-    const clear = evidence.find((item) => item.eventType === 'review_overturned' && item.clear);
+    const authoritative = evidence.filter((item) => item.trustLayer === 'verifiable_memory' && (item.clear || ['ban_executed', 'review_upheld', 'fraud_finding'].includes(item.eventType)))
+      .sort((a, b) => Date.parse(b.created || '') - Date.parse(a.created || ''));
+    const clear = authoritative[0]?.eventType === 'review_overturned' && authoritative[0].clear ? authoritative[0] : null;
     if (clear) return { verdict: 'verified_clear', trustLayer: clear.trustLayer, confidence: clear.confidence, evidence: [clear, ...evidence.filter((item) => item !== clear)].slice(0, 8) };
-    const risk = evidence.find((item) => ['ban_executed', 'review_upheld', 'fraud_finding', 'dm_scam_report', 'report_submitted'].includes(item.eventType) && item.confidence >= 80);
+    const risk = authoritative[0]?.eventType !== 'review_overturned'
+      ? authoritative.find((item) => ['ban_executed', 'review_upheld', 'fraud_finding'].includes(item.eventType) && item.confidence >= 80)
+      : null;
+    const warning = evidence.find((item) => item.trustLayer !== 'verifiable_memory' && ['ban_executed', 'review_upheld', 'fraud_finding', 'dm_scam_report', 'report_submitted'].includes(item.eventType) && item.confidence >= 80);
     if (risk) return { verdict: risk.trustLayer === 'shared_memory' ? 'shared_warning' : 'verified_risk', trustLayer: risk.trustLayer, confidence: risk.confidence, evidence: [risk, ...evidence.filter((item) => item !== risk)].slice(0, 8) };
+    if (warning) return { verdict: 'shared_warning', trustLayer: warning.trustLayer, confidence: warning.confidence, evidence: [warning, ...evidence.filter((item) => item !== warning)].slice(0, 8) };
     if (evidence.length) return { verdict: 'needs_review', trustLayer: evidence[0].trustLayer, confidence: evidence[0].confidence, evidence: evidence.slice(0, 8) };
     return { verdict: 'insufficient_evidence', trustLayer: 'local_only', confidence: 0, evidence: [] };
   }
@@ -741,47 +840,55 @@ export class DkgClient {
     const walletEvidence = [];
     for (const wallet of wallets) {
       const sparql = `SELECT ?g ?s ?eventType ?confidence ?localConfidence ?evidence ?chatId ?username ?eventSource ?testMode WHERE { GRAPH ?g { ?s <${NS}wallet> ${literal(wallet)} . OPTIONAL { ?s <${NS}eventType> ?eventType . } OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}localConfidence> ?localConfidence . } OPTIONAL { ?s <${NS}evidence> ?evidence . } OPTIONAL { ?s <${NS}telegramChatId> ?chatId . } OPTIONAL { ?s <${NS}username> ?username . } OPTIONAL { ?s <${NS}source> ?eventSource . } OPTIONAL { ?s <${NS}testMode> ?testMode . } } } LIMIT 10`;
-      const bindings = await this.queryBindings(sparql);
+      const bindings = await this.queryBindings(sparql, { view: 'verifiable-memory', includeSharedMemory: false });
       for (const binding of bindings) walletEvidence.push({ wallet, ...binding, eventId: eventIdFromSource(binding.s), ual: cleanValue(binding.g || '') });
     }
     const patternEvidence = [];
     for (const pattern of patterns) {
       const sparql = `SELECT ?g ?s ?eventType ?confidence ?localConfidence ?evidence ?chatId ?username ?eventSource ?testMode WHERE { GRAPH ?g { ?s <${NS}scamPattern> ${literal(pattern)} . OPTIONAL { ?s <${NS}eventType> ?eventType . } OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}localConfidence> ?localConfidence . } OPTIONAL { ?s <${NS}evidence> ?evidence . } OPTIONAL { ?s <${NS}telegramChatId> ?chatId . } OPTIONAL { ?s <${NS}username> ?username . } OPTIONAL { ?s <${NS}source> ?eventSource . } OPTIONAL { ?s <${NS}testMode> ?testMode . } } } LIMIT 10`;
-      const bindings = await this.queryBindings(sparql);
+      const bindings = await this.queryBindings(sparql, { view: 'verifiable-memory', includeSharedMemory: false });
       for (const binding of bindings) patternEvidence.push({ pattern, ...binding, eventId: eventIdFromSource(binding.s), ual: cleanValue(binding.g || '') });
     }
     const domainEvidence = [];
     for (const domain of domains) {
       const sparql = `SELECT ?g ?s ?eventType ?confidence ?localConfidence ?evidence ?chatId ?username ?eventSource ?testMode WHERE { GRAPH ?g { ?s <${NS}scamDomain> ${literal(domain)} . OPTIONAL { ?s <${NS}eventType> ?eventType . } OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}localConfidence> ?localConfidence . } OPTIONAL { ?s <${NS}evidence> ?evidence . } OPTIONAL { ?s <${NS}telegramChatId> ?chatId . } OPTIONAL { ?s <${NS}username> ?username . } OPTIONAL { ?s <${NS}source> ?eventSource . } OPTIONAL { ?s <${NS}testMode> ?testMode . } } } LIMIT 10`;
-      const bindings = await this.queryBindings(sparql);
+      const bindings = await this.queryBindings(sparql, { view: 'verifiable-memory', includeSharedMemory: false });
       for (const binding of bindings) domainEvidence.push({ domain, ...binding, eventId: eventIdFromSource(binding.s), ual: cleanValue(binding.g || '') });
     }
-    const credibleWalletEvidence = walletEvidence.filter((binding) => isProductionBindingForContext(binding, this.config.contextGraph) && isCredibleRiskBinding(binding));
-    const crediblePatternEvidence = patternEvidence.filter((binding) => isProductionBindingForContext(binding, this.config.contextGraph) && isCredibleRiskBinding(binding));
-    const credibleDomainEvidence = domainEvidence.filter((binding) => isProductionBindingForContext(binding, this.config.contextGraph) && isCredibleRiskBinding(binding));
+    const credibleWalletEvidence = uniqueCredibleBindings(walletEvidence, this.config.contextGraph);
+    const crediblePatternEvidence = uniqueCredibleBindings(patternEvidence, this.config.contextGraph);
+    const credibleDomainEvidence = uniqueCredibleBindings(domainEvidence, this.config.contextGraph);
     const artifactEvidence = [...walletEvidence, ...domainEvidence, ...patternEvidence]
       .filter((binding) => isProductionBindingForContext(binding, this.config.contextGraph) && cleanValue(binding.eventType || '') === 'conversation_artifact')
       .slice(0, 5);
-    const riskScore = Math.min(100, actorIntel.reportsAcrossCommunities * 25 + credibleWalletEvidence.length * 25 + credibleDomainEvidence.length * 20 + crediblePatternEvidence.length * 10);
+    const evidenceByEvent = new Map();
+    for (const item of actorIntel.evidence) evidenceByEvent.set(item.eventId, { score: 25, item });
+    for (const [items, score] of [[credibleWalletEvidence, 25], [credibleDomainEvidence, 20], [crediblePatternEvidence, 10]]) {
+      for (const item of items) {
+        const eventId = eventIdFromSource(item.s);
+        const current = evidenceByEvent.get(eventId);
+        if (!current || score > current.score) evidenceByEvent.set(eventId, { score, item });
+      }
+    }
+    const riskScore = Math.min(100, [...evidenceByEvent.values()].reduce((sum, entry) => sum + entry.score, 0));
     return {
       riskScore,
       reportsAcrossCommunities: actorIntel.reportsAcrossCommunities,
       wallets,
       domains,
       patterns,
-      evidence: [...actorIntel.evidence, ...credibleWalletEvidence, ...credibleDomainEvidence, ...crediblePatternEvidence],
+      evidence: [...evidenceByEvent.values()].map((entry) => entry.item),
       artifactEvidence
     };
   }
 
   async getStats(days = 7, { includeSources = true } = {}) {
-    const sparql = `SELECT ?g ?s ?eventType ?created ?confidence ?scamType ?chatId ?username ?eventSource ?testMode WHERE { GRAPH ?g { ?s <${NS}eventType> ?eventType . OPTIONAL { ?s <dcterms:created> ?created . } OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}scamType> ?scamType . } OPTIONAL { ?s <${NS}telegramChatId> ?chatId . } OPTIONAL { ?s <${NS}username> ?username . } OPTIONAL { ?s <${NS}source> ?eventSource . } OPTIONAL { ?s <${NS}testMode> ?testMode . } } } LIMIT 1000`;
+    const sparql = `SELECT ?g ?s ?eventType ?created ?confidence ?scamType ?chatId ?username ?eventSource ?testMode WHERE { GRAPH ?g { ?s <${NS}eventType> ?eventType . OPTIONAL { ?s <${DCTERMS_CREATED}> ?created . } OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}scamType> ?scamType . } OPTIONAL { ?s <${NS}telegramChatId> ?chatId . } OPTIONAL { ?s <${NS}username> ?username . } OPTIONAL { ?s <${NS}source> ?eventSource . } OPTIONAL { ?s <${NS}testMode> ?testMode . } } } LIMIT 1000`;
     const bindings = await this.queryBindings(sparql);
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
     const production = bindings.filter((binding) => isProductionBindingForContext(binding, this.config.contextGraph) && !isTestStatsBinding(binding));
     const recent = production.filter((binding) => {
       if (!binding.created) return true;
-      if (typeof binding.created === 'object') return true;
       const createdAt = Date.parse(cleanValue(binding.created));
       return Number.isNaN(createdAt) || createdAt >= cutoff;
     });

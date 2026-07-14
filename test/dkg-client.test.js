@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DkgClient, extractDomains, extractPatterns, extractWallets } from '../src/dkg-client.js';
+import { DkgClient as BaseDkgClient, extractDomains, extractPatterns, extractWallets } from '../src/dkg-client.js';
+
+const TEST_PSEUDONYM_KEY = 'test-pseudonym-key-at-least-32-bytes';
+
+class DkgClient extends BaseDkgClient {
+  constructor(config, dependencies) {
+    super({ dkgPseudonymKey: TEST_PSEUDONYM_KEY, ...config }, dependencies);
+  }
+}
 
 function makeAdapterClient({ publishError = null } = {}) {
   const calls = [];
@@ -89,6 +97,14 @@ test('DKG read and write kill switches fail closed', async () => {
   assert.equal(result.eventId, 'disabled');
 });
 
+test('direct DKG writes require a strong pseudonym key', async () => {
+  const dkg = new BaseDkgClient({ contextGraph: 'tracabot' }, { adapterClient: makeAdapterClient() });
+  await assert.rejects(
+    () => dkg.writeEvent({ id: 'missing-key', event_type: 'fraud_finding', payload: {} }),
+    /TRACABOT_DKG_PSEUDONYM_KEY must be at least 32 bytes/
+  );
+});
+
 test('extracts wallet addresses and scam patterns for DKG lookups', () => {
   const text = 'URGENT official support says verify wallet 0x1111111111111111111111111111111111111111 to claim free USDT airdrop';
   assert.deepEqual(extractWallets(text), ['0x1111111111111111111111111111111111111111']);
@@ -120,7 +136,8 @@ test('ignores report-only DKG evidence without independent local confidence', as
       s: 'https://tracabot.org/ontology#event/strong',
       eventType: '"fraud_finding"',
       confidence: '"95"',
-      localConfidence: '"80"'
+      localConfidence: '"80"',
+      chatId: '"-1001"'
     }
   ];
   const intel = await dkg.queryRiskIndicators({ username: 'BRX86' });
@@ -137,7 +154,8 @@ test('risk lookups ignore old graph and test command DKG evidence', async () => 
       s: 'https://tracabot.org/ontology#event/old',
       eventType: '"fraud_finding"',
       confidence: '"95"',
-      localConfidence: '"90"'
+      localConfidence: '"90"',
+      chatId: '"-1001"'
     },
     {
       g: 'did:dkg:context-graph:tracabot/_shared_memory',
@@ -154,7 +172,8 @@ test('risk lookups ignore old graph and test command DKG evidence', async () => 
       s: 'https://tracabot.org/ontology#event/real',
       eventType: '"fraud_finding"',
       confidence: '"95"',
-      localConfidence: '"90"'
+      localConfidence: '"90"',
+      chatId: '"-1002"'
     }
   ];
   const intel = await dkg.queryRiskIndicators({ username: 'badactor' });
@@ -162,40 +181,55 @@ test('risk lookups ignore old graph and test command DKG evidence', async () => 
   assert.deepEqual(intel.evidence.map((item) => item.eventId), ['real']);
 });
 
-test('risk lookups use shared actor aliases and telegram ids across communities', async () => {
+test('risk lookups prefer exact telegram identity over colliding aliases', async () => {
   const queries = [];
   const dkg = new DkgClient({ contextGraph: 'tracabot' });
   dkg.queryBindings = async (sparql) => {
     queries.push(sparql);
-    return [
+    if (sparql.includes('#actorIdentity')) return [
       {
         g: 'did:dkg:context-graph:tracabot/_shared_memory',
         s: 'https://tracabot.org/ontology#event/by-id',
         eventType: 'ban_executed',
         confidence: '100',
-        localConfidence: '0'
+        localConfidence: '0',
+        chatId: '-1001'
       },
-      {
-        g: 'did:dkg:context-graph:tracabot/_shared_memory',
-        s: 'https://tracabot.org/ontology#event/by-id',
-        eventType: 'ban_executed',
-        confidence: '100',
-        localConfidence: '0'
-      },
-      {
-        g: 'did:dkg:context-graph:tracabot/_shared_memory',
-        s: 'https://tracabot.org/ontology#event/by-alias',
-        eventType: 'fraud_finding',
-        confidence: '90',
-        localConfidence: '75'
-      }
     ];
+    return [{
+      g: 'did:dkg:context-graph:tracabot/_shared_memory',
+      s: 'https://tracabot.org/ontology#event/by-colliding-alias',
+      eventType: 'fraud_finding',
+      confidence: '90',
+      localConfidence: '75',
+      chatId: '-1002'
+    }];
   };
   const intel = await dkg.queryRiskIndicators({ username: 'new_handle', userId: 555, aliases: ['Old Fraud Name'] });
   assert.match(queries[0], /telegramUserId/);
+  assert.match(queries[0], /actorIdentity/);
+  assert.match(queries[0], /<http:\/\/purl\.org\/dc\/terms\/created>/);
+  assert.doesNotMatch(queries[0], /dcterms:created/);
+  assert.doesNotMatch(queries[0], /actorAlias/);
+  assert.equal(queries.length, 1);
+  assert.equal(intel.reportsAcrossCommunities, 1);
+  assert.deepEqual(intel.evidence.map((item) => item.eventId), ['by-id']);
+});
+
+test('risk lookups fall back to HMAC aliases and legacy raw predicates', async () => {
+  const queries = [];
+  const dkg = new DkgClient({ contextGraph: 'tracabot', dkgPseudonymKey: 'test-secret' });
+  dkg.queryBindings = async (sparql) => {
+    queries.push(sparql);
+    return [{ g: 'did:dkg:context-graph:tracabot/_verifiable_memory', s: 'https://tracabot.org/ontology#event/legacy', eventType: 'fraud_finding', confidence: '90', localConfidence: '75', communityToken: 'community-one' }];
+  };
+  const intel = await dkg.queryActor({ username: 'Old Fraud Name' });
+  assert.match(queries[0], /actorAliasToken/);
   assert.match(queries[0], /actorAlias/);
-  assert.equal(intel.reportsAcrossCommunities, 2);
-  assert.deepEqual(intel.evidence.map((item) => item.eventId), ['by-id', 'by-alias']);
+  assert.match(queries[0], /username/);
+  assert.doesNotMatch(queries[0], /Old Fraud Name/);
+  assert.equal(intel.reportsAcrossCommunities, 1);
+  assert.equal(intel.evidence[0].eventId, 'legacy');
 });
 
 test('admin history escapes identifiers and ignores false-positive or non-production bindings', async () => {
@@ -237,14 +271,13 @@ test('admin history escapes identifiers and ignores false-positive or non-produc
       }
     ];
   };
-  const history = await dkg.queryAdminHistoryForActor({ userId: 42, username: 'bad" } UNION { ?x ?y ?z } #' });
+  const history = await dkg.queryAdminHistoryForActor({ username: 'bad" } UNION { ?x ?y ?z } #' });
   assert.equal(history.hasPriorAdminAction, true);
   assert.equal(history.hasPriorFalsePositive, true);
   assert.deepEqual(history.events.map((event) => event.eventType), ['review_upheld']);
   assert.deepEqual(history.falsePositiveEvents.map((event) => event.eventId), ['false-positive-safe']);
-  assert.match(queries[0], /"42"/);
   assert.match(queries[0], /"badunionxyz"/);
-  assert.match(queries[0], /targetTelegramUserId/);
+  assert.match(queries[0], /targetAliasToken/);
   assert.match(queries[0], /targetUsername/);
   assert.match(queries[0], /targetKey/);
   assert.doesNotMatch(queries[0], /UNION \{ \?x \?y \?z \}/);
@@ -292,6 +325,65 @@ test('context oracle returns shared warning for unverified SWM risk', async () =
   assert.equal(result.verdict, 'shared_warning');
   assert.equal(result.trustLayer, 'shared_memory');
   assert.equal(result.evidence[0].eventId, 'swm-risk');
+});
+
+test('risk lookups query verifiable memory and score one event only once across indicators', async () => {
+  const calls = [];
+  const dkg = new DkgClient({ contextGraph: 'tracabot' });
+  dkg.queryBindings = async (sparql, options = {}) => {
+    calls.push(options);
+    return [{
+      g: 'did:dkg:context-graph:tracabot/_verifiable_memory',
+      s: 'https://tracabot.org/ontology#event/same-root',
+      eventType: 'fraud_finding',
+      confidence: '95',
+      localConfidence: '90',
+      chatId: '-1001'
+    }];
+  };
+  const intel = await dkg.queryRiskIndicators({
+    username: 'badactor',
+    text: 'urgent wallet verify at fake.example 0x1111111111111111111111111111111111111111'
+  });
+  assert.equal(intel.riskScore, 25);
+  assert.equal(intel.evidence.length, 1);
+  assert.ok(calls.every((options) => options.view === 'verifiable-memory' && options.includeSharedMemory === false));
+});
+
+test('actor report count uses distinct communities rather than event count', async () => {
+  const dkg = new DkgClient({ contextGraph: 'tracabot' });
+  dkg.queryBindings = async () => [
+    { g: 'did:dkg:context-graph:tracabot/_verifiable_memory', s: 'https://tracabot.org/ontology#event/one', eventType: 'ban_executed', confidence: '100', chatId: '-1001' },
+    { g: 'did:dkg:context-graph:tracabot/_verifiable_memory', s: 'https://tracabot.org/ontology#event/two', eventType: 'ban_executed', confidence: '100', chatId: '-1001' },
+    { g: 'did:dkg:context-graph:tracabot/_verifiable_memory', s: 'https://tracabot.org/ontology#event/three', eventType: 'ban_executed', confidence: '100', chatId: '-1002' }
+  ];
+  const intel = await dkg.queryActor({ userId: 42 });
+  assert.equal(intel.reportsAcrossCommunities, 2);
+  assert.equal(intel.evidence.length, 3);
+});
+
+test('context oracle uses newest verifiable decision for an actor', async () => {
+  const dkg = new DkgClient({ contextGraph: 'tracabot' });
+  dkg.queryBindings = async (_sparql, options = {}) => options.view === 'verifiable-memory' ? [
+    {
+      g: 'did:dkg:context-graph:tracabot/_verifiable_memory',
+      s: 'https://tracabot.org/ontology#event/new-risk',
+      eventType: 'review_upheld',
+      confidence: '95',
+      created: '2026-07-10T10:00:00.000Z'
+    },
+    {
+      g: 'did:dkg:context-graph:tracabot/_verifiable_memory',
+      s: 'https://tracabot.org/ontology#event/old-clear',
+      eventType: 'review_overturned',
+      confidence: '100',
+      tracBackedGlobalAuthority: 'true',
+      created: '2026-07-09T10:00:00.000Z'
+    }
+  ] : [];
+  const result = await dkg.queryContextOracle({ userId: 42 });
+  assert.equal(result.verdict, 'verified_risk');
+  assert.equal(result.evidence[0].eventId, 'new-risk');
 });
 
 test('risk lookups use shared scam domains across communities', async () => {
@@ -356,7 +448,8 @@ test('auto-publishes high-confidence fraud findings to the context graph', async
   assert.ok(adapterClient.calls.some(([method, id, name]) => method === 'createContextGraph' && id === 'tracabot' && /TRACaBot/.test(name)));
   assert.ok(adapterClient.calls.some(([method, contextGraphId, name]) => method === 'knowledgeAssetPublish' && contextGraphId === 'tracabot' && name === 'tracabot-event-evt-auto'));
   assert.ok(adapterClient.calls.some(([method, contextGraphId, name, opts]) => method === 'createKnowledgeAsset' && contextGraphId === 'tracabot' && name === 'tracabot-event-evt-auto' && opts.alsoShareSwm === true));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#actorAlias') && triple.object === '"badactor"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#actorAliasToken') && triple.object.startsWith('"hmac:v1:')));
+  assert.equal(result.triples.some((triple) => triple.predicate.endsWith('#actorAlias')), false);
 });
 
 test('verified-memory publish stays off unless explicitly enabled', async () => {
@@ -415,11 +508,11 @@ test('writes structured evidence fields for moderation knowledge', async () => {
       evidence: ['SangMata rename alert: QQQ -> Kristian Baumgartner']
     }
   });
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetTelegramUserId') && triple.object === '"8388593201"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetKey') && triple.object === '"id:8388593201"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#moderatorUsername') && triple.object === '"admin"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetIdentity') && triple.object.startsWith('"hmac:v1:')));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#moderatorIdentity') && triple.object.startsWith('"hmac:v1:')));
+  assert.equal(result.triples.some((triple) => /#(?:targetTelegramUserId|targetKey|moderatorUsername)$/.test(triple.predicate)), false);
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#restrictedUntil') && triple.object === '"2026-05-01T00:00:00.000Z"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#sangmataOldName') && triple.object === '"QQQ"'));
+  assert.equal(result.triples.some((triple) => triple.predicate.endsWith('#sangmataOldName')), false);
 });
 
 test('writes structured DM impersonation report fields', async () => {
@@ -446,11 +539,35 @@ test('writes structured DM impersonation report fields', async () => {
       evidence: ['reported alias: Branimir Rakic']
     }
   });
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#reportedAlias') && triple.object === '"Branimir Rakic"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#actorAliasToken') && triple.object.startsWith('"hmac:v1:')));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#claimedRole') && triple.object === '"cto"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#scamRequest') && triple.object === '"connect wallet"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#screenshotFileId') && triple.object === '"tg-photo-id"'));
+  assert.equal(result.triples.some((triple) => /#(?:reportedAlias|scamRequest|screenshotFileId)$/.test(triple.predicate)), false);
   assert.ok(result.triples.some((triple) => triple.predicate === 'rdf:type' && triple.object === 'http://dkg.io/ontology#KnowledgeAsset'));
+});
+
+test('writes structured appeal receipts and evidence references', async () => {
+  const adapterClient = makeAdapterClient();
+  const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient });
+  const result = await dkg.writeEvent({
+    id: 'evt-appeal',
+    event_type: 'appeal_submitted',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    chat: { id: '-100123' },
+    user: { id: '42', username: 'appellant' },
+    payload: {
+      appeal_receipt_id: 'appeal-receipt-1',
+      target_event_id: 'evt-flag',
+      source_message_id: '77',
+      provenance: 'telegram_appeal',
+      screenshot_file_ids: ['photo-1'],
+      evidence_urls: ['https://example.test/evidence'],
+      reason: 'false positive',
+      evidence: ['appeal evidence supplied']
+    }
+  });
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#appealReceiptId') && triple.object === '"appeal-receipt-1"'));
+  assert.equal(result.triples.some((triple) => /#(?:sourceMessageId|screenshotFileId|appealEvidenceUrl)$/.test(triple.predicate)), false);
 });
 
 test('writes unsafe chat event publication and review metadata', async () => {
@@ -492,26 +609,23 @@ test('writes unsafe chat event publication and review metadata', async () => {
     }
   });
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#adminVerified') && triple.object === '"true"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#lifecycleStage') && triple.object === '"verified_memory"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#communityId') && triple.object === '"-100123"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#communityName') && triple.object === '"Example DAO"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#lifecycleStage') && triple.object === '"verified_memory_candidate"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#communityToken') && triple.object.startsWith('"hmac:v1:')));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#policyId') && triple.object === '"strict-v1"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#publicationStatus') && triple.object === '"context_graph_auto_publish_eligible"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#messageText') && /verify wallet/.test(triple.object)));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetChatId') && triple.object === '"-100123"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetChatTitle') && triple.object === '"Example DAO"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#sourceMessageId') && triple.object === '"42"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#sourceMessageTextExcerpt') && /verify wallet/.test(triple.object)));
+  assert.equal(result.triples.some((triple) => /#(?:communityId|communityName|messageText|targetChatId|targetChatTitle|sourceMessageId)$/.test(triple.predicate)), false);
+  assert.equal(result.triples.some((triple) => triple.predicate.endsWith('#sourceMessageTextExcerpt')), false);
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#evidenceBasis') && triple.object === '"prior_admin_action"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#priorAdminActionId') && triple.object === '"evt-prior-ban"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#similarityBasis') && triple.object === '"same username and lure"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#urgentAdminAlert') && triple.object === '"true"'));
   assert.ok(result.triples.some((triple) => triple.predicate === 'rdf:type' && triple.object === 'http://dkg.io/ontology#KnowledgeAsset'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#hasEvidence')));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#evidenceText') && /wallet verification/.test(triple.object)));
+  assert.equal(result.triples.some((triple) => /#(?:hasEvidence|evidenceText|evidenceIndex)$/.test(triple.predicate)), false);
+  assert.equal(result.triples.some((triple) => triple.subject.includes('/evidence/')), false);
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#observedDomain')));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#observedPattern')));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#suspiciousUrl') && /fake-claim/.test(triple.object)));
+  assert.equal(result.triples.some((triple) => triple.predicate.endsWith('#suspiciousUrl')), false);
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#scamDomain') && /fake-claim/.test(triple.object)));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#detectionSignal') && /screenshot/.test(triple.object)));
 });
 
@@ -543,7 +657,7 @@ test('writes channel observations to shared memory without verified publish', as
   assert.equal(adapterClient.calls.some(([method]) => method === 'knowledgeAssetPublish'), false);
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#lifecycleStage') && triple.object === '"shared_memory"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#observationType') && triple.object === '"high_confidence_channel_message"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#messageText') && /alpha signals/.test(triple.object)));
+  assert.equal(result.triples.some((triple) => triple.predicate.endsWith('#messageText')), false);
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#textFingerprint') && triple.object === '"join alpha signals"'));
 });
 
@@ -673,19 +787,22 @@ test('review-overturned events write reviewed target identity for global admin c
       evidence: ['trusted admin cleared false positive']
     }
   });
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#telegramUserId') && triple.object === '"1"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetTelegramUserId') && triple.object === '"4242"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetUsername') && triple.object === '"safeuser"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetKey') && triple.object === '"id:4242"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#trustedGlobalClear') && triple.object === '"true"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#decisionScope') && triple.object === '"global_verified_memory"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#reviewChatId') && triple.object === '"-100123"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#actorIdentity') && triple.object.startsWith('"hmac:v1:')));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetIdentity') && triple.object.startsWith('"hmac:v1:')));
+  assert.equal(result.triples.some((triple) => /#(?:telegramUserId|targetTelegramUserId|targetUsername|targetKey)$/.test(triple.predicate)), false);
+  assert.equal(result.triples.some((triple) => triple.predicate.endsWith('#trustedGlobalClear') && triple.object === '"true"'), false);
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#decisionScope') && triple.object === '"global_verified_memory_candidate"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#trustBasis') && triple.object === '"bot_owner_verified_memory_candidate"'));
+  assert.equal(result.triples.some((triple) => triple.predicate.endsWith('#reviewChatId')), false);
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#reviewScope') && triple.object === '"same_channel"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#reviewJurisdiction') && triple.object === '"local_channel"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#reviewWeight') && triple.object === '"1"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#decisionThreshold') && triple.object === '"1"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#resolvesTargetPendingReviews') && triple.object === '"true"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#tracBackedGlobalAuthority') && triple.object === '"true"'));
+  assert.equal(result.triples.some((triple) => triple.predicate.endsWith('#tracBackedGlobalAuthority') && triple.object === '"true"'), false);
+  assert.equal(result.triples.some((triple) => triple.predicate.endsWith('#verifiedMemoryAuthority') && triple.object === '"true"'), false);
+  assert.equal(result.triples.some((triple) => triple.predicate.endsWith('#adminVerified') && triple.object === '"true"'), false);
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#verifiedMemoryCandidate') && triple.object === '"true"'));
 });
 
 test('local admin false-positive reviews are not global clears without TRAC-backed authority', async () => {
@@ -765,7 +882,8 @@ test('publishes campaign summaries with evidence roots', async () => {
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#lifecycleStage') && triple.object === '"campaign_summary"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#evidenceRootId') && triple.object === '"evt-a"'));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#evidenceRoot') && triple.object.endsWith('#event/evt-a')));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#affectedCommunityId') && triple.object === '"-1002"'));
+  assert.equal(result.triples.some((triple) => triple.predicate.endsWith('#affectedCommunityId')), false);
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#affectedCommunityToken') && triple.object.startsWith('"hmac:v1:')));
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#campaignEventCount') && triple.object === '"2"'));
   assert.equal(adapterClient.calls.some(([method]) => method === 'knowledgeAssetPublish'), true);
   const publishCall = adapterClient.calls.find(([method]) => method === 'knowledgeAssetPublish');
@@ -841,6 +959,21 @@ test('does not retry non-transient DKG assertion lifecycle failures', async () =
   assert.equal(adapterClient.calls.filter(([method]) => method === 'createKnowledgeAsset').length, 1);
 });
 
+test('retries transient verified-memory publish failures', async () => {
+  const adapterClient = makeAdapterClient();
+  let attempts = 0;
+  adapterClient.knowledgeAssetPublish = async (contextGraphId, name) => {
+    adapterClient.calls.push(['knowledgeAssetPublish', contextGraphId, name]);
+    attempts += 1;
+    if (attempts === 1) throw new Error('503 temporarily unavailable');
+    return { status: 'published', assertionName: name };
+  };
+  const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient });
+  const result = await dkg.publishEvent('tracabot-event-retry', 'urn:event:retry');
+  assert.equal(attempts, 2);
+  assert.equal(result.status, 'published');
+});
+
 test('keeps shared-memory write result when automatic context graph publish fails', async () => {
   const adapterClient = makeAdapterClient({ publishError: new Error('publish command failed') });
   const dkg = new DkgClient({ contextGraph: 'tracabot' }, {
@@ -864,7 +997,7 @@ test('keeps shared-memory write result when automatic context graph publish fail
   assert.match(result.publish_error, /publish command failed/);
 });
 
-test('DM scam reports publish reported aliases as reusable DKG actor aliases', async () => {
+test('DM scam reports publish reported aliases as reusable HMAC tokens', async () => {
   const adapterClient = makeAdapterClient();
   const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient });
   const result = await dkg.writeEvent({
@@ -883,8 +1016,8 @@ test('DM scam reports publish reported aliases as reusable DKG actor aliases', a
       evidence: ['fake_helper asked for wallet validation in DM']
     }
   });
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#actorAlias') && triple.object === '"fake_helper"'));
-  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#reportedAlias') && triple.object === '"fake_helper"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#actorAliasToken') && triple.object.startsWith('"hmac:v1:')));
+  assert.equal(result.triples.some((triple) => /#(?:actorAlias|reportedAlias)$/.test(triple.predicate)), false);
 });
 
 test('risk lookups reuse credible DM scam reports by reported alias', async () => {
@@ -896,6 +1029,7 @@ test('risk lookups reuse credible DM scam reports by reported alias', async () =
       eventType: '"dm_scam_report"',
       confidence: '"88"',
       localConfidence: '"82"',
+      chatId: '"-1001"',
       evidence: '"accepted DM impersonation report"'
     },
     {

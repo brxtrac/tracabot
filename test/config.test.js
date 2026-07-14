@@ -20,6 +20,14 @@ test('loadConfig defaults to public tracabot graph and disables VM publish', () 
   assert.equal(config.dkgWrites, true);
   assert.equal(config.dkgPublishVerified, false);
   assert.equal(loadConfig({ TRACABOT_DKG_PUBLISH_VERIFIED: 'true' }).dkgPublishVerified, true);
+  assert.equal(config.storePath, './data/tracabot-events.sqlite');
+  assert.equal(config.legacyStorePath, './data/tracabot-events.jsonl');
+});
+
+test('loadConfig supports explicit SQLite and legacy migration paths', () => {
+  const config = loadConfig({ TRACABOT_DB_PATH: '/tmp/tracabot.sqlite', TRACABOT_LEGACY_STORE_PATH: '/tmp/tracabot.jsonl' });
+  assert.equal(config.databasePath, '/tmp/tracabot.sqlite');
+  assert.equal(config.legacyStorePath, '/tmp/tracabot.jsonl');
 });
 
 test('loadConfig parses on-chain publish context graph id', () => {

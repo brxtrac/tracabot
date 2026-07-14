@@ -8,7 +8,7 @@ import { analyzeMessage } from '../src/scam-analyzer.js';
 import { extractDomains } from '../src/dkg-client.js';
 import { EventStore } from '../src/store.js';
 
-function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = null, dkgIntel = null, adminIds = ['1234'], llm = null, conversational = false, chatAdmins = [], configOverrides = {}, validateUal = null }) {
+function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = null, dkgIntel = null, adminIds = ['1234'], llm = null, conversational = false, chatAdmins = [], configOverrides = {}, validateUal = null, dkgWriteResult = null }) {
   const calls = [];
   const dkgWrites = [];
   const dkg = {
@@ -23,7 +23,8 @@ function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = nu
     },
     async writeEvent(event) {
       dkgWrites.push(event);
-      return {
+      if (dkgWriteResult instanceof Error) throw dkgWriteResult;
+      return dkgWriteResult || {
         output: 'written',
         eventId: event.id,
         ual: 'did:dkg:context-graph:tracabot/_shared_memory',
@@ -589,6 +590,146 @@ test('polling requests chat member updates for joins', async () => {
   assert.deepEqual(poll.payload.allowed_updates, ['message', 'callback_query', 'chat_member', 'my_chat_member']);
 });
 
+test('polling HTTP timeout exceeds Telegram long poll with minimum timeout config', async () => {
+  const { bot } = makeBot({ canBan: true, configOverrides: { telegramTimeoutMs: 5000 } });
+  const originalFetch = globalThis.fetch;
+  const originalSetTimeout = globalThis.setTimeout;
+  let requestTimeoutMs;
+  bot.call = TelegramShieldBot.prototype.call.bind(bot);
+  globalThis.fetch = async () => ({ json: async () => ({ ok: true, result: [] }) });
+  globalThis.setTimeout = (callback, delay) => {
+    requestTimeoutMs = delay;
+    return originalSetTimeout(callback, delay);
+  };
+  try {
+    await bot.pollOnce();
+    assert.equal(requestTimeoutMs, 30000);
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test('polling failures use bounded exponential backoff and reset after recovery', () => {
+  const { bot } = makeBot({ canBan: true });
+  const originalRandom = Math.random;
+  const originalError = console.error;
+  const logs = [];
+  Math.random = () => 0.5;
+  console.error = (message) => logs.push(message);
+  try {
+    const delays = Array.from({ length: 8 }, () => bot.notePollingFailure(new Error('fetch failed')));
+    assert.deepEqual(delays, [1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000]);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0], /kind=transport, consecutive=1, retry_ms=1000/);
+    assert.equal(bot.store.metrics().telegram_poll_failures, 8);
+    assert.equal(bot.store.metrics().telegram_poll_transport_failures, 8);
+    bot.notePollingSuccess();
+    assert.match(logs[1], /recovered after 8 consecutive failure/);
+    assert.equal(bot.store.metrics().telegram_poll_recoveries, 1);
+    assert.equal(bot.notePollingFailure(new Error('fetch failed')), 1000);
+  } finally {
+    Math.random = originalRandom;
+    console.error = originalError;
+  }
+});
+
+test('polling classifies aborted requests as timeouts', () => {
+  const { bot } = makeBot({ canBan: true });
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    const cause = new Error('request aborted');
+    cause.name = 'AbortError';
+    bot.notePollingFailure(new Error('Telegram getUpdates outcome unknown', { cause }));
+    assert.equal(bot.store.metrics().telegram_poll_timeout_failures, 1);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test('polling backoff exits promptly when shutdown signal aborts', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const controller = new AbortController();
+  const originalError = console.error;
+  console.error = () => {};
+  bot.dropPendingUpdates = async () => {};
+  bot.pollOnce = async () => {
+    setTimeout(() => controller.abort(), 10);
+    const error = new Error('fetch failed');
+    error.telegramPollingFailure = true;
+    throw error;
+  };
+  try {
+    await bot.run({ signal: controller.signal });
+    assert.equal(bot.store.metrics().telegram_poll_failures, 1);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test('polling shutdown aborts an in-flight long poll without failure metrics', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const controller = new AbortController();
+  const originalFetch = globalThis.fetch;
+  const originalCall = TelegramShieldBot.prototype.call.bind(bot);
+  bot.dropPendingUpdates = async () => {};
+  bot.call = (method, payload, options) => method === 'getUpdates'
+    ? originalCall(method, payload, options)
+    : Promise.resolve({ ok: true });
+  globalThis.fetch = async (_url, { signal }) => new Promise((_resolve, reject) => {
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    controller.abort();
+  });
+  try {
+    await bot.run({ signal: controller.signal });
+    assert.equal(bot.store.metrics().telegram_poll_failures, undefined);
+    assert.equal(bot.store.metrics().telegram_api_errors, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('polling shutdown skips fetched updates that have not started', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const controller = new AbortController();
+  let handled = 0;
+  let backgroundRuns = 0;
+  bot.call = async (method) => {
+    if (method !== 'getUpdates') return { ok: true };
+    controller.abort();
+    return [{ update_id: 42, message: { chat: { id: -100 }, from: { id: 77 }, text: '/start' } }];
+  };
+  bot.handleMessage = async () => { handled += 1; };
+  bot.proactiveScan = async () => { backgroundRuns += 1; };
+  bot.expireJoinChallenges = async () => { backgroundRuns += 1; };
+  bot.maybePostDailySafeTip = async () => { backgroundRuns += 1; };
+  await bot.pollOnce({ signal: controller.signal });
+  assert.equal(handled, 0);
+  assert.equal(backgroundRuns, 0);
+  assert.equal(bot.offset, 0);
+});
+
+test('polling run exits before startup work when shutdown already requested', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const controller = new AbortController();
+  controller.abort();
+  let dkgChecks = 0;
+  bot.dkg.ensureContextGraph = async () => { dkgChecks += 1; };
+  await bot.run({ signal: controller.signal });
+  assert.equal(dkgChecks, 0);
+  assert.equal(calls.length, 0);
+});
+
+test('update handler failures do not increment polling transport metrics', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const update = { update_id: 41, message: { chat: { id: -100, type: 'supergroup' }, from: { id: 77 }, message_id: 2, text: '/start' } };
+  bot.call = async (method) => method === 'getUpdates' ? [update] : { ok: true };
+  bot.handleMessage = async () => { throw new Error('handler failed'); };
+  await assert.rejects(() => bot.pollOnce(), /handler failed/);
+  assert.equal(bot.store.metrics().telegram_poll_failures, undefined);
+});
+
 test('polling does not acknowledge an update whose handler failed', async () => {
   const { bot } = makeBot({ canBan: true });
   const update = { update_id: 42, message: { chat: { id: -100, type: 'supergroup' }, from: { id: 77 }, message_id: 3, text: '/start' } };
@@ -606,6 +747,204 @@ test('polling does not acknowledge an update whose handler failed', async () => 
   assert.equal(attempts, 2);
 });
 
+test('polling does not advance in-memory offset when durable completion fails', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const update = { update_id: 43, message: { chat: { id: -100, type: 'supergroup' }, from: { id: 77 }, message_id: 30, text: '/start' } };
+  bot.call = async (method) => method === 'getUpdates' ? [update] : { ok: true };
+  bot.handleMessage = async () => {};
+  bot.store.completeUpdate = () => { throw new Error('commit failed'); };
+  await assert.rejects(() => bot.pollOnce(), /commit failed/);
+  assert.equal(bot.offset, 0);
+});
+
+test('successful polling persists offset and skips completed update replay', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const update = { update_id: 52, message: { chat: { id: -100, type: 'supergroup' }, from: { id: 77 }, message_id: 4, text: '/start' } };
+  let handled = 0;
+  bot.call = async (method) => method === 'getUpdates' ? [update] : { ok: true };
+  bot.handleMessage = async () => { handled += 1; };
+  await bot.pollOnce();
+  bot.offset = 0;
+  await bot.pollOnce();
+  assert.equal(handled, 1);
+  assert.equal(bot.store.pollingOffset(bot.botKey), 53);
+});
+
+test('retry after a later handler failure does not duplicate sent message effect', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const update = { update_id: 53, message: { chat: { id: -100, type: 'supergroup' }, from: { id: 77 }, message_id: 5, text: 'retry me' } };
+  bot.call = async (method, payload) => {
+    calls.push({ method, payload });
+    if (method === 'getUpdates') return [update];
+    if (method === 'sendMessage') return { message_id: 99, ...payload };
+    return { ok: true };
+  };
+  let attempts = 0;
+  bot.handleMessage = async () => {
+    await bot.send(-100, 'one durable reply');
+    attempts += 1;
+    if (attempts === 1) throw new Error('failure after send');
+  };
+  await assert.rejects(() => bot.pollOnce(), /failure after send/);
+  await bot.pollOnce();
+  assert.equal(calls.filter((call) => call.method === 'sendMessage').length, 1);
+});
+
+test('does not replay Telegram effect when ledger completion fails after API success', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  bot.currentUpdateId = 54;
+  bot.call = async (method, payload) => {
+    calls.push({ method, payload });
+    return { message_id: 100, ...payload };
+  };
+  const completeEffect = bot.store.completeEffect.bind(bot.store);
+  bot.store.completeEffect = () => { throw new Error('disk commit failed'); };
+  await assert.rejects(() => bot.send(-100, 'one uncertain reply'), /refusing replay/);
+  bot.store.completeEffect = completeEffect;
+  await assert.rejects(() => bot.send(-100, 'one uncertain reply'), /refusing replay/);
+  assert.equal(calls.filter((call) => call.method === 'sendMessage').length, 1);
+});
+
+test('does not accept Telegram success when ledger transition returns false', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  bot.currentUpdateId = 540;
+  bot.call = async (method, payload) => {
+    calls.push({ method, payload });
+    return { message_id: 100, ...payload };
+  };
+  const completeEffect = bot.store.completeEffect.bind(bot.store);
+  bot.store.completeEffect = () => false;
+  await assert.rejects(() => bot.send(-100, 'unknown commit result'), /refusing replay/);
+  bot.store.completeEffect = completeEffect;
+  await assert.rejects(() => bot.send(-100, 'unknown commit result'), /refusing replay/);
+  assert.equal(calls.filter((call) => call.method === 'sendMessage').length, 1);
+});
+
+test('canonicalizes Telegram payloads and rejects explicit key reuse for changed requests', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  bot.call = async (method, payload) => {
+    calls.push({ method, payload });
+    return { ok: true };
+  };
+  await bot.callEffect('sendMessage', { chat_id: -100, options: { b: 2, a: 1 } }, 'stable-explicit');
+  await bot.callEffect('sendMessage', { options: { a: 1, b: 2, omitted: undefined }, chat_id: -100 }, 'stable-explicit');
+  await assert.rejects(
+    () => bot.callEffect('sendMessage', { chat_id: -100, options: { a: 9, b: 2 } }, 'stable-explicit'),
+    /different request/
+  );
+  assert.equal(calls.length, 1);
+});
+
+test('scopes explicit Telegram effects to bot token identity', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const other = new TelegramShieldBot({ config: { ...bot.config, telegramToken: 'other-token' }, analyzer: bot.analyzer, dkg: bot.dkg, store: bot.store });
+  bot.call = async (method, payload) => { calls.push({ method, payload, bot: 'first' }); return { ok: true }; };
+  other.call = async (method, payload) => { calls.push({ method, payload, bot: 'other' }); return { ok: true }; };
+  await bot.callEffect('sendMessage', { chat_id: -100, text: 'notice' }, 'same-semantic-key');
+  await other.callEffect('sendMessage', { chat_id: -100, text: 'notice' }, 'same-semantic-key');
+  assert.deepEqual(calls.map((call) => call.bot), ['first', 'other']);
+});
+
+test('does not replay send when Telegram transport outcome is unknown', async () => {
+  const { bot } = makeBot({ canBan: true });
+  bot.currentUpdateId = 541;
+  const originalFetch = globalThis.fetch;
+  let attempts = 0;
+  globalThis.fetch = async () => {
+    attempts += 1;
+    throw new TypeError('connection reset after request');
+  };
+  try {
+    bot.call = TelegramShieldBot.prototype.call.bind(bot);
+    await assert.rejects(() => bot.send(-100, 'maybe delivered'), /outcome unknown/);
+    await assert.rejects(() => bot.send(-100, 'maybe delivered'), /refusing replay/);
+    assert.equal(attempts, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('does not replay send after an ambiguous Telegram server error', async () => {
+  const { bot } = makeBot({ canBan: true });
+  bot.currentUpdateId = 5411;
+  const originalFetch = globalThis.fetch;
+  let attempts = 0;
+  globalThis.fetch = async () => {
+    attempts += 1;
+    return {
+      status: 502,
+      statusText: 'Bad Gateway',
+      async json() { return { ok: false, description: 'Bad Gateway' }; }
+    };
+  };
+  try {
+    bot.call = TelegramShieldBot.prototype.call.bind(bot);
+    await assert.rejects(() => bot.send(-100, 'maybe delivered'), /outcome unknown/);
+    await assert.rejects(() => bot.send(-100, 'maybe delivered'), /refusing replay/);
+    assert.equal(attempts, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('does not replay an abandoned Telegram effect after its claim expires', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  bot.currentUpdateId = 542;
+  const beginEffect = bot.store.beginEffect.bind(bot.store);
+  let claimedKey = '';
+  bot.store.beginEffect = (key, ...args) => {
+    claimedKey = key;
+    beginEffect(key, ...args);
+    return { completed: false, inProgress: true };
+  };
+  await assert.rejects(() => bot.send(-100, 'possibly delivered'), /already in progress/);
+  bot.store.beginEffect = beginEffect;
+  bot.store.db.prepare("UPDATE effects SET updated_at=? WHERE effect_key=?")
+    .run(new Date(Date.now() - 6 * 60 * 1000).toISOString(), claimedKey);
+  await assert.rejects(() => bot.send(-100, 'possibly delivered'), /refusing replay/);
+  assert.equal(calls.filter((call) => call.method === 'sendMessage').length, 0);
+});
+
+test('durably deduplicates interactive edits and accepts already-applied state', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  bot.currentUpdateId = 543;
+  await bot.editInteractiveMessage(-100, 22, 'Final state');
+  await bot.editInteractiveMessage(-100, 22, 'Final state');
+  assert.equal(calls.filter((call) => call.method === 'editMessageText').length, 1);
+
+  bot.currentUpdateId = 544;
+  bot.call = async (method, payload) => {
+    calls.push({ method, payload });
+    throw new Error('Telegram editMessageText failed: Bad Request: message is not modified');
+  };
+  const result = await bot.editInteractiveMessage(-100, 23, 'Existing state');
+  assert.equal(result.not_modified, true);
+  await bot.editInteractiveMessage(-100, 23, 'Existing state');
+  assert.equal(calls.filter((call) => call.method === 'editMessageText' && call.payload.message_id === 23).length, 1);
+});
+
+test('record awaits pending-review notification and reuses stable effect on replay', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  bot.currentUpdateId = 55;
+  let release;
+  bot.call = async (method, payload) => {
+    calls.push({ method, payload });
+    if (method === 'sendMessage') await new Promise((resolve) => { release = resolve; });
+    return { message_id: 101, ...payload };
+  };
+  let settled = false;
+  const pending = bot.record('risk_review_needed', { chat: { id: -100, type: 'supergroup' }, from: { id: 77, username: 'suspect' }, message_id: 6 }, { confidence: 90, evidence: ['wallet drain'] }, { writeDkg: false })
+    .finally(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  release();
+  const event = await pending;
+  bot.lastPendingReviewNoticeAt.clear();
+  const replay = await bot.record('risk_review_needed', { chat: { id: -100, type: 'supergroup' }, from: { id: 77, username: 'suspect' }, message_id: 6 }, { confidence: 90, evidence: ['wallet drain'] }, { writeDkg: false });
+  assert.equal(replay.id, event.id);
+  assert.equal(calls.filter((call) => call.method === 'sendMessage').length, 1);
+});
+
 test('failed pending-review notification does not consume its cooldown', async () => {
   const { bot } = makeBot({ canBan: true });
   const event = {
@@ -617,10 +956,10 @@ test('failed pending-review notification does not consume its cooldown', async (
     payload: { confidence: 90, target_chat_id: '-100' }
   };
   let attempts = 0;
-  bot.send = async () => {
+  bot.call = async (method, payload) => {
     attempts += 1;
     if (attempts === 1) throw new Error('temporary Telegram failure');
-    return { message_id: 10 };
+    return { message_id: 10, ...payload };
   };
 
   await assert.rejects(() => bot.maybeNotifyPendingReview(event), /temporary Telegram failure/);
@@ -628,6 +967,158 @@ test('failed pending-review notification does not consume its cooldown', async (
   await bot.maybeNotifyPendingReview(event);
   assert.equal(attempts, 2);
   assert.ok(bot.lastPendingReviewNoticeAt.has('-100'));
+});
+
+test('pending-review notification cooldown survives bot restart', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const event = {
+    id: 'notice-restart',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat: { id: -100, type: 'supergroup' },
+    user: { id: 77, username: 'suspect' },
+    payload: { confidence: 90, target_chat_id: '-100' }
+  };
+  await bot.maybeNotifyPendingReview(event);
+  const restarted = new TelegramShieldBot({ config: bot.config, analyzer: bot.analyzer, dkg: bot.dkg, store: new EventStore(bot.store.path) });
+  restarted.call = async (method, payload) => {
+    calls.push({ method, payload });
+    return { message_id: 999, ...payload };
+  };
+  await restarted.maybeNotifyPendingReview({ ...event, id: 'notice-restart-2' });
+  assert.equal(calls.filter((call) => call.method === 'sendMessage').length, 1);
+});
+
+test('pending review notice offers immediate confirm reject and queue actions', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const event = {
+    id: 'notice-actions',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat: { id: -100, type: 'supergroup' },
+    user: { id: 77, username: 'suspect' },
+    payload: { confidence: 90, target_chat_id: '-100', source_message_id: 41 }
+  };
+  bot.store.append(event);
+  await bot.maybeNotifyPendingReview(event);
+  const buttons = calls.find((call) => call.method === 'sendMessage').payload.reply_markup.inline_keyboard.flat();
+  assert.ok(buttons.some((item) => item.text.includes('Confirm scam') && item.callback_data.includes('review-confirm')));
+  assert.ok(buttons.some((item) => item.text.includes('Reject flag') && item.callback_data.includes('review-reject')));
+  assert.ok(buttons.some((item) => item.text.includes('Open reviews') && item.callback_data.includes('review-list')));
+});
+
+test('immediate scam confirmation bans target and deletes known messages', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, type: 'supergroup' };
+  const event = {
+    id: 'confirm-enforce',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 77, username: 'suspect' },
+    payload: { confidence: 95, target_chat_id: '-100', source_message_id: 41, evidence: ['wallet drain'] }
+  };
+  bot.store.append(event);
+  bot.observedUserMessages.set('-100:77', [39, 40]);
+  const data = bot.reviewActionKeyboard('admin', event.id)[0][0].callback_data;
+  await bot.handleCallbackQuery({ id: 'confirm-now', from: { id: 1, username: 'admin' }, message: { chat, message_id: 90 }, data });
+  assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 77));
+  assert.deepEqual(calls.filter((call) => call.method === 'deleteMessage' && [39, 40, 41].includes(call.payload.message_id)).map((call) => call.payload.message_id).sort(), [39, 40, 41]);
+  assert.ok(bot.store.all().some((item) => item.event_type === 'review_upheld' && item.payload.enforcement_banned === true));
+  assert.ok(bot.store.all().some((item) => item.event_type === 'ban_executed' && item.payload.deleted_message_count === 3));
+});
+
+test('concurrent scam confirmations enforce one decision once', async () => {
+  const { bot, calls } = makeBot({ canBan: true, trustedUserIds: [1, 2] });
+  const chat = { id: -100, type: 'supergroup' };
+  const event = {
+    id: 'confirm-concurrent',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 77, username: 'suspect' },
+    payload: { confidence: 95, target_chat_id: '-100', source_message_id: 41, evidence: ['wallet drain'] }
+  };
+  bot.store.append(event);
+  bot.observedUserMessages.set('-100:77', [39, 40]);
+  const data = bot.reviewActionKeyboard('admin', event.id)[0][0].callback_data;
+  await Promise.all([
+    bot.handleCallbackQuery({ id: 'confirm-first', from: { id: 1, username: 'admin' }, message: { chat, message_id: 90 }, data }),
+    bot.handleCallbackQuery({ id: 'confirm-second', from: { id: 2, username: 'otheradmin' }, message: { chat, message_id: 90 }, data })
+  ]);
+  assert.equal(calls.filter((call) => call.method === 'banChatMember' && call.payload.user_id === 77).length, 1);
+  assert.equal(calls.filter((call) => call.method === 'deleteMessage' && [39, 40, 41].includes(call.payload.message_id)).length, 3);
+  assert.equal(bot.store.all().filter((item) => item.event_type === 'review_upheld' && item.payload.target_event_id === event.id).length, 1);
+  assert.equal(bot.store.all().filter((item) => item.event_type === 'ban_executed' && item.payload.target_event_id === event.id).length, 1);
+});
+
+test('uncertain review decision refuses automatic replay', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, type: 'supergroup' };
+  const event = {
+    id: 'confirm-uncertain',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 77, username: 'suspect' },
+    payload: { confidence: 95, target_chat_id: '-100', source_message_id: 41, evidence: ['wallet drain'] }
+  };
+  bot.store.append(event);
+  const originalBeginEffect = bot.store.beginEffect.bind(bot.store);
+  bot.store.beginEffect = (key, ...args) => key.endsWith(':decision') ? { uncertain: true } : originalBeginEffect(key, ...args);
+  const data = bot.reviewActionKeyboard('admin', event.id)[0][0].callback_data;
+  await bot.handleCallbackQuery({ id: 'confirm-uncertain', from: { id: 1, username: 'admin' }, message: { chat, message_id: 90 }, data });
+  assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
+  assert.ok(calls.some((call) => call.method === 'answerCallbackQuery' && /manual verification required/i.test(call.payload.text)));
+});
+
+test('review crash after enforcement repairs evidence without replaying ban', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, type: 'supergroup' };
+  const event = {
+    id: 'confirm-crash-after-enforcement',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 77, username: 'suspect' },
+    payload: { confidence: 95, target_chat_id: '-100', source_message_id: 41, evidence: ['wallet drain'] }
+  };
+  bot.store.append(event);
+  const originalRecordDecision = bot.recordReviewDecisionForEvents.bind(bot);
+  bot.recordReviewDecisionForEvents = async () => { throw new Error('simulated crash before evidence commit'); };
+  const data = bot.reviewActionKeyboard('admin', event.id)[0][0].callback_data;
+  await assert.rejects(
+    bot.handleCallbackQuery({ id: 'confirm-crash-first', from: { id: 1, username: 'admin' }, message: { chat, message_id: 90 }, data }),
+    /simulated crash/
+  );
+  bot.recordReviewDecisionForEvents = originalRecordDecision;
+  await bot.handleCallbackQuery({ id: 'confirm-crash-retry', from: { id: 1, username: 'admin' }, message: { chat, message_id: 90 }, data });
+  assert.equal(calls.filter((call) => call.method === 'banChatMember' && call.payload.user_id === 77).length, 1);
+  assert.equal(bot.store.all().filter((item) => item.event_type === 'review_upheld' && item.payload.target_event_id === event.id).length, 1);
+  assert.equal(bot.store.all().filter((item) => item.event_type === 'ban_executed' && item.payload.target_event_id === event.id).length, 1);
+});
+
+test('concurrent confirmations on different events for one target enforce one grouped decision', async () => {
+  const { bot, calls } = makeBot({ canBan: true, trustedUserIds: [1, 2] });
+  const chat = { id: -100, type: 'supergroup' };
+  const events = [41, 42].map((messageId) => ({
+    id: `confirm-group-${messageId}`,
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 77, username: 'suspect' },
+    payload: { confidence: 95, target_chat_id: '-100', source_message_id: messageId, evidence: ['wallet drain'] }
+  }));
+  events.forEach((event) => bot.store.append(event));
+  await Promise.all(events.map((event, index) => bot.handleCallbackQuery({
+    id: `confirm-group-${index}`,
+    from: { id: index + 1, username: `admin${index}` },
+    message: { chat, message_id: 90 + index },
+    data: bot.reviewActionKeyboard('admin', event.id)[0][0].callback_data
+  })));
+  assert.equal(calls.filter((call) => call.method === 'banChatMember' && call.payload.user_id === 77).length, 1);
+  assert.equal(bot.store.all().filter((item) => item.event_type === 'review_upheld' && events.some((event) => event.id === item.payload.target_event_id)).length, 2);
+  assert.equal(bot.store.all().filter((item) => item.event_type === 'ban_executed' && events.some((event) => event.id === item.payload.target_event_id)).length, 1);
 });
 
 test('review queue uses admin-scoped inline buttons and callback decisions', async () => {
@@ -670,7 +1161,8 @@ test('bot owner with verified-memory publishing creates TRAC-backed global revie
   const { bot, calls } = makeBot({
     canBan: true,
     trustedUserIds: [1],
-    configOverrides: { botOwnerIds: new Set(['1']), publishContextGraphId: '13' }
+    configOverrides: { botOwnerIds: new Set(['1']), publishContextGraphId: '13' },
+    dkgWriteResult: { output: 'written', publish: { ual: 'did:dkg:100/0x123/1' } }
   });
   const chat = { id: -100, type: 'supergroup' };
   await bot.handleMessage({ chat, from: { id: 77, username: 'suspect', is_bot: false }, message_id: 22, text: 'known scam actor returns' });
@@ -683,6 +1175,60 @@ test('bot owner with verified-memory publishing creates TRAC-backed global revie
   assert.equal(review.payload.trac_backed_global_authority, true);
   assert.equal(review.payload.decision_scope, 'global_verified_memory');
   assert.equal(review.payload.publish_false_positive, true);
+});
+
+test('bot owner review remains local when verified-memory publish fails', async () => {
+  const { bot } = makeBot({
+    canBan: true,
+    trustedUserIds: [1],
+    configOverrides: { botOwnerIds: new Set(['1']), publishContextGraphId: '13' },
+    dkgWriteResult: { output: 'shared', publish_error: 'publish failed' }
+  });
+  const chat = { id: -100, type: 'supergroup' };
+  await bot.handleMessage({ chat, from: { id: 77, username: 'suspect', is_bot: false }, message_id: 24, text: 'known scam actor returns' });
+  const flagged = bot.store.all().find((event) => event.event_type === 'risk_review_needed' && event.user.id === 77);
+  await bot.handleCallbackQuery({ id: 'owner-local-clear', from: { id: 1, username: 'owner' }, message: { chat, message_id: 25 }, data: bot.reviewActionKeyboard(1, flagged.id)[0][1].callback_data });
+  const review = bot.store.all().find((event) => event.event_type === 'review_overturned' && event.payload.reviewer.id === 1);
+  assert.equal(review.payload.admin_verified, false);
+  assert.equal(review.payload.trac_backed_global_authority, false);
+  assert.equal(review.payload.decision_scope, 'local_community');
+  assert.equal(review.payload.publish_false_positive, false);
+});
+
+test('bot owner review remains local when verified-memory publish returns failed status', async () => {
+  const { bot } = makeBot({
+    canBan: true,
+    trustedUserIds: [1],
+    configOverrides: { botOwnerIds: new Set(['1']), publishContextGraphId: '13' },
+    dkgWriteResult: { output: 'shared', publish: { status: 'failed' } }
+  });
+  const chat = { id: -100, type: 'supergroup' };
+  await bot.handleMessage({ chat, from: { id: 77, username: 'suspect', is_bot: false }, message_id: 26, text: 'known scam actor returns' });
+  const flagged = bot.store.all().find((event) => event.event_type === 'risk_review_needed' && event.user.id === 77);
+  await bot.handleCallbackQuery({ id: 'owner-failed-status', from: { id: 1, username: 'owner' }, message: { chat, message_id: 27 }, data: bot.reviewActionKeyboard(1, flagged.id)[0][1].callback_data });
+  const review = bot.store.all().find((event) => event.event_type === 'review_overturned' && event.payload.reviewer.id === 1);
+  assert.equal(review.payload.admin_verified, false);
+  assert.equal(review.payload.trac_backed_global_authority, false);
+  assert.equal(review.payload.decision_scope, 'local_community');
+  assert.equal(review.payload.publish_false_positive, false);
+});
+
+test('bot owner review remains local when DKG write fails', async () => {
+  const { bot } = makeBot({
+    canBan: true,
+    trustedUserIds: [1],
+    configOverrides: { botOwnerIds: new Set(['1']), publishContextGraphId: '13' },
+    dkgWriteResult: new Error('DKG unavailable')
+  });
+  const chat = { id: -100, type: 'supergroup' };
+  await bot.handleMessage({ chat, from: { id: 77, username: 'suspect', is_bot: false }, message_id: 26, text: 'known scam actor returns' });
+  const flagged = bot.store.all().find((event) => event.event_type === 'risk_review_needed' && event.user.id === 77);
+  await bot.handleCallbackQuery({ id: 'owner-write-failed', from: { id: 1, username: 'owner' }, message: { chat, message_id: 27 }, data: bot.reviewActionKeyboard(1, flagged.id)[0][1].callback_data });
+  const review = bot.store.all().find((event) => event.event_type === 'review_overturned' && event.payload.reviewer.id === 1);
+  assert.equal(review.payload.admin_verified, false);
+  assert.equal(review.payload.decision_scope, 'local_community');
+  assert.equal(review.payload.publish_false_positive, false);
+  assert.match(review.dkg_error, /DKG unavailable/);
 });
 
 test('callback parser rejects malformed payloads and bounds generated data', async () => {
@@ -1348,6 +1894,19 @@ test('/settings status panel reports permissions without exposing secrets', asyn
   assert.doesNotMatch(reply, /127\.0\.0\.1|openai|codex|Context Graph tracabot/);
 });
 
+test('/health is private and restricted to configured bot owners', async () => {
+  const { bot, calls } = makeBot({ canBan: true, configOverrides: { botOwnerIds: new Set(['9']) } });
+  await bot.handleCommand({ chat: { id: 9, type: 'private' }, from: { id: 9, username: 'owner' }, message_id: 1, text: '/health' });
+  const health = calls.filter((call) => call.method === 'sendMessage').at(-1)?.payload.text || '';
+  assert.match(health, /owner health/);
+  assert.match(health, /SQLite WAL/);
+  assert.doesNotMatch(health, /test-token|private key|auth\.token/i);
+
+  await bot.handleCommand({ chat: { id: -100, type: 'supergroup' }, from: { id: 9, username: 'owner' }, message_id: 2, text: '/health' });
+  const denied = calls.filter((call) => call.method === 'sendMessage').at(-1)?.payload.text || '';
+  assert.match(denied, /only to configured bot owners in private chat/);
+});
+
 test('explicit scam questions use bounded conversational LLM reply', async () => {
   const llmCalls = [];
   const llm = { async complete(input) { llmCalls.push(input); return { ok: true, text: 'This looks like a scam risk based on the supplied evidence. Do not click links or share wallet secrets. Ask an admin to review.' }; } };
@@ -1767,8 +2326,8 @@ test('enforcement button sends final interactive response without waiting on LLM
 test('stats buttons open sources and campaigns for the requesting user', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   const chat = { id: -100, type: 'supergroup', title: 'demo' };
-  bot.store.append({ id: 'evt-cb-c1', event_type: 'fraud_finding', timestamp: new Date().toISOString(), payload: { domains: ['buttons.example'], confidence: 88, local_confidence: 85, evidence: ['buttons.example'] } });
-  bot.store.append({ id: 'evt-cb-c2', event_type: 'report_submitted', timestamp: new Date().toISOString(), payload: { domains: ['buttons.example'], confidence: 91, local_confidence: 90, report_decision: 'accepted', evidence: ['buttons.example'] } });
+  bot.store.append({ id: 'evt-cb-c1', event_type: 'fraud_finding', timestamp: new Date().toISOString(), chat: { id: '-1001' }, payload: { domains: ['buttons.example'], confidence: 88, local_confidence: 85, evidence: ['buttons.example'] } });
+  bot.store.append({ id: 'evt-cb-c2', event_type: 'report_submitted', timestamp: new Date().toISOString(), chat: { id: '-1002' }, payload: { domains: ['buttons.example'], confidence: 91, local_confidence: 90, report_decision: 'accepted', evidence: ['buttons.example'] } });
   const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Stats', 'stats-menu');
   const [sourcesButton, campaignsButton] = panel.reply_markup.inline_keyboard[0];
   await bot.handleCallbackQuery({ id: 'stats-cb-1', from: { id: 1, username: 'admin' }, message: { chat, message_id: 501 }, data: sourcesButton.callback_data });
@@ -1802,6 +2361,17 @@ test('settings buttons update join challenge and conversation settings', async (
   assert.ok(bot.store.all().some((event) => event.event_type === 'conversational_setting_changed' && event.payload.enabled === false && event.local_only));
 });
 
+test('admins can set an independent protection profile per channel', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, type: 'supergroup', title: 'demo' };
+  const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Settings', 'policy-settings');
+  const profileButton = buttonByText(panel, 'balanced');
+  await bot.handleCallbackQuery({ id: 'policy-strict', from: { id: 1, username: 'admin' }, message: { chat, message_id: 532 }, data: profileButton.callback_data });
+  assert.equal(bot.chatPolicyProfile(chat.id), 'strict');
+  assert.ok(bot.chatPolicy(chat.id).warnThreshold < bot.config.warnThreshold);
+  assert.ok(bot.store.all().some((event) => event.event_type === 'policy_profile_changed' && event.payload.profile === 'strict'));
+});
+
 test('help button explains TRACaBot commands and menu returns home', async () => {
   const { bot, calls } = makeBot({ canBan: true, analyzer: () => ({ is_scam: false, confidence: 20, scam_type: 'other', evidence: ['low risk'], recommended_action: 'ignore' }) });
   const chat = { id: -100, type: 'supergroup', title: 'demo' };
@@ -1828,7 +2398,7 @@ test('help button explains TRACaBot commands and menu returns home', async () =>
   assert.match(legacyHelpPanel.text || '', /TRACaBot Help/);
 });
 
-test('/review with no args shows latest pending review items', async () => {
+test('/review with no args prioritizes aging review items', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   const scheduled = [];
   bot.scheduleDelete = (chatId, messageId, ttlSeconds) => scheduled.push({ chatId, messageId, ttlSeconds });
@@ -1839,7 +2409,7 @@ test('/review with no args shows latest pending review items', async () => {
   assert.match(reply.text || '', /Latest pending review items/);
   assert.match(reply.text || '', /new_review/);
   assert.match(reply.text || '', /old_review/);
-  assert.ok((reply.text || '').indexOf('new_review') < (reply.text || '').indexOf('old_review'));
+  assert.ok((reply.text || '').indexOf('old_review') < (reply.text || '').indexOf('new_review'));
   assert.equal(reply.parse_mode, 'HTML');
   assert.equal(scheduled.length, 0);
 });
@@ -1915,8 +2485,8 @@ test('/ban replying to SangMata rename bans the renamed user ID', async () => {
 test('stats menu campaigns and summary cover local memory', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   const timestamp = new Date().toISOString();
-  bot.store.append({ id: 'evt-c1', event_type: 'fraud_finding', timestamp, payload: { domains: ['fake.example'], confidence: 80, local_confidence: 75, evidence: ['fake.example'] } });
-  bot.store.append({ id: 'evt-c2', event_type: 'report_submitted', timestamp, payload: { domains: ['fake.example'], confidence: 90, local_confidence: 85, report_decision: 'accepted', evidence: ['fake.example'] } });
+  bot.store.append({ id: 'evt-c1', event_type: 'fraud_finding', timestamp, chat: { id: '-1001' }, payload: { domains: ['fake.example'], confidence: 80, local_confidence: 75, evidence: ['fake.example'] } });
+  bot.store.append({ id: 'evt-c2', event_type: 'report_submitted', timestamp, chat: { id: '-1002' }, payload: { domains: ['fake.example'], confidence: 90, local_confidence: 85, report_decision: 'accepted', evidence: ['fake.example'] } });
   const chat = { id: -100, title: 'demo' };
   const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Stats', 'stats-local');
   const campaignsButton = buttonByText(panel, 'Campaigns');
@@ -1930,7 +2500,7 @@ test('campaign summaries include evidence roots and affected communities', async
   const { bot } = makeBot({ canBan: true, testMode: false });
   const timestamp = new Date().toISOString();
   bot.store.append({ id: 'evt-root-1', event_type: 'fraud_finding', timestamp, chat: { id: '-1001' }, payload: { domains: ['fake.example'], patterns: ['wallet-drain'], confidence: 95, local_confidence: 90, community_id: '-1001', evidence: ['fake.example'] } });
-  bot.store.append({ id: 'evt-root-2', event_type: 'report_submitted', timestamp, chat: { id: '-1002' }, payload: { domains: ['fake.example'], patterns: ['wallet-drain'], confidence: 90, local_confidence: 85, community_id: '-1002', evidence: ['fake.example'] } });
+  bot.store.append({ id: 'evt-root-2', event_type: 'report_submitted', timestamp, chat: { id: '-1002' }, payload: { domains: ['fake.example'], patterns: ['wallet-drain'], confidence: 90, local_confidence: 85, community_id: '-1002', report_decision: 'accepted', evidence: ['fake.example'] } });
   const campaign = await bot.maybeRecordCampaign({ chat: { id: -1003, title: 'demo' }, from: { id: 1, username: 'admin' } }, { scam_type: 'phishing', confidence: 91, local_confidence: 88 });
   assert.equal(campaign.event_type, 'fraud_campaign');
   assert.deepEqual(campaign.payload.evidence_root_ids, ['evt-root-1', 'evt-root-2']);
@@ -1950,12 +2520,20 @@ test('campaign summaries ignore weak local-only and prior campaign events as roo
   bot.store.append({ id: 'evt-campaign', event_type: 'fraud_campaign', timestamp, payload: { domains: ['fake.example'], confidence: 95, evidence: ['prior campaign'] } });
   assert.equal(await bot.maybeRecordCampaign({ chat: { id: -1003 }, from: { id: 1 } }, { confidence: 95, local_confidence: 90 }), null);
 
-  bot.store.append({ id: 'evt-root-1', event_type: 'fraud_finding', timestamp, payload: { domains: ['fake.example'], confidence: 95, local_confidence: 90, evidence: ['fake.example'] } });
+  bot.store.append({ id: 'evt-root-1', event_type: 'fraud_finding', timestamp, chat: { id: '-1001' }, payload: { domains: ['fake.example'], confidence: 95, local_confidence: 90, evidence: ['fake.example'] } });
   assert.equal(await bot.maybeRecordCampaign({ chat: { id: -1003 }, from: { id: 1 } }, { confidence: 95, local_confidence: 90 }), null);
 
-  bot.store.append({ id: 'evt-root-2', event_type: 'report_submitted', timestamp, payload: { domains: ['fake.example'], confidence: 90, local_confidence: 85, report_decision: 'accepted', evidence: ['fake.example'] } });
+  bot.store.append({ id: 'evt-root-2', event_type: 'report_submitted', timestamp, chat: { id: '-1002' }, payload: { domains: ['fake.example'], confidence: 90, local_confidence: 85, report_decision: 'accepted', evidence: ['fake.example'] } });
   const campaign = await bot.maybeRecordCampaign({ chat: { id: -1003 }, from: { id: 1 } }, { confidence: 95, local_confidence: 90 });
   assert.deepEqual(campaign.payload.evidence_root_ids, ['evt-root-1', 'evt-root-2']);
+});
+
+test('campaign summaries require independent communities', async () => {
+  const { bot } = makeBot({ canBan: true, testMode: false });
+  const timestamp = new Date().toISOString();
+  bot.store.append({ id: 'evt-same-1', event_type: 'fraud_finding', timestamp, chat: { id: '-1001' }, payload: { domains: ['fake.example'], confidence: 95, local_confidence: 90, evidence: ['fake.example'] } });
+  bot.store.append({ id: 'evt-same-2', event_type: 'report_submitted', timestamp, chat: { id: '-1001' }, payload: { domains: ['fake.example'], confidence: 90, local_confidence: 85, report_decision: 'accepted', evidence: ['fake.example'] } });
+  assert.equal(await bot.maybeRecordCampaign({ chat: { id: -1003 }, from: { id: 1 } }, { confidence: 95, local_confidence: 90 }), null);
 });
 
 test('medium-risk domain-only message is capped below action without DKG evidence', async () => {
@@ -2178,7 +2756,7 @@ test('/report keeps unbound forwarded DM impersonation evidence local-only', asy
 });
 
 test('private SangMata reports only process for configured bot owner', async () => {
-  const { bot, calls, dkgWrites } = makeBot({ canBan: false, adminIds: ['1354777145'] });
+  const { bot, calls, dkgWrites } = makeBot({ canBan: false, adminIds: ['1354777145'], configOverrides: { botOwnerIds: new Set(['1354777145']) } });
   const text = 'User 8367741707 changed name from Joo Woklf to beldex Support';
 
   await bot.handleMessage({ chat: { id: 1354777145, type: 'private' }, from: { id: 1354777145, username: 'BRX86', is_bot: false }, message_id: 1, text });
@@ -2280,7 +2858,7 @@ test('/report duplicate from non-admin is rejected before DKG write', async () =
 
 test('/ban bans replied user and publishes ban evidence', async () => {
   const { bot, calls } = makeBot({ canBan: true });
-  await bot.handleCommand({
+  const message = {
     chat: { id: -100, title: 'demo' },
     from: { id: 1, username: 'admin' },
     message_id: 12,
@@ -2290,10 +2868,14 @@ test('/ban bans replied user and publishes ban evidence', async () => {
       text: 'DM support admin to verify wallet',
       from: { id: 55, username: 'fake_support', is_bot: false }
     }
-  });
+  };
+  await bot.handleCommand(message);
+  await bot.handleCommand(message);
   assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 99));
   assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 12));
   assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 55));
+  assert.equal(calls.filter((call) => call.method === 'deleteMessage' && call.payload.message_id === 99).length, 1);
+  assert.equal(calls.filter((call) => call.method === 'banChatMember' && call.payload.user_id === 55).length, 1);
   assert.equal(calls.find((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('Banned @fake_support'))?.payload.reply_to_message_id, undefined);
   const ban = bot.store.all().find((event) => event.event_type === 'ban_executed');
   assert.ok(ban);
@@ -2330,7 +2912,7 @@ test('/ban deletes all known messages from the banned user', async () => {
   assert.equal(ban.payload.delete_attempt_count, 2);
 });
 
-test('/ban replies before slow memory publishing finishes', async () => {
+test('/ban persists local evidence before slow memory publishing finishes', async () => {
   const { bot, calls, dkgWrites } = makeBot({ canBan: true });
   let releaseWrite;
   const writeStarted = new Promise((resolve) => {
@@ -2356,7 +2938,7 @@ test('/ban replies before slow memory publishing finishes', async () => {
 
   assert.ok(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 55));
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('Banned @fake_support')));
-  assert.equal(bot.store.all().some((event) => event.event_type === 'ban_executed'), false);
+  assert.equal(bot.store.all().some((event) => event.event_type === 'ban_executed'), true);
   await writeStarted;
   releaseWrite();
   await new Promise((resolve) => setImmediate(resolve));
@@ -2862,6 +3444,9 @@ test('non-admin review correction is logged as appeal', async () => {
   const appeal = dkgWrites.find((event) => event.event_type === 'appeal_submitted');
   assert.equal(appeal.payload.target_event_id, 'evt-rage-review');
   assert.equal(appeal.payload.detection_method, 'llm_context_reply_to_flag');
+  assert.match(appeal.payload.appeal_receipt_id, /^appeal-/);
+  assert.equal(appeal.payload.source_message_id, 31);
+  assert.equal(appeal.payload.provenance, 'telegram_appeal');
   assert.ok(calls.some((call) => String(call.payload.text || '').includes('Appeal recorded')));
 });
 

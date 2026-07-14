@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { TracabotSkillService } from './skill-service.js';
 
 function processedDraftIds(store) {
@@ -50,6 +49,9 @@ export async function processLearningDrafts({ service = TracabotSkillService.fro
       results.push({ draftId: draft.id, dryRun: true, input });
       continue;
     }
+    const effectKey = `learning:${draft.id}:sort`;
+    const claim = service.store.beginEffect?.(effectKey, 'learning_sort', { draftId: draft.id });
+    if (claim?.completed || claim?.inProgress) continue;
     try {
       // Phase 3: Consult the artefact curator for a recommendation before/around sorting
       let curatorRec = null;
@@ -63,7 +65,7 @@ export async function processLearningDrafts({ service = TracabotSkillService.fro
       const result = await service.sortConversationArtifact(input);
 
       service.store.append({
-        id: randomUUID(),
+        id: `learning-processed:${draft.id}`,
         event_type: 'learning_draft_processed',
         timestamp: new Date().toISOString(),
         agentDid: service.config.agentDid,
@@ -79,10 +81,11 @@ export async function processLearningDrafts({ service = TracabotSkillService.fro
           evidence: [`autonomous OpenClaw learning processed WM draft ${draft.id}`]
         }
       });
+      service.store.completeEffect?.(effectKey, { eventId: result.eventId });
       results.push({ draftId: draft.id, ok: true, result, curatorRec });
     } catch (error) {
       service.store.append({
-        id: randomUUID(),
+        id: `learning-failed:${draft.id}`,
         event_type: 'learning_draft_failed',
         timestamp: new Date().toISOString(),
         agentDid: service.config.agentDid,
@@ -95,6 +98,7 @@ export async function processLearningDrafts({ service = TracabotSkillService.fro
           evidence: [`autonomous OpenClaw learning failed for WM draft ${draft.id}`]
         }
       });
+      service.store.failEffect?.(effectKey, error instanceof Error ? error.message : String(error));
       results.push({ draftId: draft.id, ok: false, error: error instanceof Error ? error.message : String(error) });
     }
   }

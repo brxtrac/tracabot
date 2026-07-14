@@ -43,7 +43,7 @@
     {
       "name": "submit_appeal",
       "description": "Write an evidence-backed appeal/correction event to DKG Shared Memory.",
-      "inputSchema": { "type": "object", "required": ["eventId", "reason"], "properties": { "eventId": { "type": "string" }, "reason": { "type": "string" }, "actorId": { "type": "string" }, "actorUsername": { "type": "string" } } }
+      "inputSchema": { "type": "object", "required": ["eventId", "reason"], "properties": { "eventId": { "type": "string" }, "reason": { "type": "string" }, "actorId": { "type": "string" }, "actorUsername": { "type": "string" }, "sourceMessageId": { "type": "string" }, "screenshotFileIds": { "type": "array", "items": { "type": "string" } }, "evidenceUrls": { "type": "array", "items": { "type": "string" } } } }
     },
     {
       "name": "review_event",

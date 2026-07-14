@@ -4,7 +4,7 @@ TRACaBot is an OpenClaw + Telegram + OriginTrail DKG v10 intelligent anti-scam b
 
 > **AI agents / self-hosters**: See [AGENT_INSTALL.md](./AGENT_INSTALL.md) for the best experience.
 
-The default Context Graph is `tracabot`. Every community running TRACaBot against that Context Graph contributes to the same DKG v10 Shared Working Memory layer. TRACaBot writes events with provenance, local/DKG confidence, stable Telegram IDs, usernames/display-name aliases, reporter metadata, scam type, wallet/pattern indicators, and moderation outcomes. Verified Memory publishing is optional and operator-enabled because it spends TRAC/gas; fresh installs keep fraud memory in WM/SWM until the operator funds and registers a publish path.
+The default Context Graph is `tracabot`. Every community running TRACaBot against that Context Graph contributes to the same DKG v10 Shared Working Memory layer. TRACaBot writes events with provenance, local/DKG confidence, HMAC-pseudonymized Telegram identities and communities, scam type, normalized domain/wallet/pattern indicators, and moderation outcomes. Raw Telegram IDs, aliases, private DM request text, and full URLs stay out of shared DKG triples. Verified Memory publishing is optional and operator-enabled because it spends TRAC/gas; fresh installs keep fraud memory in WM/SWM until the operator funds and registers a publish path.
 
 ## Quick Start For Testers
 
@@ -106,7 +106,7 @@ For autonomous LLM-Wiki-style learning, run `node ./bin/openclaw-learning-loop.j
 
 TRACaBot can also run in conversational safety mode. It keeps its own standalone Telegram bot token and can use `9router`, an OpenClaw-discovered LLM account, a direct OpenAI-compatible API, or a local LLM gateway to draft short scam-safety replies and classify ambiguous natural-language intent. Deterministic routing handles obvious requests such as stats, digest, reviews, watchlist, campaigns, help, and private-info refusals before any LLM call, so tokens are reserved for ambiguous or genuinely conversational turns. Conversation is limited to scam/fraud/wallet-safety questions and TRACaBot capabilities; LLM text never executes Telegram bans, deletes, restrictions, or DKG writes by itself.
 
-Local JSONL state is the bot's operational working memory for weak reports, watchlist state, digest state, join-challenge state, and ambiguous monitoring-only actions. Unsafe chat events with concrete evidence are written to DKG v10 Shared Memory through the OpenClaw adapter as collaborative evidence memory; only admin-verified or very-high-confidence events are published as Verified Memory.
+Local SQLite WAL state is the bot's operational working memory for weak reports, watchlist state, polling idempotency, digest state, join-challenge state, and ambiguous monitoring-only actions. Existing JSONL state is imported once and retained as a backup. Unsafe chat events with concrete evidence are written to DKG v10 Shared Memory through the OpenClaw adapter as collaborative evidence memory; only admin-verified or very-high-confidence events are published as Verified Memory.
 
 `channel_observation` events increase DKG v10 Shared Memory for spam/scam/fraud pattern analysis without capturing normal discussion. TRACaBot writes bounded raw `message_text` only for high-confidence public messages that look like real channel abuse: new-member scam channel promos, outside coin/token promotions, scam domains/wallets, fake airdrops, investment-profit lures, or admin/support impersonators asking users to DM. General discussion about scam coins or scam prevention stays local and is not shared as raw DKG text.
 
@@ -240,6 +240,7 @@ TRACABOT_DKG_MODE=openclaw-adapter
 TRACABOT_DKG_READS=true
 TRACABOT_DKG_WRITES=true
 TRACABOT_DKG_PUBLISH_VERIFIED=false
+TRACABOT_DKG_PSEUDONYM_KEY=replace-with-at-least-32-random-bytes
 TRACABOT_CHANNEL_MEMORY=true
 TRACABOT_CHANNEL_MEMORY_MIN_CONFIDENCE=80
 TRACABOT_CHANNEL_MEMORY_MAX_TEXT_CHARS=1000
@@ -255,7 +256,8 @@ TRACABOT_TELEGRAM_TIMEOUT_MS=30000
 TRACABOT_DKG_QUERY_TIMEOUT_MS=4000
 TRACABOT_DROP_PENDING_UPDATES_ON_START=true
 DKG_NODE_URL=http://127.0.0.1:9200
-TRACABOT_STORE_PATH=./data/tracabot-events.jsonl
+TRACABOT_DB_PATH=./data/tracabot-events.sqlite
+TRACABOT_LEGACY_STORE_PATH=./data/tracabot-events.jsonl
 TRACABOT_CONVERSATIONAL=true
 TRACABOT_LLM_PROVIDER=9router
 TRACABOT_LLM_BASE_URL=https://api.9router.com

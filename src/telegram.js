@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { canAutonomouslyEscalate, combineRisk, displayName, formatBanReply, formatDkgReference, formatReportReply, formatReviewNeededSummary, formatRiskAssessment, formatScanReply, formatStatsReply, formatStatsSourcesReply, isObviousLocalScam } from './risk-engine.js';
 import { extractDomains, extractPatterns, extractWallets } from './dkg-client.js';
 import { buildAgentIntentPrompt, buildAlertReplyClassifierPrompt, buildGeneralPrompt, buildSafetyPrompt, fallbackSafetyReply, isOnTopicDirectAddress, isSafetyQuestion, offTopicRedirect, sanitizeGeneralReply, sanitizeSafetyReply, shouldConversationallyReply } from './conversation.js';
@@ -44,6 +44,10 @@ const WATCHLIST_INTENT_RE = /\b(?:muted|mutes)\b/i;
 const CAMPAIGN_INTENT_RE = /\b(?:campaigns?|repeated patterns?|repeated domains?|scam wave|clusters?)\b/i;
 const HELP_INTENT_RE = /\b(?:help|commands?|what can you do|who are you|what are you|purpose|hello|hi|are you alive)\b/i;
 const BOT_REPLY_CONTEXT_TTL_MS = 2 * 60 * 1000;
+const POLLING_BACKOFF_BASE_MS = 1000;
+const POLLING_BACKOFF_MAX_MS = 30000;
+const POLLING_ERROR_LOG_INTERVAL_MS = 60000;
+const POLLING_RESPONSE_MARGIN_MS = 5000;
 const START_PUNCH_LINES = [
   'Bots forget. TRACaBot remembers.',
   'Simple bots react. TRACaBot remembers, connects context, and evolves.',
@@ -69,6 +73,18 @@ const START_PUNCH_LINES = [
 
 function boundedText(value = '', max = MAX_TEXT_CHARS) {
   return String(value || '').slice(0, max);
+}
+
+function canonicalJson(value) {
+  const serialized = JSON.stringify(value, (_key, current) => {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return current;
+    return Object.keys(current).sort().reduce((ordered, key) => {
+      ordered[key] = current[key];
+      return ordered;
+    }, {});
+  });
+  if (serialized === undefined) throw new TypeError('Telegram payload is not JSON serializable');
+  return serialized;
 }
 
 function entityUrls(message = {}) {
@@ -252,22 +268,66 @@ function extractClaimedOrganization(text = '') {
   return match?.[1]?.trim() || '';
 }
 
-async function telegram(token, method, payload, timeoutMs = 30000) {
+async function telegram(token, method, payload, timeoutMs = 30000, signal) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
   try {
-    const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    });
-    const body = await response.json();
+    let response;
+    try {
+      response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: requestSignal
+      });
+    } catch (cause) {
+      throw new TelegramOutcomeUnknownError(`Telegram ${method} outcome unknown: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    }
+    let body;
+    try {
+      body = await response.json();
+    } catch (cause) {
+      throw new TelegramOutcomeUnknownError(`Telegram ${method} outcome unknown: invalid response`, { cause });
+    }
+    if (!body.ok && response.status >= 500) {
+      throw new TelegramOutcomeUnknownError(`Telegram ${method} outcome unknown: ${body.description || response.statusText}`);
+    }
     if (!body.ok) throw new Error(`Telegram ${method} failed: ${body.description || response.statusText}`);
     return body.result;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+class TelegramOutcomeUnknownError extends Error {
+  constructor(message, options) {
+    super(message, options);
+    this.name = 'TelegramOutcomeUnknownError';
+    this.telegramOutcomeUnknown = true;
+  }
+}
+
+function pollingFailureKind(error) {
+  let current = error;
+  while (current) {
+    if (current.name === 'AbortError' || current.code === 'ABORT_ERR' || current.code === 'ETIMEDOUT') return 'timeout';
+    current = current.cause;
+  }
+  return 'transport';
+}
+
+function abortableSleep(ms, signal) {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    signal?.addEventListener('abort', done, { once: true });
+  });
 }
 
 function actorFromMessage(message) {
@@ -467,7 +527,11 @@ function hasEvidenceForDkg(eventType = '', payload = {}) {
 
 function isCampaignRootEvent(event = {}) {
   if (event.event_type === 'fraud_campaign') return false;
-  return hasEvidenceForDkg(event.event_type, event.payload || {}) && Boolean(event.payload?.evidence?.length);
+  const payload = event.payload || {};
+  if (!hasEvidenceForDkg(event.event_type, payload) || !payload.evidence?.length) return false;
+  if (event.event_type === 'ban_executed' || event.event_type === 'review_upheld') return true;
+  if (event.event_type === 'report_submitted') return payload.report_decision === 'accepted' && Number(payload.local_confidence || 0) >= 60;
+  return Number(payload.confidence || 0) >= 80 && Number(payload.local_confidence || 0) >= 60;
 }
 
 function formatDmReportReply(event, decision = {}) {
@@ -486,7 +550,9 @@ export class TelegramShieldBot {
     this.dkg = dkg;
     this.store = store;
     this.llm = llm;
-    this.offset = 0;
+    this.botKey = createHash('sha256').update(String(this.config.telegramToken || 'tracabot')).digest('hex');
+    this.offset = this.store.pollingOffset?.(this.botKey) ?? 0;
+    this.currentUpdateId = null;
     this.botId = null;
     this.observedUsers = new Map();
     this.chatAdmins = new Map();
@@ -507,6 +573,8 @@ export class TelegramShieldBot {
     this.skillService = null;
     this.seenChats = new Map();
     this.observedUserMessages = new Map();
+    this.pollingFailureCount = 0;
+    this.lastPollingErrorLogAt = 0;
   }
 
   conversationThreadKey(message = {}) {
@@ -536,18 +604,24 @@ export class TelegramShieldBot {
     const ids = this.observedUserMessages.get(key) || [];
     ids.push(message.message_id);
     this.observedUserMessages.set(key, [...new Set(ids)].slice(-100));
+    this.store.rememberMessage?.(message.chat.id, message.from.id, message.message_id);
   }
 
-  async deleteKnownUserMessages(chatId, userId, extraMessageIds = []) {
+  async deleteKnownUserMessages(chatId, userId, extraMessageIds = [], effectPrefix = '') {
     if (!chatId || !userId) return { attempted: 0, deleted: 0, failed: 0 };
     const key = `${chatId}:${userId}`;
-    const ids = [...new Set([...(this.observedUserMessages.get(key) || []), ...extraMessageIds].filter(Boolean))];
+    const ids = [...new Set([...(this.observedUserMessages.get(key) || []), ...(this.store.knownMessageIds?.(chatId, userId) || []), ...extraMessageIds].filter(Boolean))];
     let deleted = 0;
     let failed = 0;
     await Promise.all(ids.map(async (messageId) => {
       try {
-        await this.deleteMessage(chatId, messageId);
+        if (effectPrefix) {
+          await this.callEffect('deleteMessage', { chat_id: chatId, message_id: messageId }, `${effectPrefix}:delete:${messageId}`);
+        } else {
+          await this.deleteMessage(chatId, messageId);
+        }
         deleted += 1;
+        this.store.forgetMessage?.(chatId, userId, messageId);
       } catch {
         failed += 1;
       }
@@ -556,26 +630,105 @@ export class TelegramShieldBot {
     return { attempted: ids.length, deleted, failed };
   }
 
+  async enforceConfirmedScam(chatId, target = {}, sourceMessageIds = [], effectPrefix = '') {
+    if (!target?.id) return { banned: false, reason: 'missing_target_id', attempted: 0, deleted: 0, failed: 0 };
+    if (target.is_bot === true || String(target.id) === String(await this.getBotId().catch(() => ''))) {
+      return { banned: false, reason: 'protected_bot', attempted: 0, deleted: 0, failed: 0 };
+    }
+    if (await this.isTelegramChatAdmin(chatId, target.id)) {
+      return { banned: false, reason: 'protected_admin', attempted: 0, deleted: 0, failed: 0 };
+    }
+    if (!await this.hasBanRights(chatId)) {
+      return { banned: false, reason: 'missing_ban_rights', attempted: 0, deleted: 0, failed: 0 };
+    }
+    if (effectPrefix) {
+      await this.callEffect('banChatMember', { chat_id: chatId, user_id: target.id }, `${effectPrefix}:ban`);
+    } else {
+      await this.ban(chatId, target.id);
+    }
+    this.store.incrementMetric?.('confirmed_scam_bans');
+    const deleted = await this.deleteKnownUserMessages(chatId, target.id, sourceMessageIds, effectPrefix);
+    this.store.incrementMetric?.('message_delete_attempts', deleted.attempted);
+    this.store.incrementMetric?.('messages_deleted', deleted.deleted);
+    this.store.incrementMetric?.('message_delete_failures', deleted.failed);
+    return { banned: true, reason: 'confirmed_scam', ...deleted };
+  }
+
   conversationContext(message = {}) {
     return (this.conversationHistory.get(this.conversationThreadKey(message)) || [])
       .map((turn) => `${turn.role}: ${turn.text}`)
       .join('\n');
   }
 
-  async call(method, payload) {
-    return telegram(this.config.telegramToken, method, payload, this.config.telegramTimeoutMs);
+  async call(method, payload, { signal, timeoutMs } = {}) {
+    const started = Date.now();
+    try {
+      const longPollTimeoutMs = method === 'getUpdates'
+        ? Math.max(0, Number(payload?.timeout) || 0) * 1000 + POLLING_RESPONSE_MARGIN_MS
+        : 0;
+      const configuredTimeoutMs = Number(timeoutMs ?? this.config.telegramTimeoutMs) || 30000;
+      const requestTimeoutMs = Math.max(configuredTimeoutMs, longPollTimeoutMs);
+      const result = await telegram(this.config.telegramToken, method, payload, requestTimeoutMs, signal);
+      this.store.incrementMetric?.('telegram_api_calls');
+      this.store.incrementMetric?.('telegram_api_latency_ms_total', Date.now() - started);
+      return result;
+    } catch (error) {
+      if (!signal?.aborted) this.store.incrementMetric?.('telegram_api_errors');
+      throw error;
+    }
+  }
+
+  async callEffect(method, payload, effectKey = '') {
+    if ((this.currentUpdateId === null && !effectKey) || !this.store.beginEffect) return this.call(method, payload);
+    const stablePayload = canonicalJson(payload);
+    const semanticKey = effectKey || `${this.currentUpdateId}:${method}:${createHash('sha256').update(stablePayload).digest('hex')}`;
+    const key = `telegram:${this.botKey}:${semanticKey}`;
+    const canonicalPayload = JSON.parse(stablePayload);
+    const existing = this.store.beginEffect(key, method, canonicalPayload, { staleAction: 'uncertain' });
+    if (existing.completed) return existing.response;
+    if (existing.uncertain) throw new TelegramOutcomeUnknownError(`Telegram effect outcome remains unknown; refusing replay: ${method}`);
+    if (existing.inProgress) throw new Error(`Telegram effect already in progress: ${method}`);
+    let result;
+    try {
+      result = await this.call(method, payload);
+    } catch (error) {
+      if (method === 'editMessageText' && /message is not modified/i.test(error instanceof Error ? error.message : String(error))) {
+        result = { message_id: payload.message_id, chat: { id: payload.chat_id }, not_modified: true };
+      } else {
+        if (error?.telegramOutcomeUnknown) {
+          this.store.markEffectUncertain?.(key, error.message);
+          this.store.incrementMetric?.('telegram_effects_uncertain');
+        }
+        else this.store.failEffect(key, error instanceof Error ? error.message : String(error));
+        throw error;
+      }
+    }
+    try {
+      if (!this.store.completeEffect(key, result)) {
+        throw new Error('ledger transition failed');
+      }
+    } catch (error) {
+      try {
+        this.store.markEffectUncertain?.(key, `Telegram ${method} succeeded but ledger transition failed: ${error instanceof Error ? error.message : String(error)}`);
+        this.store.incrementMetric?.('telegram_effects_uncertain');
+      } catch {
+        // Preserve original ledger failure; replay remains blocked by running state if uncertainty cannot persist.
+      }
+      throw new Error(`Telegram effect completed but ledger commit failed for ${method}; refusing replay`, { cause: error });
+    }
+    return result;
   }
 
   async send(chatId, text, extra = {}) {
     try {
-      const sent = await this.call('sendMessage', { chat_id: chatId, text, ...extra });
+      const sent = await this.callEffect('sendMessage', { chat_id: chatId, text, ...extra });
       this.rememberBotReply(chatId, sent, text, extra);
       return sent;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (extra.reply_to_message_id && /message to be replied not found/i.test(message)) {
         const { reply_to_message_id, ...fallbackExtra } = extra;
-        const sent = await this.call('sendMessage', { chat_id: chatId, text, ...fallbackExtra });
+        const sent = await this.callEffect('sendMessage', { chat_id: chatId, text, ...fallbackExtra });
         this.rememberBotReply(chatId, sent, text, fallbackExtra);
         return sent;
       }
@@ -664,7 +817,7 @@ export class TelegramShieldBot {
   }
 
   async editInteractiveMessage(chatId, messageId, text, rows = [], extra = {}) {
-    return this.call('editMessageText', {
+    return this.callEffect('editMessageText', {
       chat_id: chatId,
       message_id: messageId,
       text,
@@ -673,9 +826,9 @@ export class TelegramShieldBot {
     });
   }
 
-  async answerCallback(callbackId, text = '') {
+  async answerCallback(callbackId, text = '', showAlert = false) {
     if (!callbackId) return null;
-    return this.call('answerCallbackQuery', { callback_query_id: callbackId, text }).catch(() => null);
+    return this.call('answerCallbackQuery', { callback_query_id: callbackId, text, show_alert: showAlert }).catch(() => null);
   }
 
   async sendPersistentCommandReply(chatId, text, extra = {}) {
@@ -683,11 +836,11 @@ export class TelegramShieldBot {
   }
 
   async ban(chatId, userId) {
-    return this.call('banChatMember', { chat_id: chatId, user_id: userId });
+    return this.callEffect('banChatMember', { chat_id: chatId, user_id: userId });
   }
 
   async restrict(chatId, userId, untilDate = Math.floor(Date.now() / 1000) + 24 * 60 * 60) {
-    return this.call('restrictChatMember', {
+    return this.callEffect('restrictChatMember', {
       chat_id: chatId,
       user_id: userId,
       until_date: untilDate,
@@ -711,7 +864,7 @@ export class TelegramShieldBot {
   }
 
   async allowTextOnly(chatId, userId, untilDate = Math.floor(Date.now() / 1000) + 24 * 60 * 60) {
-    return this.call('restrictChatMember', {
+    return this.callEffect('restrictChatMember', {
       chat_id: chatId,
       user_id: userId,
       until_date: untilDate,
@@ -735,7 +888,7 @@ export class TelegramShieldBot {
   }
 
   async muteMember(chatId, userId, untilDate = Math.floor(Date.now() / 1000) + 24 * 60 * 60) {
-    return this.call('restrictChatMember', {
+    return this.callEffect('restrictChatMember', {
       chat_id: chatId,
       user_id: userId,
       until_date: untilDate,
@@ -760,7 +913,7 @@ export class TelegramShieldBot {
   }
 
   async restoreMemberPermissions(chatId, userId) {
-    return this.call('restrictChatMember', {
+    return this.callEffect('restrictChatMember', {
       chat_id: chatId,
       user_id: userId,
       until_date: 0,
@@ -797,7 +950,7 @@ export class TelegramShieldBot {
 
   async deleteMessage(chatId, messageId) {
     if (!messageId) return null;
-    return this.call('deleteMessage', { chat_id: chatId, message_id: messageId });
+    return this.callEffect('deleteMessage', { chat_id: chatId, message_id: messageId });
   }
 
   async getBotId() {
@@ -1030,6 +1183,57 @@ export class TelegramShieldBot {
     return Number.isFinite(value) && value >= 1 && value <= 168 ? value : 12;
   }
 
+  chatPolicyProfile(chatId) {
+    const key = String(chatId || '');
+    const latest = [...this.store.all()].reverse().find((event) => event.event_type === 'policy_profile_changed' && String(event.chat?.id || '') === key);
+    const configured = String(latest?.payload?.profile || this.config.policyId || 'balanced').toLowerCase();
+    if (configured.includes('strict')) return 'strict';
+    if (configured.includes('monitor')) return 'monitor';
+    return 'balanced';
+  }
+
+  chatPolicy(chatId) {
+    const profile = this.chatPolicyProfile(chatId);
+    if (profile === 'strict') {
+      return {
+        profile,
+        warnThreshold: Math.max(40, this.config.warnThreshold - 10),
+        restrictThreshold: Math.max(60, this.config.restrictThreshold - 5),
+        actionThreshold: Math.max(70, this.config.actionThreshold - 5),
+        banThreshold: Math.max(75, this.config.banThreshold - 5)
+      };
+    }
+    if (profile === 'monitor') {
+      return {
+        profile,
+        warnThreshold: Math.min(90, this.config.warnThreshold + 15),
+        restrictThreshold: Math.min(95, this.config.restrictThreshold + 15),
+        actionThreshold: Math.min(98, this.config.actionThreshold + 10),
+        banThreshold: Math.min(99, this.config.banThreshold + 10)
+      };
+    }
+    return {
+      profile,
+      warnThreshold: this.config.warnThreshold,
+      restrictThreshold: this.config.restrictThreshold,
+      actionThreshold: this.config.actionThreshold,
+      banThreshold: this.config.banThreshold
+    };
+  }
+
+  reviewEscalationTier(event = {}) {
+    const ageHours = Math.max(0, (Date.now() - Date.parse(event.timestamp || new Date().toISOString())) / 3600000);
+    const confidence = Number(event.payload?.confidence || event.payload?.current_risk?.confidence || 0);
+    const policy = { restrictThreshold: this.config.restrictThreshold, banThreshold: this.config.banThreshold };
+    if (event.event_type === 'proactive_cross_group_warning' || confidence >= policy.banThreshold || ageHours >= 24) return 'urgent';
+    if (confidence >= policy.restrictThreshold || ageHours >= 12) return 'elevated';
+    return 'standard';
+  }
+
+  reviewTierRank(event = {}) {
+    return { urgent: 3, elevated: 2, standard: 1 }[this.reviewEscalationTier(event)] || 0;
+  }
+
   skillServiceOrNull() {
     if (this.config.testMode) return null;
     if (this.skillService) return this.skillService;
@@ -1047,7 +1251,7 @@ export class TelegramShieldBot {
   }
 
   isPrivateOwnerMessage(message) {
-    return message.chat?.type === 'private' && this.isConfiguredAdmin(actorFromMessage(message));
+    return message.chat?.type === 'private' && this.isBotOwner(actorFromMessage(message));
   }
 
   async rejectNonOwnerPrivateReport(message) {
@@ -1191,7 +1395,56 @@ export class TelegramShieldBot {
     ].join('\n');
   }
 
-  async record(eventType, message, payload, { writeDkg = null } = {}) {
+  async formatOwnerHealth() {
+    const [dkgOk, dkgRuntime, bot] = await Promise.all([
+      this.dkgReachable(),
+      this.dkg.runtimeStatus(),
+      this.call('getMe', {}).catch(() => null)
+    ]);
+    const pending = this.pendingReviewItems();
+    const tiers = pending.reduce((counts, event) => {
+      const tier = this.reviewEscalationTier(event);
+      counts[tier] = (counts[tier] || 0) + 1;
+      return counts;
+    }, {});
+    const oldest = pending.length ? Math.max(...pending.map((event) => eventAgeMs(event))) : 0;
+    const metrics = this.store.metrics?.() || {};
+    return [
+      '🩺 TRACaBot owner health',
+      '',
+      `• Telegram: ${bot?.id ? `✅ @${bot.username || 'bot'}` : '❌ unavailable'}`,
+      `• Poll offset: ${this.offset}`,
+      `• Updates completed/failed: ${metrics.telegram_updates_completed || 0}/${metrics.telegram_updates_failed || 0}`,
+      `• Telegram API calls/errors: ${metrics.telegram_api_calls || 0}/${metrics.telegram_api_errors || 0}`,
+      `• Telegram uncertain effects: ${metrics.telegram_effects_uncertain || 0}`,
+      `• DKG: ${dkgOk && dkgRuntime.ok ? `✅ ${dkgRuntime.dkgReleaseVersion || 'reachable'}` : '❌ unavailable'}`,
+      `• Adapter: ${dkgRuntime.adapterVersion || 'unknown'}`,
+      `• Reviews: ${pending.length} (${tiers.urgent || 0} urgent, ${tiers.elevated || 0} elevated, ${tiers.standard || 0} standard)`,
+      `• Oldest pending: ${oldest ? humanDuration(Math.round(oldest / 1000)) : 'none'}`,
+      `• Confirmed bans: ${metrics.confirmed_scam_bans || 0}`,
+      `• DKG writes/failures: ${metrics.dkg_write_count || 0}/${metrics.dkg_write_failures || 0}`,
+      `• Message deletes: ${metrics.messages_deleted || 0}/${metrics.message_delete_attempts || 0} (${metrics.message_delete_failures || 0} failed)`,
+      `• Store: SQLite WAL`
+    ].join('\n');
+  }
+
+  appealPayload(message = {}, targetEventId = '', reason = '', extra = {}) {
+    const receiptId = `appeal-${randomUUID()}`;
+    return {
+      appeal_receipt_id: receiptId,
+      target_event_id: targetEventId,
+      source_message_id: message.message_id || '',
+      source_reply_message_id: message.reply_to_message?.message_id || '',
+      screenshot_file_ids: screenshotFileIds(message),
+      appellant: actorFromMessage(message),
+      reason,
+      provenance: 'telegram_appeal',
+      ...extra,
+      evidence: [...(extra.evidence || []), `appeal receipt ${receiptId} references event ${targetEventId || 'unknown'}`]
+    };
+  }
+
+  async record(eventType, message, payload, { writeDkg = null, idempotencyKey = '' } = {}) {
     const communityId = this.config.communityId || String(message.chat?.id || '');
     const decoratedPayload = this.config.testMode
       ? { ...payload, source: payload?.source || 'test-command-loop', test_mode: true }
@@ -1199,7 +1452,7 @@ export class TelegramShieldBot {
     decoratedPayload.community_id = decoratedPayload.community_id || communityId;
     decoratedPayload.community_name = decoratedPayload.community_name || this.config.communityName || '';
     decoratedPayload.community_type = decoratedPayload.community_type || this.config.communityType || 'telegram_group';
-    decoratedPayload.policy_id = decoratedPayload.policy_id || this.config.policyId || 'default';
+    decoratedPayload.policy_id = decoratedPayload.policy_id || this.chatPolicyProfile(message.chat?.id);
     if (['risk_review_needed', 'risk_action_suppressed', 'report_review_needed', 'ban_requested_no_reply', 'ban_requested_no_rights', 'proactive_cross_group_warning'].includes(eventType)) {
       decoratedPayload.target_chat_id = decoratedPayload.target_chat_id || message.chat?.id || '';
       decoratedPayload.target_chat_title = decoratedPayload.target_chat_title || chatLabel(message.chat || {});
@@ -1208,8 +1461,17 @@ export class TelegramShieldBot {
       decoratedPayload.detected_at = decoratedPayload.detected_at || new Date().toISOString();
       decoratedPayload.evidence_basis = decoratedPayload.evidence_basis || (decoratedPayload.prior_admin_events?.length ? 'prior_admin_action' : 'risk_signal');
     }
+    const deterministicBasis = idempotencyKey || (this.currentUpdateId === null ? '' : [
+      this.botKey,
+      this.currentUpdateId,
+      eventType,
+      message.chat?.id || '',
+      actorFromMessage(message).id || actorFromMessage(message).username || '',
+      decoratedPayload.target_event_id || decoratedPayload.report_event_id || decoratedPayload.target_key || '',
+      decoratedPayload.artifact_kind || decoratedPayload.review_decision || decoratedPayload.action || ''
+    ].join(':'));
     const event = {
-      id: randomUUID(),
+      id: deterministicBasis ? `event-${createHash('sha256').update(deterministicBasis).digest('hex').slice(0, 32)}` : randomUUID(),
       event_type: eventType,
       timestamp: new Date().toISOString(),
       agentDid: this.config.agentDid,
@@ -1217,12 +1479,47 @@ export class TelegramShieldBot {
       user: actorFromMessage(message),
       payload: decoratedPayload
     };
+    const existingEvent = deterministicBasis ? this.store.all().find((item) => item.id === event.id) : null;
+    if (existingEvent) {
+      if (['risk_review_needed', 'risk_action_suppressed', 'proactive_cross_group_warning'].includes(eventType)) {
+        await this.maybeNotifyPendingReview(existingEvent);
+      }
+      return existingEvent;
+    }
     const shouldWriteDkg = writeDkg ?? (!this.config.testMode && hasEvidenceForDkg(eventType, decoratedPayload));
     if (shouldWriteDkg) {
+      const dkgStarted = Date.now();
       try {
         event.dkg = await this.dkg.writeEvent(event);
+        const verifiedPublish = event.dkg?.publish;
+        const publishSucceeded = verifiedPublish
+          && !/^(?:failed|rejected|error)$/i.test(String(verifiedPublish.status || ''))
+          && Boolean(verifiedPublish.ual || verifiedPublish.txHash || verifiedPublish.tx_hash);
+        if (decoratedPayload.verified_memory_authority && !publishSucceeded) {
+          Object.assign(decoratedPayload, {
+            admin_verified: false,
+            decision_scope: 'local_community',
+            trust_basis: 'telegram_local_admin',
+            verified_memory_authority: false,
+            trac_backed_global_authority: false,
+            publish_false_positive: false
+          });
+        }
+        this.store.incrementMetric?.('dkg_write_count');
+        this.store.incrementMetric?.('dkg_write_latency_ms_total', Date.now() - dkgStarted);
       } catch (error) {
+        if (decoratedPayload.verified_memory_authority) {
+          Object.assign(decoratedPayload, {
+            admin_verified: false,
+            decision_scope: 'local_community',
+            trust_basis: 'telegram_local_admin',
+            verified_memory_authority: false,
+            trac_backed_global_authority: false,
+            publish_false_positive: false
+          });
+        }
         event.dkg_error = error instanceof Error ? error.message : String(error);
+        this.store.incrementMetric?.('dkg_write_failures');
       }
     } else {
       event.local_only = true;
@@ -1232,7 +1529,7 @@ export class TelegramShieldBot {
       this._reviewCache = { pending: null, watches: null, lastUpdate: 0 };
     }
     if (['risk_review_needed', 'risk_action_suppressed', 'proactive_cross_group_warning'].includes(eventType)) {
-      this.maybeNotifyPendingReview(event).catch((error) => console.error(`Pending review notice failed: ${error instanceof Error ? error.message : String(error)}`));
+      await this.maybeNotifyPendingReview(event);
     }
     return event;
   }
@@ -1241,10 +1538,12 @@ export class TelegramShieldBot {
     const chatId = eventChatKey(event);
     if (!chatId || !this.chatPendingReviewNotificationsEnabled(chatId)) return null;
     const intervalMs = this.chatPendingReviewNotificationIntervalHours(chatId) * 60 * 60 * 1000;
-    const last = this.lastPendingReviewNoticeAt.get(chatId) || 0;
-    if (Date.now() - last < intervalMs) return null;
-    const count = this.pendingReviewItems({ chatId, scope: 'current' }).length || 1;
     if (this.isReviewHiddenForChat(event, chatId)) return null;
+    const cooldownKey = `pending-review-notice:${chatId}`;
+    if (this.store.claimCooldown && !this.store.claimCooldown(cooldownKey, intervalMs)) return null;
+    const last = this.lastPendingReviewNoticeAt.get(chatId) || 0;
+    if (!this.store.claimCooldown && Date.now() - last < intervalMs) return null;
+    const count = this.pendingReviewItems({ chatId, scope: 'current' }).length || 1;
     const reservedAt = Date.now();
     this.lastPendingReviewNoticeAt.set(chatId, reservedAt);
     const text = [
@@ -1254,18 +1553,28 @@ export class TelegramShieldBot {
     ].join('\n');
     let sent;
     try {
-      sent = await this.send(chatId, text, {
+      const payload = {
+        chat_id: chatId,
+        text,
         parse_mode: 'HTML',
         disable_web_page_preview: true,
-        reply_markup: inlineKeyboard([[button('🛡️ Open reviews', callbackData('review-list', 'admin'))]])
-      });
+        reply_markup: inlineKeyboard([
+          [button('🚫 Confirm scam', callbackData('review-confirm', 'admin', shortId(event.id))), button('✅ Reject flag', callbackData('review-reject', 'admin', shortId(event.id)))],
+          [button('🛡️ Open reviews', callbackData('review-list', 'admin'))]
+        ])
+      };
+      sent = await this.callEffect('sendMessage', payload, `pending-review-notice:${event.id}`);
+      this.rememberBotReply(chatId, sent, text, payload);
     } catch (error) {
+      if (error?.telegramOutcomeUnknown) this.store.completeCooldown?.(cooldownKey);
+      else this.store.releaseCooldown?.(cooldownKey);
       if (this.lastPendingReviewNoticeAt.get(chatId) === reservedAt) {
         if (last) this.lastPendingReviewNoticeAt.set(chatId, last);
         else this.lastPendingReviewNoticeAt.delete(chatId);
       }
       throw error;
     }
+    this.store.completeCooldown?.(cooldownKey);
     if (sent?.message_id) this.reviewMessageEvents.set(`${chatId}:${sent.message_id}`, event.id);
     return sent;
   }
@@ -1442,7 +1751,7 @@ export class TelegramShieldBot {
 
     const items = reviewEvents
       .filter((event) => event?.id && !directResolutionByEvent.has(event.id) && !hasTargetResolution(event) && !hasLegacyDuplicateResolution(event))
-      .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+      .sort((a, b) => this.reviewTierRank(b) - this.reviewTierRank(a) || Date.parse(a.timestamp) - Date.parse(b.timestamp));
 
     this._reviewCache.pending = items;
     this._reviewCache.lastUpdate = now;
@@ -1529,8 +1838,10 @@ export class TelegramShieldBot {
   formatReviewItem(event, index) {
     const target = event.user || event.payload?.target || {};
     const confidence = event.payload?.confidence !== undefined ? `${event.payload.confidence}%` : 'n/a';
-    const prefix = event.event_type === 'proactive_cross_group_warning' ? '⚠️ CROSS-GROUP ' : '';
-    return `${index}. ${prefix}${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''} | ${confidence} | ${shortId(event.id)}\n   ${escapeHtml(this.reviewSummary(event))}`;
+    const tier = this.reviewEscalationTier(event);
+    const prefix = tier === 'urgent' ? '🔴 URGENT ' : tier === 'elevated' ? '🟠 ELEVATED ' : '🟢 STANDARD ';
+    const crossGroup = event.event_type === 'proactive_cross_group_warning' ? 'CROSS-GROUP ' : '';
+    return `${index}. ${prefix}${crossGroup}${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''} | ${confidence} | ${shortId(event.id)}\n   ${escapeHtml(this.reviewSummary(event))}`;
   }
 
   formatWatchlist(filter = '') {
@@ -1686,6 +1997,7 @@ export class TelegramShieldBot {
       `Review ${shortId(event.id)}`,
       `${userMention(target)}${target.id ? ` (ID ${escapeHtml(target.id)})` : ''}`,
       `Confidence: ${event.payload?.confidence ?? 0}% | Type: ${escapeHtml(event.payload?.scam_type || event.event_type)}`,
+      `Priority: ${this.reviewEscalationTier(event).toUpperCase()} | Waiting: ${ageLabel(event.timestamp)}`,
       `Channel: ${escapeHtml(event.payload?.target_chat_title || event.chat?.title || event.payload?.target_chat_id || event.chat?.id || 'unknown')}`,
       '',
       'Evidence:',
@@ -1829,6 +2141,7 @@ export class TelegramShieldBot {
     const languageOn = this.chatConversationalEnabled(chatId);
     const reviewNoticesOn = this.chatPendingReviewNotificationsEnabled(chatId);
     const reviewNoticeHours = this.chatPendingReviewNotificationIntervalHours(chatId);
+    const policy = this.chatPolicyProfile(chatId);
     return [
       '⚙️ Tracabot settings',
       '',
@@ -1836,6 +2149,7 @@ export class TelegramShieldBot {
       `🧠 Natural language: ${languageOn ? '✅ on' : '⚪ off'}`,
       `🛡️ Review notifications: ${reviewNoticesOn ? '✅ on' : '⚪ off'}`,
       `⏱️ Review notification interval: ${reviewNoticeHours}h`,
+      `🎚️ Protection profile: ${policy}`,
       '',
       'Tap a toggle below to switch the setting for this chat.'
     ].join('\n');
@@ -1847,9 +2161,12 @@ export class TelegramShieldBot {
     const reviewNoticesOn = this.chatPendingReviewNotificationsEnabled(chatId);
     const reviewNoticeHours = this.chatPendingReviewNotificationIntervalHours(chatId);
     const nextHours = reviewNoticeHours === 6 ? 12 : reviewNoticeHours === 12 ? 24 : 6;
+    const policy = this.chatPolicyProfile(chatId);
+    const nextPolicy = policy === 'balanced' ? 'strict' : policy === 'strict' ? 'monitor' : 'balanced';
     return [
       [button(`${challengeOn ? '✅' : '⚪'} Join challenge`, callbackData('challenge-set', requesterId, challengeOn ? 'off' : 'on')), button(`${languageOn ? '✅' : '⚪'} Natural language`, callbackData('conversation-set', requesterId, languageOn ? 'off' : 'on'))],
       [button(`${reviewNoticesOn ? '✅' : '⚪'} Review notices`, callbackData('review-notice-set', requesterId, reviewNoticesOn ? 'off' : 'on')), button(`⏱️ ${reviewNoticeHours}h`, callbackData('review-notice-interval', requesterId, String(nextHours)))],
+      [button(`🎚️ ${policy}`, callbackData('policy-profile', requesterId, nextPolicy))],
       [button('🩺 Status', callbackData('status', requesterId))],
       ...this.mainNavKeyboard(requesterId)
     ];
@@ -1891,7 +2208,7 @@ export class TelegramShieldBot {
         const patterns = [...new Set(uniqueEvents.flatMap((event) => event.payload?.patterns || []))];
         return { key, events: uniqueEvents, affectedCommunities, domains, wallets, patterns };
       })
-      .filter((item) => item.events.length >= 2)
+      .filter((item) => item.events.length >= 2 && item.affectedCommunities.length >= 2)
       .sort((a, b) => b.events.length - a.events.length || a.key.localeCompare(b.key));
   }
 
@@ -2146,17 +2463,14 @@ export class TelegramShieldBot {
       const reviewedEvent = selectedGroup[0];
       const reviewedTarget = reviewedEvent?.user || reviewedEvent?.payload?.target || {};
       const reason = messageText(message).replace(/@(?:tracabot|tracethembot)\b/ig, '').trim() || 'natural-language appeal from review list';
-      const event = await this.record('appeal_submitted', message, {
-        target_event_id: reviewedEvent.id,
-        reason,
-        appellant: actorFromMessage(message),
+      const event = await this.record('appeal_submitted', message, this.appealPayload(message, reviewedEvent.id, reason, {
         reviewed_target: reviewedTarget,
         reviewed_target_key: targetKey(reviewedTarget),
         implicit_detection: true,
         detection_method: 'numbered_review_list_reply',
         evidence: [`non-admin review-list reply logged as appeal for ${reviewedEvent.id}: ${reason}`]
-      });
-      await this.sendCommandReply(message.chat.id, `📝 Appeal logged for ${userMention(reviewedTarget)} as ${event.id}. Admins can confirm or reject the scam flag.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
+      }));
+      await this.sendCommandReply(message.chat.id, `📝 Appeal logged for ${userMention(reviewedTarget)}. Receipt: ${escapeHtml(event.payload.appeal_receipt_id)}. Admins can confirm or reject the scam flag.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
       return true;
     }
 
@@ -2207,7 +2521,7 @@ export class TelegramShieldBot {
     return true;
   }
 
-  async recordReviewDecisionForEvents(message, events = [], decision = 'reject', reason = '', { target = null, evidencePrefix = 'admin reviewed scam flag', extraPayload = {}, reviewChatId = '' } = {}) {
+  async recordReviewDecisionForEvents(message, events = [], decision = 'reject', reason = '', { target = null, evidencePrefix = 'admin reviewed scam flag', extraPayload = {}, reviewChatId = '', idempotencyKey = '' } = {}) {
     const unique = new Map();
     for (const event of events) {
       if (event?.id && this.isPendingReviewEvent(event)) unique.set(event.id, event);
@@ -2241,7 +2555,7 @@ export class TelegramShieldBot {
         false_positive_reason: decision === 'reject' ? reason : '',
         resolves_target_pending_reviews: sameChannelReview,
         evidence: [`${evidencePrefix} ${reviewedEvent.id}: ${reason}`]
-      });
+      }, { idempotencyKey: idempotencyKey ? `${idempotencyKey}:${reviewedEvent.id}` : '' });
       return { reviewedEvent, event };
     }));
     return { reviewed: [...unique.values()], artifactWrites };
@@ -2274,9 +2588,27 @@ export class TelegramShieldBot {
       scam_type: risk.scam_type || 'admin_action',
       evidence: [...(risk.evidence || []), reason, extra.sangmataEvidence || '', extra.deletedMessageCount ? `${extra.deletedMessageCount} message${extra.deletedMessageCount === 1 ? '' : 's'} deleted during ban cleanup` : extra.repliedMessageId ? 'replied scam message deletion unavailable' : '', extra.source || 'admin ban action'].filter(Boolean)
     };
-    this.record('ban_executed', { ...message, from: target }, payload)
-      .then(() => this.maybeRecordCampaign({ ...message, from: target, text: reason }, risk))
-      .catch((error) => console.error(`Ban evidence write failed for ${target?.id || target?.username || 'target'}: ${error instanceof Error ? error.message : String(error)}`));
+    const event = await this.record('ban_executed', { ...message, from: target }, payload, {
+      writeDkg: false,
+      idempotencyKey: extra.idempotencyKey || ''
+    });
+    Promise.resolve()
+      .then(async () => {
+        if (!this.config.testMode && hasEvidenceForDkg('ban_executed', payload)) {
+          const dkgStarted = Date.now();
+          try {
+            await this.dkg.writeEvent(event);
+            this.store.incrementMetric?.('dkg_write_count');
+            this.store.incrementMetric?.('dkg_write_latency_ms_total', Date.now() - dkgStarted);
+          } catch (error) {
+            this.store.incrementMetric?.('dkg_write_failures');
+            console.error(`Ban evidence DKG write failed for ${target?.id || target?.username || 'target'}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+        await this.maybeRecordCampaign({ ...message, from: target, text: reason }, risk);
+      })
+      .catch((error) => console.error(`Ban evidence background work failed for ${target?.id || target?.username || 'target'}: ${error instanceof Error ? error.message : String(error)}`));
+    return event;
   }
 
   canPublishFindingFromRisk(risk = {}) {
@@ -2317,7 +2649,7 @@ export class TelegramShieldBot {
 
   commitReceiptId({ artifactKind = '', quality = 0, risk = {}, sourceEventIds = [], text = '' } = {}) {
     const basis = [artifactKind, quality, risk.scam_type || '', risk.confidence || 0, sourceEventIds.join(','), textFingerprint(text)].join(':');
-    return `commit:${randomUUID().slice(0, 8)}:${Buffer.from(basis).toString('base64url').slice(0, 16)}`;
+    return `commit:${createHash('sha256').update(basis).digest('hex').slice(0, 24)}`;
   }
 
   async recordConversationArtifact(message, { risk = {}, text = '', artifactKind = 'conversation_artifact', conversationRole = 'observer', sourceEventIds = [], operatorNote = '', forceDkg = false } = {}) {
@@ -2732,10 +3064,7 @@ export class TelegramShieldBot {
     }
 
     if (!trusted && (classified.intent === 'appeal' || classified.decision === 'reject')) {
-      const event = await this.record('appeal_submitted', message, {
-        target_event_id: targetEvent.id,
-        reason,
-        appellant: actorFromMessage(message),
+      const event = await this.record('appeal_submitted', message, this.appealPayload(message, targetEvent.id, reason, {
         reviewed_target: reviewedTarget,
         reviewed_target_key: targetKey(reviewedTarget),
         implicit_detection: true,
@@ -2744,8 +3073,8 @@ export class TelegramShieldBot {
         llm_confidence: classified.confidence,
         original_flag_event: targetEvent.id,
         evidence: [`LLM classified non-admin alert reply as appeal for ${targetEvent.id}: ${reason}`]
-      });
-      await this.sendCommandReply(chatId, classified.user_reply ? escapeHtml(classified.user_reply) : `📝 Appeal logged for ${userMention(reviewedTarget)} as ${escapeHtml(event.id)}. Admins can confirm or reject the scam flag.`, { ...replyOptions, parse_mode: 'HTML' });
+      }));
+      await this.sendCommandReply(chatId, classified.user_reply ? `${escapeHtml(classified.user_reply)}\nReceipt: ${escapeHtml(event.payload.appeal_receipt_id)}` : `📝 Appeal logged for ${userMention(reviewedTarget)}. Receipt: ${escapeHtml(event.payload.appeal_receipt_id)}. Admins can confirm or reject the scam flag.`, { ...replyOptions, parse_mode: 'HTML' });
       return true;
     }
 
@@ -2930,14 +3259,12 @@ export class TelegramShieldBot {
       if (targetEventId) {
         // This is a reply to one of our alerts — treat as implicit appeal
         const reason = (message.text || '').replace(/^@?tracabot\b/i, '').trim() || 'implicit appeal via reply to flag';
-        const event = await this.record('appeal_submitted', message, {
-          target_event_id: targetEventId,
-          reason,
+        const event = await this.record('appeal_submitted', message, this.appealPayload(message, targetEventId, reason, {
           implicit_detection: true,
           detection_method: 'llm_context_reply_to_flag',
           original_flag_event: targetEventId
-        });
-        await this.sendEphemeral(chatId, `Appeal recorded for event ${shortId(targetEventId)}. Admins will review. Event: ${event.id}`, replyOptions);
+        }));
+        await this.sendEphemeral(chatId, `Appeal recorded for event ${shortId(targetEventId)}. Receipt: ${event.payload.appeal_receipt_id}. Admins will review.`, replyOptions);
         return { handled: true };
       }
 
@@ -3133,6 +3460,7 @@ export class TelegramShieldBot {
 
   async assess(message, targetUser = actorFromMessage(message), text = message.text || '') {
     const bounded = boundedText(text);
+    const policy = this.chatPolicy(message.chat?.id);
     this.rememberUser(message.chat, targetUser, bounded);
     const dkgIntel = await this.dkg.queryRiskIndicators({ username: targetUser.username, userId: targetUser.id, aliases: actorAliases(targetUser), text: bounded });
 
@@ -3155,8 +3483,8 @@ export class TelegramShieldBot {
       dkgIntel.riskScore = Math.max(dkgIntel.riskScore || 0, 75);
 
       // Create a real proactive cross-group alert when risk is meaningful
-      const currentRisk = combineRisk({ analysis: { confidence: 0 }, dkgIntel, threshold: this.config.actionThreshold });
-      if (currentRisk.confidence >= (this.config.warnThreshold ?? 60)) {
+      const currentRisk = combineRisk({ analysis: { confidence: 0 }, dkgIntel, threshold: policy.actionThreshold });
+      if (currentRisk.confidence >= policy.warnThreshold) {
         priorAdminAlertEvent = await this.record('proactive_cross_group_warning', message, {
           target: targetUser,
           target_key: targetKey(targetUser),
@@ -3181,7 +3509,7 @@ export class TelegramShieldBot {
     const effectiveIntel = falsePositiveReview ? { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [], artifactEvidence: [] } : dkgIntel;
     const analysis = this.analyzer({ text: bounded, user: { ...targetUser, adminUsernames, adminRenameCopycat: Boolean(renameCopycat) }, globalIntel: effectiveIntel });
     if (renameCopycat) {
-      analysis.confidence = Math.max(analysis.confidence || 0, this.config.actionThreshold);
+      analysis.confidence = Math.max(analysis.confidence || 0, policy.actionThreshold);
       analysis.is_scam = true;
       analysis.recommended_action = 'ban';
       analysis.scam_type = 'impersonation';
@@ -3192,7 +3520,7 @@ export class TelegramShieldBot {
       analysis.confidence = Math.min(99, Math.max(analysis.confidence || 0, (analysis.confidence || 0) + 15));
       analysis.evidence = [...(analysis.evidence || []), `Active watchlist entry ${watch.id}: ${watch.payload?.reason || 'admin watch'}`];
     }
-    const risk = combineRisk({ analysis, dkgIntel: effectiveIntel, threshold: this.config.actionThreshold });
+    const risk = combineRisk({ analysis, dkgIntel: effectiveIntel, threshold: policy.actionThreshold });
     if (!falsePositiveReview) return risk;
     return {
       ...risk,
@@ -3292,8 +3620,9 @@ export class TelegramShieldBot {
   }
 
   async applyRiskAction(message, risk) {
+    const policy = this.chatPolicy(message.chat?.id);
     const check = await this.record('risk_check', message, risk);
-    if (risk.confidence < (this.config.warnThreshold ?? 60)) return check;
+    if (risk.confidence < policy.warnThreshold) return check;
     if (!canAutonomouslyEscalate(risk)) {
       if (isObviousLocalScam(risk)) {
         // Auto-delete of user messages disabled during testing period (except join challenges)
@@ -3327,7 +3656,7 @@ export class TelegramShieldBot {
 
     // Auto-delete of user messages disabled during testing period (except join challenges)
     const deletedMessage = false;
-    const finding = risk.confidence >= (this.config.actionThreshold ?? 85) ? await this.publishHighConfidenceFinding(message, {
+    const finding = risk.confidence >= policy.actionThreshold ? await this.publishHighConfidenceFinding(message, {
       ...risk,
       recommended_action: 'admin_review',
       evidence: [...risk.evidence, 'triggering message removal disabled during testing', 'auto ban/restrict disabled for message classifier decisions; admin review required']
@@ -3390,6 +3719,14 @@ export class TelegramShieldBot {
       const replyContext = isPrivateChat ? { reply_to_message_id: message.message_id } : {};
       await this.sendInteractiveReply(chatId, this.formatHelp(), this.dashboardKeyboard(message.from?.id || message.from?.username || ''), replyContext);
       this.cleanupMenuTrigger(message);
+      return;
+    }
+    if (isCommand(text, 'health')) {
+      if (!this.isPrivateOwnerMessage(message)) {
+        await this.sendCleanCommandReply(message, '⚠️ /health is available only to configured bot owners in private chat.');
+        return;
+      }
+      await this.sendCleanCommandReply(message, await this.formatOwnerHealth());
       return;
     }
     if (isCommand(text, 'scan')) {
@@ -3496,14 +3833,14 @@ export class TelegramShieldBot {
         await this.alertAdmins({ ...message, from: replyUser, text: context }, risk, event);
         return;
       }
-      await this.ban(chatId, replyUser.id);
+      const effectPrefix = `manual-ban:${chatId}:${message.message_id}:${replyUser.id}`;
+      await this.callEffect('banChatMember', { chat_id: chatId, user_id: replyUser.id }, `${effectPrefix}:ban`);
       const repliedMessageId = String(message.reply_to_message?.from?.id || '') === String(replyUser.id || '') ? message.reply_to_message?.message_id : '';
-      const deletedMessages = await this.deleteKnownUserMessages(chatId, replyUser.id, [repliedMessageId]);
+      const deletedMessages = await this.deleteKnownUserMessages(chatId, replyUser.id, [repliedMessageId], effectPrefix);
       const repliedMessageDeleted = Boolean(repliedMessageId && deletedMessages.deleted > 0);
       const repliedMessageDeleteError = deletedMessages.failed ? `${deletedMessages.failed} message delete attempt${deletedMessages.failed === 1 ? '' : 's'} failed` : '';
       const deletionNote = replyUser.sangmata ? '' : deletedMessages.deleted ? ` Removed ${deletedMessages.deleted} message${deletedMessages.deleted === 1 ? '' : 's'}.` : '';
-      await this.sendCleanCommandReply(message, `${formatBanReply(replyUser, '')}${deletionNote}`);
-      this.recordBanEvidenceInBackground(message, replyUser, risk, reason, {
+      await this.recordBanEvidenceInBackground(message, replyUser, risk, reason, {
         repliedMessageId: repliedMessageId || '',
         repliedMessageDeleted,
         repliedMessageDeleteError,
@@ -3512,6 +3849,7 @@ export class TelegramShieldBot {
         sangmataEvidence: replyUser.sangmata?.evidence || '',
         source: 'manual /ban command'
       });
+      await this.sendCleanCommandReply(message, `${formatBanReply(replyUser, '')}${deletionNote}`);
     }
   }
 
@@ -4086,7 +4424,7 @@ export class TelegramShieldBot {
       await this.editInteractiveMessage(chatId, message.message_id, this.formatReviewPanel(filter, chatId), this.reviewPanelKeyboard(requester, filter, chatId), { parse_mode: 'HTML', disable_web_page_preview: true });
       return true;
     }
-    if (['stats', 'stats-sources', 'campaigns', 'banlist', 'status', 'challenge-set', 'conversation-set', 'review-notice-set', 'review-notice-interval', 'help', 'help-scan', 'why'].includes(parsed.action)) {
+    if (['stats', 'stats-sources', 'campaigns', 'banlist', 'status', 'challenge-set', 'conversation-set', 'review-notice-set', 'review-notice-interval', 'policy-profile', 'help', 'help-scan', 'why'].includes(parsed.action)) {
       if (requester && String(from.id || from.username || '') !== String(requester)) {
         await this.answerCallback(query.id, 'Open your own panel to use these buttons.');
         return true;
@@ -4120,13 +4458,17 @@ export class TelegramShieldBot {
         await this.editInteractiveMessage(chatId, message.message_id, await this.formatStatus(callbackMessage), this.settingsKeyboard(requester, chatId));
         return true;
       }
-      if (parsed.action === 'challenge-set' || parsed.action === 'conversation-set' || parsed.action === 'review-notice-set' || parsed.action === 'review-notice-interval') {
+      if (parsed.action === 'challenge-set' || parsed.action === 'conversation-set' || parsed.action === 'review-notice-set' || parsed.action === 'review-notice-interval' || parsed.action === 'policy-profile') {
         if (!trusted) {
           await this.answerCallback(query.id, 'Admin only');
           return true;
         }
         const value = parsed.parts[1] || 'status';
-        if (parsed.action === 'review-notice-interval') {
+        if (parsed.action === 'policy-profile') {
+          if (['strict', 'balanced', 'monitor'].includes(value)) {
+            await this.record('policy_profile_changed', callbackMessage, { profile: value, moderator: from, evidence: [`admin set channel protection profile to ${value}`] }, { writeDkg: false });
+          }
+        } else if (parsed.action === 'review-notice-interval') {
           const intervalHours = Number(value);
           if ([6, 12, 24].includes(intervalHours)) {
             await this.record('pending_review_notification_interval_changed', callbackMessage, { interval_hours: intervalHours, moderator: from, evidence: [`admin set pending review notification interval to ${intervalHours}h`] }, { writeDkg: false });
@@ -4199,7 +4541,17 @@ export class TelegramShieldBot {
     if (parsed.action === 'review-confirm' || parsed.action === 'review-reject') {
       const event = this.findEvent(eventId);
       if (!event) return true;
+      const finalDecision = parsed.action === 'review-confirm' ? 'confirm' : 'reject';
+      const target = event.user || event.payload?.target || {};
+      const reviewGroupId = createHash('sha256').update(`${eventChatKey(event) || chatId}:${targetKey(target) || event.id}`).digest('hex').slice(0, 24);
+      const decisionKey = `review:${chatId}:${reviewGroupId}:decision`;
       if (!this.isPendingReviewEvent(event)) {
+        const recordedDecision = this.store.all().find((item) =>
+          ['review_upheld', 'review_overturned'].includes(item.event_type)
+          && item.payload?.target_event_id === event.id
+          && item.payload?.review_decision === finalDecision
+        );
+        if (recordedDecision) this.store.completeEffect?.(decisionKey, { decision: finalDecision, reviewed: 1 }, { allowUncertain: true });
         await this.answerCallback(query.id, 'Already reviewed or expired');
         return true;
       }
@@ -4207,17 +4559,66 @@ export class TelegramShieldBot {
         await this.answerCallback(query.id, 'Review belongs to another channel');
         return true;
       }
-      const finalDecision = parsed.action === 'review-confirm' ? 'confirm' : 'reject';
       const reason = finalDecision === 'confirm' ? 'admin confirmed scam flag' : 'admin rejected scam flag as false positive';
-      const target = event.user || event.payload?.target || {};
       const events = this.pendingReviewGroupForEvent(event);
-      const reviewedCount = this.recordReviewDecisionInBackground(callbackMessage, events, finalDecision, reason, {
-        target,
-        reviewChatId: chatId,
-        evidencePrefix: `admin callback ${finalDecision === 'confirm' ? 'confirmed scam flag' : 'rejected scam flag'}`
-      });
+      const decisionClaim = this.store.beginEffect?.(decisionKey, 'review-decision', { decision: finalDecision, chatId, target: targetKey(target) });
+      if (decisionClaim?.completed || decisionClaim?.inProgress || decisionClaim?.uncertain) {
+        const status = decisionClaim.completed
+          ? 'Already reviewed'
+          : decisionClaim.uncertain
+            ? 'Prior review outcome unknown; manual verification required'
+            : 'Review decision in progress';
+        await this.answerCallback(query.id, status);
+        return true;
+      }
+      this.store.incrementMetric?.(finalDecision === 'confirm' ? 'reviews_confirmed' : 'reviews_rejected');
+      let enforcement;
+      let reviewed;
+      try {
+        const enforcementKey = `review:${chatId}:${reviewGroupId}:confirm`;
+        enforcement = finalDecision === 'confirm'
+          ? await this.enforceConfirmedScam(chatId, target, [event.payload?.source_message_id], enforcementKey)
+          : { banned: false, reason: 'flag_rejected', attempted: 0, deleted: 0, failed: 0 };
+        ({ reviewed } = await this.recordReviewDecisionForEvents(callbackMessage, events, finalDecision, reason, {
+          target,
+          reviewChatId: chatId,
+          extraPayload: {
+            enforcement_banned: enforcement.banned,
+            enforcement_reason: enforcement.reason,
+            delete_attempt_count: enforcement.attempted,
+            deleted_message_count: enforcement.deleted,
+            delete_failure_count: enforcement.failed
+          },
+          evidencePrefix: `admin callback ${finalDecision === 'confirm' ? 'confirmed scam flag' : 'rejected scam flag'}`,
+          idempotencyKey: decisionKey
+        }));
+        if (finalDecision === 'confirm' && enforcement.banned) {
+          await this.record('ban_executed', { ...callbackMessage, from: target }, {
+            target,
+            target_key: targetKey(target),
+            moderator: from,
+            admin_verified: true,
+            target_event_id: event.id,
+            reason,
+            deleted_message_count: enforcement.deleted,
+            delete_attempt_count: enforcement.attempted,
+            delete_failure_count: enforcement.failed,
+            evidence: [`admin confirmed review ${event.id}; user banned and ${enforcement.deleted}/${enforcement.attempted} known messages deleted`]
+          }, { idempotencyKey: `${decisionKey}:ban` });
+        }
+        this.store.completeEffect?.(decisionKey, { decision: finalDecision, reviewed: reviewed.length });
+      } catch (error) {
+        this.store.failEffect?.(decisionKey, error instanceof Error ? error.message : String(error));
+        throw error;
+      }
+      const reviewedCount = reviewed.length;
       const cleared = reviewedCount > 1 ? `\nCleared ${reviewedCount} pending reviews for ${userMention(target)}.` : '';
-      await this.editInteractiveMessage(chatId, message.message_id, `${finalDecision === 'confirm' ? '🚫 Confirmed scam.' : '✅ Rejected flag as false positive.'}${cleared}\n\nSaving evidence to TRACaBot context memory.`, [[button('↩️ Back to queue', callbackData('review-list', requester)), button('✖️ Close', callbackData('close', requester))]], { parse_mode: 'HTML' });
+      const enforcementLine = finalDecision === 'confirm'
+        ? enforcement.banned
+          ? `\nBanned ${userMention(target)} and deleted ${enforcement.deleted}/${enforcement.attempted} known messages.`
+          : `\nEnforcement not applied: ${escapeHtml(enforcement.reason.replaceAll('_', ' '))}.`
+        : '';
+      await this.editInteractiveMessage(chatId, message.message_id, `${finalDecision === 'confirm' ? '🚫 Confirmed scam.' : '✅ Rejected flag as false positive.'}${enforcementLine}${cleared}\n\nSaving evidence to TRACaBot context memory.`, [[button('↩️ Back to queue', callbackData('review-list', requester)), button('✖️ Close', callbackData('close', requester))]], { parse_mode: 'HTML' });
       return true;
     }
     if (parsed.action === 'warn-ban' || parsed.action === 'warn-safe') {
@@ -4238,19 +4639,18 @@ export class TelegramShieldBot {
         await this.editInteractiveMessage(chatId, message.message_id, `✅ Marked ${userMention(target)} as safe.\n\nCleared ${reviewedCount} pending review${reviewedCount === 1 ? '' : 's'}. Saving evidence to TRACaBot context memory.`, [[button('↩️ Back to queue', callbackData('review-list', requester)), button('✖️ Close', callbackData('close', requester))]], { parse_mode: 'HTML' });
         return true;
       }
-      if (!target.id) {
-        await this.answerCallback(query.id, 'No Telegram user ID on this warning');
+      const enforcement = await this.enforceConfirmedScam(chatId, target, [event.payload?.source_message_id]);
+      if (!enforcement.banned) {
+        await this.answerCallback(query.id, `Enforcement not applied: ${enforcement.reason.replaceAll('_', ' ')}`);
         return true;
       }
-      if (!await this.hasBanRights(chatId)) {
-        await this.answerCallback(query.id, 'Bot needs ban rights in this chat');
-        return true;
-      }
-      await this.ban(chatId, target.id);
       const reason = 'admin banned from prior-community warning';
       const risk = event.payload?.current_risk || event.payload || {};
-      await this.editInteractiveMessage(chatId, message.message_id, `${formatBanReply(target, '')}\n\nEvidence is being saved to TRACaBot context memory.`, [[button('↩️ Back to queue', callbackData('review-list', requester)), button('✖️ Close', callbackData('close', requester))]], { parse_mode: 'HTML' });
-      this.recordBanEvidenceInBackground(callbackMessage, target, risk, reason, { source: 'prior-community warning ban button' });
+      await this.recordBanEvidenceInBackground(callbackMessage, target, risk, reason, {
+        source: 'prior-community warning ban button',
+        idempotencyKey: `warning-ban:${chatId}:${event.id}`
+      });
+      await this.editInteractiveMessage(chatId, message.message_id, `${formatBanReply(target, '')}\nDeleted ${enforcement.deleted}/${enforcement.attempted} known messages.\n\nEvidence is being saved to TRACaBot context memory.`, [[button('↩️ Back to queue', callbackData('review-list', requester)), button('✖️ Close', callbackData('close', requester))]], { parse_mode: 'HTML' });
       return true;
     }
     return false;
@@ -4330,9 +4730,10 @@ export class TelegramShieldBot {
     }
     if (message.chat?.type === 'private') return;
     const user = actorFromMessage(message);
-      const risk = await this.assess({ ...message, text: fullMessageText }, user, fullMessageText);
-    const passiveLowRisk = !this.isDirectlyAddressed(message) && risk.confidence < (this.config.warnThreshold ?? 60);
-    if (risk.confidence < this.config.actionThreshold) {
+    const policy = this.chatPolicy(message.chat?.id);
+    const risk = await this.assess({ ...message, text: fullMessageText }, user, fullMessageText);
+    const passiveLowRisk = !this.isDirectlyAddressed(message) && risk.confidence < policy.warnThreshold;
+    if (risk.confidence < policy.actionThreshold) {
       await this.record('risk_check', message, risk);
 
       // Phase 3: Consult artefact curator (via skill) — now graph-aware (DKG Context Graph prior admin history)
@@ -4371,25 +4772,26 @@ export class TelegramShieldBot {
       await this.recordChannelObservation(message, risk);
       if (passiveLowRisk) return;
     }
-    if (risk.confidence >= (this.config.warnThreshold ?? 60)) {
+    if (risk.confidence >= policy.warnThreshold) {
       await this.record('scam_detection', message, risk);
       await this.recordChannelObservation(message, risk);
       await this.maybeRecordCampaign(message, risk);
     }
-    if (risk.confidence >= (this.config.restrictThreshold ?? this.config.actionThreshold)) {
+    if (risk.confidence >= policy.restrictThreshold) {
       await this.applyRiskAction(message, risk);
       return;
     }
   }
 
   async handleNewMembers(message) {
+    const policy = this.chatPolicy(message.chat?.id);
     for (const member of message.new_chat_members) {
       const botId = await this.getBotId().catch(() => null);
       if (member.is_bot === true || (botId && String(member.id) === String(botId))) continue;
       const joinMessage = { ...message, from: member, text: `new member joined @${member.username || member.id}` };
       this.rememberUser(message.chat, member, joinMessage.text);
       const risk = await this.assess(joinMessage, member, joinMessage.text);
-      if (risk.confidence >= (this.config.restrictThreshold ?? this.config.actionThreshold)) {
+      if (risk.confidence >= policy.restrictThreshold) {
         await this.applyRiskAction(joinMessage, risk);
       } else if (this.chatJoinChallengeEnabled(message.chat.id)) {
         await this.startJoinChallenge(message, member);
@@ -4461,14 +4863,15 @@ export class TelegramShieldBot {
         text: entry.context || `proactive scan @${entry.user.username || entry.user.id}`
       };
       const risk = await this.assess(message, entry.user, message.text);
+      const policy = this.chatPolicy(entry.chat?.id);
 
-      if (risk.confidence >= this.config.actionThreshold) {
+      if (risk.confidence >= policy.actionThreshold) {
         await this.applyRiskAction(message, risk);
         continue;
       }
 
       // Deeper polling enhancement: feed medium-risk proactive scans through the graph-aware artefact curator
-      if (svc && risk.confidence >= (this.config.warnThreshold ?? 60) - 10) {
+      if (svc && risk.confidence >= policy.warnThreshold - 10) {
         const curator = await svc.decideArtefactAction({
           telegramUserId: entry.user?.id,
           username: entry.user?.username,
@@ -4497,21 +4900,74 @@ export class TelegramShieldBot {
     }
   }
 
-  async pollOnce() {
-    const updates = await this.call('getUpdates', {
-      offset: this.offset,
-      timeout: 25,
-      allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member']
-    });
-    for (const update of updates) {
-      if (update.callback_query) await this.handleCallbackQuery(update.callback_query);
-      else if (update.message) await this.handleMessage(update.message);
-      else if (update.chat_member) await this.handleChatMemberUpdate(update.chat_member);
-      this.offset = update.update_id + 1;
+  async pollOnce({ signal } = {}) {
+    let updates;
+    try {
+      updates = await this.call('getUpdates', {
+        offset: this.offset,
+        timeout: 25,
+        allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member']
+      }, { signal });
+      this.notePollingSuccess();
+    } catch (error) {
+      if (error && typeof error === 'object') error.telegramPollingFailure = true;
+      throw error;
     }
+    for (const update of updates) {
+      if (signal?.aborted) break;
+      const claim = this.store.claimUpdate?.(this.botKey, update) || 'claimed';
+      if (claim === 'completed') {
+        this.offset = Math.max(this.offset, update.update_id + 1);
+        continue;
+      }
+      if (claim === 'processing') break;
+      this.currentUpdateId = update.update_id;
+      try {
+        if (update.callback_query) await this.handleCallbackQuery(update.callback_query);
+        else if (update.message) await this.handleMessage(update.message);
+        else if (update.chat_member) await this.handleChatMemberUpdate(update.chat_member);
+        const nextOffset = update.update_id + 1;
+        this.store.completeUpdate?.(this.botKey, update.update_id, nextOffset);
+        this.offset = nextOffset;
+        this.store.incrementMetric?.('telegram_updates_completed');
+      } catch (error) {
+        this.store.failUpdate?.(this.botKey, update.update_id, error instanceof Error ? error.message : String(error));
+        this.store.incrementMetric?.('telegram_updates_failed');
+        throw error;
+      } finally {
+        this.currentUpdateId = null;
+      }
+    }
+    if (signal?.aborted) return;
     this.proactiveScan().catch((error) => console.error(`proactive scan failed: ${error instanceof Error ? error.message : String(error)}`));
     this.expireJoinChallenges().catch((error) => console.error(`join challenge expiry failed: ${error instanceof Error ? error.message : String(error)}`));
     this.maybePostDailySafeTip().catch((error) => console.error(`daily safe tip failed: ${error instanceof Error ? error.message : String(error)}`));
+  }
+
+  notePollingSuccess() {
+    if (!this.pollingFailureCount) return;
+    console.error(`Telegram getUpdates recovered after ${this.pollingFailureCount} consecutive failure(s)`);
+    this.store.incrementMetric?.('telegram_poll_recoveries');
+    this.pollingFailureCount = 0;
+    this.lastPollingErrorLogAt = 0;
+  }
+
+  notePollingFailure(error) {
+    this.pollingFailureCount += 1;
+    const kind = pollingFailureKind(error);
+    const exponential = Math.min(POLLING_BACKOFF_MAX_MS, POLLING_BACKOFF_BASE_MS * (2 ** Math.min(this.pollingFailureCount - 1, 10)));
+    const delayMs = Math.min(POLLING_BACKOFF_MAX_MS, Math.round(exponential * (0.75 + Math.random() * 0.5)));
+    const now = Date.now();
+    const shouldLog = this.pollingFailureCount === 1 || now - this.lastPollingErrorLogAt >= POLLING_ERROR_LOG_INTERVAL_MS;
+    if (shouldLog) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Telegram getUpdates failed (kind=${kind}, consecutive=${this.pollingFailureCount}, retry_ms=${delayMs}): ${message}`);
+      this.lastPollingErrorLogAt = now;
+    }
+    this.store.incrementMetric?.('telegram_poll_failures');
+    this.store.incrementMetric?.(`telegram_poll_${kind}_failures`);
+    this.store.incrementMetric?.('telegram_poll_backoff_ms_total', delayMs);
+    return delayMs;
   }
 
   async maybePostDailySafeTip() {
@@ -4581,19 +5037,30 @@ export class TelegramShieldBot {
     return { sent, adminDms: [], warningEventId: warningEvent.id };
   }
 
-  async dropPendingUpdates() {
-    if (this.config.dropPendingUpdatesOnStart === false) return;
-    const updates = await this.call('getUpdates', { offset: -1, limit: 1, timeout: 0, allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member'] });
+  async dropPendingUpdates({ signal } = {}) {
+    const persistedOffset = this.store.pollingOffset?.(this.botKey);
+    if (persistedOffset !== null && persistedOffset !== undefined) {
+      this.offset = persistedOffset;
+      return;
+    }
+    if (this.config.dropPendingUpdatesOnStart === false) {
+      this.offset = this.store.initializePollingOffset?.(this.botKey, this.offset) ?? this.offset;
+      return;
+    }
+    const updates = await this.call('getUpdates', { offset: -1, limit: 1, timeout: 0, allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member'] }, { signal });
     if (updates.length) this.offset = updates[0].update_id + 1;
+    this.offset = this.store.initializePollingOffset?.(this.botKey, this.offset) ?? this.offset;
   }
 
-  async run() {
+  async run({ signal } = {}) {
     if (!this.config.telegramToken) throw new Error('TELEGRAM_BOT_TOKEN is required');
+    if (signal?.aborted) return;
     try {
       await this.dkg.ensureContextGraph();
     } catch (error) {
       console.error(`DKG startup check failed; continuing with Telegram polling: ${error instanceof Error ? error.message : String(error)}`);
     }
+    if (signal?.aborted) return;
     try {
       const commandScopes = [
         null,
@@ -4602,24 +5069,32 @@ export class TelegramShieldBot {
         { type: 'all_chat_administrators' }
       ];
       for (const scope of commandScopes) {
+        if (signal?.aborted) return;
         const payload = scope ? { scope } : {};
-        await this.call('deleteMyCommands', payload).catch(() => {});
-        await this.call('setMyCommands', { ...payload, commands: TELEGRAM_COMMANDS });
+        await this.call('deleteMyCommands', payload, { signal }).catch(() => {});
+        await this.call('setMyCommands', { ...payload, commands: TELEGRAM_COMMANDS }, { signal });
       }
     } catch (error) {
+      if (signal?.aborted) return;
       console.error(`setMyCommands failed: ${error instanceof Error ? error.message : String(error)}`);
     }
+    if (signal?.aborted) return;
     try {
-      await this.dropPendingUpdates();
+      await this.dropPendingUpdates({ signal });
     } catch (error) {
+      if (signal?.aborted) return;
       console.error(`dropPendingUpdates failed: ${error instanceof Error ? error.message : String(error)}`);
     }
-    for (;;) {
+    while (!signal?.aborted) {
       try {
-        await this.pollOnce();
+        await this.pollOnce({ signal });
       } catch (error) {
-        console.error(error instanceof Error ? error.message : String(error));
-        await new Promise((resolve) => setTimeout(resolve, 3000));
+        if (signal?.aborted) break;
+        const delayMs = error?.telegramPollingFailure
+          ? this.notePollingFailure(error)
+          : 3000;
+        if (!error?.telegramPollingFailure) console.error(error instanceof Error ? error.message : String(error));
+        await abortableSleep(delayMs, signal);
       }
     }
   }

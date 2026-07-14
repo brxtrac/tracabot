@@ -40,7 +40,7 @@ const adapterClient = {
   getAuthToken: null
 };
 const dkg = new DkgClient(config, { adapterClient });
-const store = new EventStore(config.storePath);
+const store = new EventStore(config.databasePath || config.storePath, { legacyPath: config.legacyStorePath });
 const bot = new TelegramShieldBot({ config, analyzer: analyzeMessage, dkg, store });
 const calls = [];
 bot.call = async (method, payload) => {

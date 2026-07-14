@@ -104,6 +104,10 @@ export function loadConfig(env = process.env) {
   const joinChallengeMode = /^(memory-card|qa|ual)$/i.test(env.TRACABOT_JOIN_CHALLENGE_MODE || '') ? env.TRACABOT_JOIN_CHALLENGE_MODE.toLowerCase() : 'memory-card';
   const joinChallengeQaBank = parseChallengeBank(env.TRACABOT_JOIN_CHALLENGE_QA_BANK || '');
   const dkgMode = env.TRACABOT_DKG_MODE || 'openclaw-adapter';
+  const legacyStorePath = env.TRACABOT_LEGACY_STORE_PATH || env.TRACABOT_STORE_PATH || './data/tracabot-events.jsonl';
+  const databasePath = env.TRACABOT_DB_PATH || legacyStorePath.replace(/\.jsonl$/i, '.sqlite');
+  const dkgWrites = parseBoolean(env.TRACABOT_DKG_WRITES, true);
+  const dkgPseudonymKey = String(env.TRACABOT_DKG_PSEUDONYM_KEY || '');
   if (dkgMode !== 'openclaw-adapter') {
     throw new Error('TRACABOT_DKG_MODE currently supports only openclaw-adapter');
   }
@@ -180,10 +184,13 @@ export function loadConfig(env = process.env) {
     dkgNodeUrl: env.DKG_NODE_URL || 'http://127.0.0.1:9200',
     dkgAuthToken: env.DKG_AUTH_TOKEN || readLocalDkgToken(),
     dkgReads: parseBoolean(env.TRACABOT_DKG_READS, true),
-    dkgWrites: parseBoolean(env.TRACABOT_DKG_WRITES, true),
+    dkgWrites,
     dkgPublishVerified: parseBoolean(env.TRACABOT_DKG_PUBLISH_VERIFIED, false),
+    dkgPseudonymKey,
     openClawDkgAdapterPath: env.OPENCLAW_DKG_ADAPTER_PATH || '',
-    storePath: env.TRACABOT_STORE_PATH || './data/tracabot-events.jsonl',
+    storePath: databasePath,
+    databasePath,
+    legacyStorePath,
     agentDid: env.TRACABOT_AGENT_DID || 'did:dkg:agent:tracabot',
     testMode: parseBoolean(env.TRACABOT_TEST_MODE, false),
     openClawWorkspace: env.OPENCLAW_WORKSPACE || resolve(homedir(), '.openclaw', 'workspace'),
@@ -228,4 +235,10 @@ export function loadConfig(env = process.env) {
     proactiveAlertCrossGroup: parseBoolean(env.TRACABOT_PROACTIVE_ALERT_CROSS_GROUP, true),
     skillAllowUnauthenticatedWrites: parseBoolean(env.TRACABOT_SKILL_ALLOW_UNAUTHENTICATED_WRITES, false)
   };
+}
+
+export function validateDkgPseudonymKey(config = {}) {
+  if (config.dkgWrites && Buffer.byteLength(config.dkgPseudonymKey || '', 'utf8') < 32) {
+    throw new Error('TRACABOT_DKG_PSEUDONYM_KEY must be at least 32 bytes when DKG writes are enabled');
+  }
 }
