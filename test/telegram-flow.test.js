@@ -1879,6 +1879,59 @@ test('/start bot command variant deletes the trigger after opening menu', async 
   assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.payload.message_id === 31));
 });
 
+test('/start for another bot username stays silent', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  await bot.handleCommand({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 1, username: 'admin' },
+    message_id: 32,
+    text: '/start@TRACaPlot_bot'
+  });
+  assert.equal(calls.some((call) => call.method === 'sendMessage'), false);
+  assert.equal(calls.some((call) => call.method === 'deleteMessage'), false);
+});
+
+test('/start matches configured bot username and ignores legacy username', async () => {
+  const { bot, calls } = makeBot({ canBan: true, configOverrides: { botUsername: 'my_guardian_bot' } });
+  await bot.handleCommand({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 1, username: 'admin' },
+    message_id: 33,
+    text: '/start@my_guardian_bot'
+  });
+  assert.ok(calls.some((call) => call.method === 'sendMessage'));
+
+  calls.length = 0;
+  await bot.handleCommand({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 1, username: 'admin' },
+    message_id: 34,
+    text: '/start@tracethembot'
+  });
+  assert.equal(calls.some((call) => call.method === 'sendMessage'), false);
+  assert.equal(calls.some((call) => call.method === 'deleteMessage'), false);
+});
+
+test('/start resolves runtime bot username when configuration is empty', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  bot.call = async (method, payload) => {
+    calls.push({ method, payload });
+    if (method === 'getMe') return { id: 999, username: 'runtime_guardian_bot' };
+    if (method === 'sendMessage') return { message_id: calls.length, ...payload };
+    return { ok: true };
+  };
+
+  await bot.handleCommand({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 1, username: 'admin' },
+    message_id: 35,
+    text: '/start@runtime_guardian_bot'
+  });
+
+  assert.equal(calls.filter((call) => call.method === 'getMe').length, 1);
+  assert.ok(calls.some((call) => call.method === 'sendMessage'));
+});
+
 test('/settings status panel reports permissions without exposing secrets', async () => {
   const { bot, calls } = makeBot({ canBan: true, trustedUserIds: [1], adminIds: ['1'] });
   const chat = { id: -100, title: 'demo' };

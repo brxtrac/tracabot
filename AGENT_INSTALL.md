@@ -19,7 +19,8 @@ Confirm the host meets these requirements before starting:
 - Node.js **>= 22.20.0** (`node -v`)
 - A Linux/macOS server or VM with outbound internet access
 - Ability to run long-lived processes (systemd recommended for production)
-- (Strongly recommended) A domain or stable IP if you want reliable webhook-style behavior (polling works fine for most users)
+
+TRACaBot uses Telegram long polling, not webhooks. It needs outbound HTTPS access to `api.telegram.org`; it does not need a public domain, public IP, inbound port, or TLS certificate.
 
 If any of these are missing, stop and have the human fix them.
 
@@ -78,27 +79,16 @@ Tell the human exactly this:
 7. Paste the following exact command list:
 
 ```
-scan - Check scam risk for a user, wallet, message, or SangMata alert
-report - Report suspicious evidence to shared DKG memory
-dmreport - Report off-platform DM impersonation scams
-ban - Ban a replied target when admin safeguards pass
-stats - Show recent fraud intelligence and source activity
-why - Explain evidence behind a tracabot event
-watch - Locally watch a user, ID, username, or SangMata target
-unwatch - Remove a local watch target
-watchlist - Show active watches, mutes, and review items
-challenge - Turn new-user join challenge on or off
-conversation - Toggle natural language agent mode per group (default on)
-appeal - Submit a correction request for an event
-review - Admin review decision for an event
-digest - Summarize recent actions and campaign signals
-status - Admin status for DKG, permissions, and conversation mode
-help - Show tracabot commands and safeguards
+start - Open Tracabot protection menu
+scan - Check a user, wallet, or replied message for scam risk
+report - Report suspicious users, messages, links, wallets, or forwarded DMs
+ban - Ban a replied user and publish ban evidence (admin)
+mute - Admin: mute a replied or mentioned user for a duration
 ```
 
 8. Invite the bot to the target Telegram group and grant it **admin rights** (at minimum: Delete Messages, Restrict Users, Ban Users).
 
-Store the token securely. It will go into `TELEGRAM_BOT_TOKEN`.
+Store the token securely. It will go into `TELEGRAM_BOT_TOKEN`. Record the BotFather username without the leading `@`; it can go into optional `TRACABOT_BOT_USERNAME` so commands addressed to other bots are ignored from the first update. TRACaBot also resolves its username with Telegram `getMe` during startup.
 
 ---
 
@@ -126,15 +116,32 @@ Now edit `.env`. The following are the **minimum required + strongly recommended
 
 ```env
 TELEGRAM_BOT_TOKEN=your_token_from_botfather
+TRACABOT_BOT_USERNAME=mycommunityguardian_bot   # optional; no leading @
 TRACABOT_ADMINS=123456789,@yourusername          # comma separated
 ```
+
+Keep `.env` out of Git. Never paste the complete file, bot token, API keys, DKG auth token, or pseudonym key into chat, commits, issue reports, or logs.
 
 ### DKG Configuration (use the values from Phase 1)
 
 ```env
 DKG_NODE_URL=http://127.0.0.1:9200
 TRACABOT_DKG_MODE=openclaw-adapter
+TRACABOT_DKG_READS=true
+TRACABOT_DKG_WRITES=true
 ```
+
+When `TRACABOT_DKG_WRITES=true`, `TRACABOT_DKG_PSEUDONYM_KEY` is required and must contain at least 32 random bytes. Generate a 32-byte random value as 64 hexadecimal characters, then place only the generated value in `.env`:
+
+```bash
+openssl rand -hex 32
+```
+
+```env
+TRACABOT_DKG_PSEUDONYM_KEY=replace_with_generated_value
+```
+
+This key HMAC-pseudonymizes Telegram identities and communities before DKG writes. Keep the same key on trusted instances that must correlate pseudonyms in the same Context Graph. Changing it breaks correlation. If DKG writes are deliberately disabled with `TRACABOT_DKG_WRITES=false`, the key is not required.
 
 ### Context Graph Decision (Very Important)
 
@@ -174,6 +181,22 @@ TRACABOT_PUBLISH_CONTEXT_GRAPH_ID=your_decimal_context_graph_id_if_needed
 ```
 
 For agent-assisted setup, have the agent run `dkg wallet` and present the operational wallet address plus network name to the operator so funding can be completed without touching private keys.
+
+### Local SQLite Store
+
+TRACaBot stores local operational state in a SQLite WAL database. Use an absolute path in production, especially under systemd:
+
+```env
+TRACABOT_DB_PATH=/opt/tracabot/data/tracabot-events.sqlite
+```
+
+`TRACABOT_LEGACY_STORE_PATH` is optional. Set it only when migrating an existing JSONL install:
+
+```env
+TRACABOT_LEGACY_STORE_PATH=/opt/tracabot/data/tracabot-events.jsonl
+```
+
+On first database initialization, TRACaBot imports valid legacy JSONL events once. It keeps the JSONL file unchanged as a backup; SQLite becomes the active store. Ensure the service user can write the database directory. Do not point `TRACABOT_DB_PATH` at a directory.
 
 ### LLM Configuration (Multiple Good Options)
 
@@ -233,15 +256,24 @@ Watch the logs. You should see:
 
 - Successful connection to Telegram
 - Connection to the DKG node
-- The bot announcing itself
+- Long polling continuing without a `getUpdates` conflict
 
 Test with a simple command in the group (as an admin):
 
 ```
-/status
+/start
+/scan @yourusername
 ```
 
 If everything is green, the basic installation succeeded.
+
+TRACaBot uses `getUpdates` long polling. Run exactly one active TRACaBot process per `TELEGRAM_BOT_TOKEN`; a second poller causes Telegram conflict errors. Do not configure a webhook. If this token previously used one, remove it before starting polling:
+
+```bash
+curl -fsS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=false"
+```
+
+Do not put the expanded command, token, or response into logs or shell history on a shared host. Prefer running it from a protected interactive session.
 
 Run the non-Telegram demo to verify DKG writes work:
 
@@ -266,13 +298,23 @@ Or use the bin name after npm install: `tracabot-openclaw-learning-loop`.
 
 ### 6.2 Systemd Service (production)
 
-Create `/etc/systemd/system/tracabot.service` from `docs/tracabot.service.example` and update paths/user if you did not install into `/opt/tracabot`.
+Use `docs/tracabot.service.example` as the source of truth. It assumes the repository and `.env` are under `/opt/tracabot`, runtime data is under `/opt/tracabot/data`, and the service runs as Unix user `tracabot`.
 
-Then:
+Before installing it, inspect and update `WorkingDirectory`, `EnvironmentFile`, `ExecStart`, `User`, and `ReadWritePaths` if your installation differs. For the example's `/opt/tracabot` layout, create the service account and writable data directory, then install the tracked unit:
 
 ```bash
+getent passwd tracabot >/dev/null || sudo useradd --system --home-dir /opt/tracabot --shell /usr/sbin/nologin tracabot
+sudo install -d -o tracabot -g tracabot -m 0750 /opt/tracabot/data
+sudo install -m 0644 docs/tracabot.service.example /etc/systemd/system/tracabot.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now tracabot.service
+sudo systemctl status tracabot.service
+```
+
+Inspect logs without printing `.env`:
+
+```bash
+sudo journalctl -u tracabot.service -n 100 --no-pager
 ```
 
 ### 6.3 Join Challenge (optional but powerful)
@@ -303,11 +345,15 @@ When the user wants their community to benefit from (and contribute to) the glob
 ## Common Failure Modes & How to Debug
 
 - DKG connection errors → Check `DKG_NODE_URL`, that the daemon is actually running, and `dkg status`.
+- Startup rejects `TRACABOT_DKG_PSEUDONYM_KEY` → Generate at least 32 random bytes and set the key, or deliberately disable DKG writes.
+- SQLite open/write errors → Check `TRACABOT_DB_PATH`, parent-directory existence, ownership, and the systemd `ReadWritePaths` value.
 - Telegram "not authorized to perform this action" → Bot does not have ban/delete/restrict rights in the group.
+- Telegram `getUpdates` conflict → Stop the other process or remove an old webhook; only one poller may use a token.
+- Commands addressed to this bot are ignored → Check `TRACABOT_BOT_USERNAME` against BotFather without `@`, or remove it and restart so `getMe` resolves the username.
 - LLM not working in conversational mode → Wrong provider/model/key combination. Start with `TRACABOT_LLM_PROVIDER=off` to rule out Telegram issues.
 - Context graph errors → Name must match the regex in `src/config.js`.
 
-Always have the agent run `/status` (or the equivalent skill) as the first diagnostic.
+Start diagnostics with `sudo systemctl status tracabot.service` and `sudo journalctl -u tracabot.service -n 100 --no-pager`. Bot owners can also open `/start` in Telegram and inspect the Settings panel.
 
 ---
 
@@ -317,11 +363,16 @@ Always have the agent run `/status` (or the equivalent skill) as the first diagn
 - [ ] Telegram bot created with correct commands set
 - [ ] Bot invited to group with proper admin rights
 - [ ] `.env` contains a valid token and at least one admin
+- [ ] Optional `TRACABOT_BOT_USERNAME` matches BotFather username without `@`, or startup `getMe` succeeds
 - [ ] `TRACABOT_CONTEXT_GRAPH` chosen deliberately
+- [ ] `TRACABOT_DKG_PSEUDONYM_KEY` has at least 32 random bytes when DKG writes are enabled
+- [ ] `TRACABOT_DB_PATH` points to a writable SQLite file location
+- [ ] Existing JSONL path supplied through `TRACABOT_LEGACY_STORE_PATH` only when migration is needed
 - [ ] LLM configured and tested (or deliberately turned off)
-- [ ] `npm start` succeeds and `/status` works
+- [ ] No webhook or competing `getUpdates` process uses the bot token
+- [ ] `npm start` succeeds and `/start` plus `/scan` work
 - [ ] (Optional) Learning loop running
-- [ ] (Production) systemd service configured
+- [ ] (Production) `docs/tracabot.service.example` installed with correct paths/user and service is active
 
 Once these are green, the installation is complete and the bot is contributing to (or benefiting from) shared DKG intelligence.
 

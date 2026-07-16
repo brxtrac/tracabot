@@ -102,8 +102,22 @@ function repliedText(message = {}) {
   return boundedText([reply.text, reply.caption, ...entityUrls(reply)].filter(Boolean).join('\n'));
 }
 
-function isCommand(text = '', command = '') {
-  return new RegExp(`^/${command}(?:@\\w+)?(?:\\s|$)`, 'i').test(String(text || ''));
+function escapeRegExp(value = '') {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeBotUsername(value = '') {
+  return String(value || '').trim().replace(/^@/, '');
+}
+
+function commandRegex(command = '', botUsername = '') {
+  const user = normalizeBotUsername(botUsername);
+  const suffix = user ? `(?:@${escapeRegExp(user)})?` : '(?:@(?:tracabot|tracethembot))?';
+  return new RegExp(`^/${escapeRegExp(command)}${suffix}(?:\\s|$)`, 'i');
+}
+
+function isCommand(text = '', command = '', botUsername = '') {
+  return commandRegex(command, botUsername).test(String(text || ''));
 }
 
 function callbackData(action = '', ...parts) {
@@ -551,6 +565,7 @@ export class TelegramShieldBot {
     this.store = store;
     this.llm = llm;
     this.botKey = createHash('sha256').update(String(this.config.telegramToken || 'tracabot')).digest('hex');
+    this.botUsernameCache = normalizeBotUsername(this.config.botUsername || '');
     this.offset = this.store.pollingOffset?.(this.botKey) ?? 0;
     this.currentUpdateId = null;
     this.botId = null;
@@ -944,8 +959,14 @@ export class TelegramShieldBot {
   }
 
   async botUsername() {
+    if (this.botUsernameCache) return this.botUsernameCache;
     const me = await this.call('getMe', {});
-    return me.username || 'tracethembot';
+    this.botUsernameCache = normalizeBotUsername(me.username || 'tracethembot');
+    return this.botUsernameCache;
+  }
+
+  ownBotUsername() {
+    return this.botUsernameCache || normalizeBotUsername(this.config.botUsername || '');
   }
 
   async deleteMessage(chatId, messageId) {
@@ -1261,7 +1282,7 @@ export class TelegramShieldBot {
   }
 
   commandText(message, command) {
-    return boundedText(message.text || '').replace(new RegExp(`^/${command}(?:@\\w+)?(?:\\s+|$)`, 'i'), '').trim();
+    return boundedText(message.text || '').replace(commandRegex(command, this.ownBotUsername()), '').trim();
   }
 
   resolveCommandTarget(message, command) {
@@ -3714,14 +3735,15 @@ export class TelegramShieldBot {
   async handleCommand(message) {
     const text = message.text || '';
     const chatId = message.chat.id;
-    if (isCommand(text, 'start')) {
+    const botUsername = this.ownBotUsername() || await this.botUsername().catch(() => '');
+    if (isCommand(text, 'start', botUsername)) {
       const isPrivateChat = message.chat?.type === 'private' || Number(chatId) > 0;
       const replyContext = isPrivateChat ? { reply_to_message_id: message.message_id } : {};
       await this.sendInteractiveReply(chatId, this.formatHelp(), this.dashboardKeyboard(message.from?.id || message.from?.username || ''), replyContext);
       this.cleanupMenuTrigger(message);
       return;
     }
-    if (isCommand(text, 'health')) {
+    if (isCommand(text, 'health', botUsername)) {
       if (!this.isPrivateOwnerMessage(message)) {
         await this.sendCleanCommandReply(message, '⚠️ /health is available only to configured bot owners in private chat.');
         return;
@@ -3729,7 +3751,7 @@ export class TelegramShieldBot {
       await this.sendCleanCommandReply(message, await this.formatOwnerHealth());
       return;
     }
-    if (isCommand(text, 'scan')) {
+    if (isCommand(text, 'scan', botUsername)) {
       if (await this.rejectNonOwnerPrivateReport(message)) return;
       const { target, text: targetText } = this.resolveCommandTarget(message, 'scan');
       const risk = await this.assess({ ...message, from: target, text: targetText }, target, targetText);
@@ -3741,7 +3763,7 @@ export class TelegramShieldBot {
       return;
     }
 
-    if (isCommand(text, 'report')) {
+    if (isCommand(text, 'report', botUsername)) {
       if (await this.rejectNonOwnerPrivateReport(message)) return;
       const reportEvidence = forwardedEvidenceText(message);
       const reportText = [this.commandText(message, 'report'), reportEvidence].filter(Boolean).join('\n');
@@ -3796,11 +3818,11 @@ export class TelegramShieldBot {
       await this.sendCleanCommandReply(message, formatReportReply(event, reportDecision));
       return;
     }
-    if (isCommand(text, 'mute')) {
+    if (isCommand(text, 'mute', botUsername)) {
       await this.handleMuteCommand(message);
       return;
     }
-    if (isCommand(text, 'ban')) {
+    if (isCommand(text, 'ban', botUsername)) {
       const { target, text: targetText } = this.resolveCommandTarget(message, 'ban');
       const replyUser = target?.id ? target : message.reply_to_message?.from;
       if (!await this.isTrustedModerator(message)) {
@@ -5054,6 +5076,8 @@ export class TelegramShieldBot {
 
   async run({ signal } = {}) {
     if (!this.config.telegramToken) throw new Error('TELEGRAM_BOT_TOKEN is required');
+    if (signal?.aborted) return;
+    await this.botUsername().catch(() => '');
     if (signal?.aborted) return;
     try {
       await this.dkg.ensureContextGraph();

@@ -161,6 +161,7 @@ export function loadConfig(env = process.env) {
   }
   return {
     telegramToken: env.TELEGRAM_BOT_TOKEN || '',
+    botUsername: env.TRACABOT_BOT_USERNAME || '',
     adminIds,
     botOwnerIds,
     autoDelete: parseBoolean(env.TRACABOT_AUTO_DELETE, true),

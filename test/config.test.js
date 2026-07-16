@@ -55,6 +55,11 @@ test('loadConfig parses bot owner ids for global trust roots', () => {
   assert.equal(config.botOwnerIds.has('brx'), true);
 });
 
+test('loadConfig exposes optional Telegram bot username', () => {
+  assert.equal(loadConfig({ TRACABOT_BOT_USERNAME: 'my_guardian_bot' }).botUsername, 'my_guardian_bot');
+  assert.equal(loadConfig({}).botUsername, '');
+});
+
 test('loadConfig parses boolean environment values strictly', () => {
   assert.equal(loadConfig({}).autoRestrict, false);
   assert.equal(loadConfig({}).autoBan, false);
