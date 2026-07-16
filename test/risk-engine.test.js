@@ -1,6 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { canAutonomouslyEscalate, combineRisk, displayName, formatDkgReference, formatRiskAssessment, formatScanReply, formatStatsReply, formatStatsSourcesReply, isObviousLocalScam } from '../src/risk-engine.js';
+import {
+  canAutonomouslyEscalate,
+  combineRisk,
+  displayName,
+  evaluateKnownCampaignAutoBan,
+  formatDkgReference,
+  formatRiskAssessment,
+  formatScanReply,
+  formatStatsReply,
+  formatStatsSourcesReply,
+  isObviousLocalScam,
+  matchKnownCampaignFingerprint,
+  normalizeCampaignLabel
+} from '../src/risk-engine.js';
 
 test('combines DKG evidence with local analysis and triggers admin review threshold', () => {
   const risk = combineRisk({
@@ -29,6 +42,45 @@ test('combines DKG evidence with local analysis and triggers admin review thresh
   assert.match(risk.evidence.join('\n'), /Domains checked: fake-claim\.example/);
   assert.doesNotMatch(risk.evidence.join('\n'), /https:\/\/tracabot\.org\/ontology#event/);
   assert.equal(canAutonomouslyEscalate(risk), true);
+});
+
+test('known campaign fingerprints match BC GAME style labels', () => {
+  assert.equal(normalizeCampaignLabel('BC GAME'), 'bcgame');
+  const hit = matchKnownCampaignFingerprint({ first_name: 'BC GAME', sangmata: { oldName: 'qqq', newName: 'BC GAME' } });
+  assert.equal(hit.pattern, 'bcgame');
+  assert.equal(matchKnownCampaignFingerprint({ first_name: 'Totally Normal User' }), null);
+});
+
+test('evaluateKnownCampaignAutoBan requires fingerprint plus ban roots', () => {
+  const target = { id: '99', first_name: 'BC GAME', sangmata: { oldName: 'x', newName: 'BC GAME' } };
+  const risk = { confidence: 90, dkg_backed: true, dkg_evidence: [{ eventId: 'prior' }] };
+  assert.equal(evaluateKnownCampaignAutoBan({
+    target,
+    risk,
+    localBanRoots: 2,
+    dkgBanRoots: 0,
+    minBanRoots: 2,
+    enabled: true
+  }).eligible, true);
+  assert.equal(evaluateKnownCampaignAutoBan({
+    target: { id: '99', first_name: 'Normal' },
+    risk,
+    localBanRoots: 5,
+    minBanRoots: 2
+  }).eligible, false);
+  assert.equal(evaluateKnownCampaignAutoBan({
+    target,
+    risk: { confidence: 40, dkg_backed: false },
+    localBanRoots: 1,
+    dkgBanRoots: 0,
+    minBanRoots: 2
+  }).eligible, false);
+  assert.equal(evaluateKnownCampaignAutoBan({
+    target,
+    risk,
+    localBanRoots: 2,
+    enabled: false
+  }).eligible, false);
 });
 
 test('local-only strong patterns are delete-review only, not autonomous escalation', () => {

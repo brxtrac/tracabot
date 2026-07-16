@@ -40,6 +40,15 @@ function parseChallengeBank(value = '') {
   }
 }
 
+function parseKnownCampaignPatterns(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return [];
+  return raw
+    .split(/[\n,|]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 export function loadConfig(env = process.env) {
   const contextGraph = env.TRACABOT_CONTEXT_GRAPH || 'tracabot';
   const warnThreshold = Number(env.TRACABOT_WARN_THRESHOLD || 60);
@@ -108,6 +117,14 @@ export function loadConfig(env = process.env) {
   const databasePath = env.TRACABOT_DB_PATH || legacyStorePath.replace(/\.jsonl$/i, '.sqlite');
   const dkgWrites = parseBoolean(env.TRACABOT_DKG_WRITES, true);
   const dkgPseudonymKey = String(env.TRACABOT_DKG_PSEUDONYM_KEY || '');
+  // Clear, high-evidence known-campaign auto-ban (SangMata renames + prior ban roots).
+  // Independent of broad TRACABOT_AUTO_BAN so BC GAME-class waves can be removed without re-enabling all classifier bans.
+  const knownCampaignAutoBan = parseBoolean(env.TRACABOT_KNOWN_CAMPAIGN_AUTO_BAN, true);
+  const knownCampaignMinBanRoots = Number(env.TRACABOT_KNOWN_CAMPAIGN_MIN_BAN_ROOTS || 2);
+  const knownCampaignPatterns = parseKnownCampaignPatterns(env.TRACABOT_KNOWN_CAMPAIGN_PATTERNS || '');
+  if (!Number.isFinite(knownCampaignMinBanRoots) || knownCampaignMinBanRoots < 1 || knownCampaignMinBanRoots > 20) {
+    throw new Error('TRACABOT_KNOWN_CAMPAIGN_MIN_BAN_ROOTS must be a number from 1 to 20');
+  }
   if (dkgMode !== 'openclaw-adapter') {
     throw new Error('TRACABOT_DKG_MODE currently supports only openclaw-adapter');
   }
@@ -167,6 +184,9 @@ export function loadConfig(env = process.env) {
     autoDelete: parseBoolean(env.TRACABOT_AUTO_DELETE, true),
     autoRestrict: parseBoolean(env.TRACABOT_AUTO_RESTRICT, false),
     autoBan: parseBoolean(env.TRACABOT_AUTO_BAN, false),
+    knownCampaignAutoBan,
+    knownCampaignMinBanRoots,
+    knownCampaignPatterns,
     warnThreshold,
     restrictThreshold,
     banThreshold,

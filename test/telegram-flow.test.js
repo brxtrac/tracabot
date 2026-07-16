@@ -72,6 +72,9 @@ function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = nu
         autoDelete: true,
         autoRestrict: true,
         autoBan: true,
+        knownCampaignAutoBan: true,
+        knownCampaignMinBanRoots: 2,
+        knownCampaignPatterns: [],
         warnThreshold: 60,
         restrictThreshold: 75,
         banThreshold: 85,
@@ -2516,6 +2519,140 @@ test('/scan replying to SangMata rename scans the renamed user ID', async () => 
   const event = bot.store.all().find((item) => item.event_type === 'risk_query');
   assert.equal(event.user.id, '8388593201');
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Kristian Baumgartner')));
+});
+
+test('SangMata poll auto-bans BC GAME campaign with prior ban roots and notifies channel', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    dkgIntel: {
+      riskScore: 70,
+      reportsAcrossCommunities: 2,
+      wallets: [],
+      patterns: ['known_campaign'],
+      evidence: [{ source: 'https://tracabot.org/ontology#event/bcgame-prior', eventId: 'bcgame-prior' }]
+    }
+  });
+  bot.dkg.queryAdminHistoryForActor = async () => ({
+    hasPriorAdminAction: true,
+    hasPriorFalsePositive: false,
+    events: [
+      { eventId: 'ban-a', eventType: 'ban_executed', confidence: 95, created: '2026-07-01T00:00:00.000Z' },
+      { eventId: 'ban-b', eventType: 'ban_executed', confidence: 90, created: '2026-07-02T00:00:00.000Z' }
+    ],
+    falsePositiveEvents: []
+  });
+  const timestamp = new Date().toISOString();
+  bot.store.append({
+    id: 'prior-ban-1',
+    event_type: 'ban_executed',
+    timestamp,
+    user: { id: '111', first_name: 'BC GAME' },
+    payload: { confidence: 95, evidence: ['admin banned BC GAME campaign account'], admin_verified: true }
+  });
+  bot.store.append({
+    id: 'prior-ban-2',
+    event_type: 'ban_executed',
+    timestamp,
+    user: { id: '222', first_name: 'BC GAME' },
+    payload: { confidence: 92, evidence: ['admin banned BC GAME rename wave'], admin_verified: true }
+  });
+
+  const chat = { id: -100, title: 'demo' };
+  const sangmata = {
+    chat,
+    message_id: 9001,
+    from: { id: 461843263, username: 'SangMataInfo_bot', is_bot: true },
+    text: 'User 777888999 changed name from RandomAlias to BC GAME.'
+  };
+  await bot.handleMessage(sangmata);
+
+  assert.ok(calls.some((call) => call.method === 'banChatMember' && String(call.payload.user_id) === '777888999'));
+  assert.ok(calls.some((call) => (
+    call.method === 'sendMessage'
+    && /removed/i.test(String(call.payload.text || ''))
+    && /BC GAME/i.test(String(call.payload.text || ''))
+    && /Reviews/i.test(String(call.payload.text || ''))
+  )));
+  const ban = bot.store.all().find((event) => event.event_type === 'ban_executed' && String(event.user?.id) === '777888999');
+  assert.ok(ban);
+  assert.match(JSON.stringify(ban.payload.evidence || []), /known campaign|SangMata|BC GAME/i);
+});
+
+test('SangMata poll does not auto-ban without campaign ban roots', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], patterns: [], evidence: [] },
+    analyzer: () => ({ is_scam: false, confidence: 20, scam_type: 'unknown', evidence: [], recommended_action: 'ignore' })
+  });
+  bot.dkg.queryAdminHistoryForActor = async () => ({
+    hasPriorAdminAction: false,
+    hasPriorFalsePositive: false,
+    events: [],
+    falsePositiveEvents: []
+  });
+  const chat = { id: -100, title: 'demo' };
+  await bot.handleMessage({
+    chat,
+    message_id: 9002,
+    from: { id: 461843263, username: 'SangMataInfo_bot', is_bot: true },
+    text: 'User 555666777 changed name from Alice to Bob Normal.'
+  });
+  assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
+  assert.ok(bot.store.all().some((event) => event.event_type === 'sangmata_campaign_check'));
+});
+
+test('SangMata known-campaign auto-ban skips protected chat admins', async () => {
+  const protectedAdminId = '444555666';
+  const { bot, calls } = makeBot({
+    canBan: true,
+    // makeBot getChatMember checks trustedUserIds with loose equality via includes — keep string form
+    trustedUserIds: [1, protectedAdminId, Number(protectedAdminId)],
+    dkgIntel: {
+      riskScore: 95,
+      reportsAcrossCommunities: 3,
+      evidence: [{ source: 'https://tracabot.org/ontology#event/prior' }]
+    }
+  });
+  bot.dkg.queryAdminHistoryForActor = async () => ({
+    hasPriorAdminAction: true,
+    hasPriorFalsePositive: false,
+    events: [
+      { eventId: 'ban-a', eventType: 'ban_executed', confidence: 95, created: '2026-07-01T00:00:00.000Z' },
+      { eventId: 'ban-b', eventType: 'ban_executed', confidence: 90, created: '2026-07-02T00:00:00.000Z' }
+    ],
+    falsePositiveEvents: []
+  });
+  const timestamp = new Date().toISOString();
+  bot.store.append({
+    id: 'prior-ban-admin-case',
+    event_type: 'ban_executed',
+    timestamp,
+    user: { id: '111', first_name: 'BC GAME' },
+    payload: { confidence: 95, evidence: ['prior'], admin_verified: true }
+  });
+  bot.store.append({
+    id: 'prior-ban-admin-case-2',
+    event_type: 'ban_executed',
+    timestamp,
+    user: { id: '222', first_name: 'BC GAME' },
+    payload: { confidence: 95, evidence: ['prior'], admin_verified: true }
+  });
+  // Ensure chat-admin lookup treats this target as protected regardless of type coercion
+  const originalCall = bot.call.bind(bot);
+  bot.call = async (method, payload) => {
+    if (method === 'getChatMember' && String(payload.user_id) === protectedAdminId && String(payload.user_id) !== '999') {
+      return { status: 'administrator', can_restrict_members: true, can_delete_messages: true };
+    }
+    return originalCall(method, payload);
+  };
+  await bot.handleMessage({
+    chat: { id: -100, title: 'demo' },
+    message_id: 9003,
+    from: { id: 461843263, username: 'SangMataInfo_bot', is_bot: true },
+    text: `User ${protectedAdminId} changed name from x to BC GAME.`
+  });
+  assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
+  assert.ok(bot.store.all().some((event) => event.event_type === 'risk_action_suppressed'));
 });
 
 test('/ban replying to SangMata rename bans the renamed user ID', async () => {

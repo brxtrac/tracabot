@@ -98,6 +98,106 @@ export function isObviousLocalScam(risk = {}) {
   );
 }
 
+/** Normalize campaign / display labels for fingerprint matching (e.g. "BC GAME" → "bcgame"). */
+export function normalizeCampaignLabel(value = '') {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/^@/, '')
+    .replace(/[^a-z0-9]/g, '');
+}
+
+/** Built-in high-evidence campaign name fingerprints (extend via TRACABOT_KNOWN_CAMPAIGN_PATTERNS). */
+export const DEFAULT_KNOWN_CAMPAIGN_PATTERNS = [
+  'bcgame',
+  'bc.game',
+  'bc games',
+  'bcgaming'
+].map(normalizeCampaignLabel).filter(Boolean);
+
+export function campaignLabelsFromTarget(target = {}) {
+  return [
+    target.username,
+    target.first_name,
+    target.last_name,
+    target.label,
+    [target.first_name, target.last_name].filter(Boolean).join(' '),
+    target.sangmata?.oldName,
+    target.sangmata?.newName
+  ].filter(Boolean);
+}
+
+export function matchKnownCampaignFingerprint(target = {}, patterns = DEFAULT_KNOWN_CAMPAIGN_PATTERNS) {
+  const labels = campaignLabelsFromTarget(target).map(normalizeCampaignLabel).filter(Boolean);
+  const needles = (patterns?.length ? patterns : DEFAULT_KNOWN_CAMPAIGN_PATTERNS)
+    .map(normalizeCampaignLabel)
+    .filter(Boolean);
+  if (!labels.length || !needles.length) return null;
+  for (const label of labels) {
+    for (const needle of needles) {
+      if (!needle) continue;
+      if (label === needle || label.includes(needle) || needle.includes(label)) {
+        return { matchedLabel: label, pattern: needle };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Clear known-campaign auto-ban: strong name fingerprint + prior ban/admin roots
+ * (local and/or DKG), respecting false-positive / overturn clears.
+ */
+export function evaluateKnownCampaignAutoBan({
+  target = {},
+  risk = {},
+  patterns = DEFAULT_KNOWN_CAMPAIGN_PATTERNS,
+  localBanRoots = 0,
+  dkgBanRoots = 0,
+  minBanRoots = 2,
+  enabled = true,
+  banThreshold = 85
+} = {}) {
+  if (!enabled) return { eligible: false, reason: 'known_campaign_auto_ban_disabled' };
+  if (!target?.id) return { eligible: false, reason: 'missing_target_id' };
+  if (target.is_bot === true) return { eligible: false, reason: 'protected_bot' };
+  if (risk?.recommended_action === 'ignore' && Number(risk.confidence || 0) <= 10) {
+    return { eligible: false, reason: 'false_positive_suppressed' };
+  }
+  const fingerprint = matchKnownCampaignFingerprint(target, patterns);
+  if (!fingerprint) return { eligible: false, reason: 'no_campaign_fingerprint' };
+
+  const banRoots = Number(localBanRoots || 0) + Number(dkgBanRoots || 0);
+  const minRoots = Math.max(1, Number(minBanRoots) || 2);
+  const dkgBacked = Boolean(risk.dkg_backed || risk.dkg_evidence?.length);
+  const confidence = Number(risk.confidence || 0);
+  const threshold = Number(banThreshold) || 85;
+
+  // Clear when fingerprint matches and we have repeated ban evidence, or
+  // fingerprint + strong DKG-backed score at ban threshold.
+  const repeatedBans = banRoots >= minRoots;
+  const strongDkgHit = dkgBacked && confidence >= threshold && banRoots >= 1;
+  if (!repeatedBans && !strongDkgHit) {
+    return {
+      eligible: false,
+      reason: 'insufficient_ban_roots',
+      fingerprint,
+      banRoots,
+      minRoots,
+      confidence
+    };
+  }
+
+  return {
+    eligible: true,
+    reason: repeatedBans ? 'known_campaign_repeated_bans' : 'known_campaign_dkg_backed',
+    fingerprint,
+    banRoots,
+    minRoots,
+    confidence,
+    campaignLabel: fingerprint.matchedLabel || fingerprint.pattern
+  };
+}
+
 export function formatRiskAssessment({ target, risk }) {
   const name = displayName(target);
   const verdict = risk.confidence >= 85 ? 'HIGH RISK' : risk.confidence >= 60 ? 'REVIEW' : 'LOW RISK';

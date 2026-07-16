@@ -1,5 +1,22 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { canAutonomouslyEscalate, combineRisk, displayName, formatBanReply, formatDkgReference, formatReportReply, formatReviewNeededSummary, formatRiskAssessment, formatScanReply, formatStatsReply, formatStatsSourcesReply, isObviousLocalScam } from './risk-engine.js';
+import {
+  canAutonomouslyEscalate,
+  combineRisk,
+  DEFAULT_KNOWN_CAMPAIGN_PATTERNS,
+  displayName,
+  evaluateKnownCampaignAutoBan,
+  formatBanReply,
+  formatDkgReference,
+  formatReportReply,
+  formatReviewNeededSummary,
+  formatRiskAssessment,
+  formatScanReply,
+  formatStatsReply,
+  formatStatsSourcesReply,
+  isObviousLocalScam,
+  matchKnownCampaignFingerprint,
+  normalizeCampaignLabel
+} from './risk-engine.js';
 import { extractDomains, extractPatterns, extractWallets } from './dkg-client.js';
 import { buildAgentIntentPrompt, buildAlertReplyClassifierPrompt, buildGeneralPrompt, buildSafetyPrompt, fallbackSafetyReply, isOnTopicDirectAddress, isSafetyQuestion, offTopicRedirect, sanitizeGeneralReply, sanitizeSafetyReply, shouldConversationallyReply } from './conversation.js';
 import { redactedOpenClawStatus } from './openclaw-config.js';
@@ -402,8 +419,16 @@ function actorAliases(user = {}) {
   return [
     user.username,
     user.first_name,
-    [user.first_name, user.last_name].filter(Boolean).join(' ')
+    [user.first_name, user.last_name].filter(Boolean).join(' '),
+    user.sangmata?.oldName,
+    user.sangmata?.newName,
+    user.label
   ].filter(Boolean);
+}
+
+function isSangMataBotUser(user = {}) {
+  if (user.is_bot === true && /sangmata/i.test(String(user.username || user.first_name || ''))) return true;
+  return /sangmata/i.test(String(user.username || ''));
 }
 
 function eventAgeMs(event = {}) {
@@ -3479,18 +3504,55 @@ export class TelegramShieldBot {
     return event;
   }
 
+  knownCampaignPatterns() {
+    const configured = (this.config.knownCampaignPatterns || []).map(normalizeCampaignLabel).filter(Boolean);
+    return [...new Set([...DEFAULT_KNOWN_CAMPAIGN_PATTERNS, ...configured])];
+  }
+
+  /**
+   * Count prior ban_executed roots that share this target's id or campaign-style aliases
+   * (e.g. repeated "BC GAME" renames with different Telegram IDs).
+   */
+  localBanRootsForTarget(target = {}) {
+    const id = target?.id ? String(target.id) : '';
+    const aliasNorms = new Set(
+      actorAliases(target)
+        .map(normalizeCampaignLabel)
+        .filter((value) => value && value.length >= 3)
+    );
+    const events = this.store.all().filter((event) => event.event_type === 'ban_executed');
+    const matched = [];
+    for (const event of events) {
+      const user = event.user || event.payload?.target || {};
+      const eventId = user.id ? String(user.id) : '';
+      if (id && eventId && id === eventId) {
+        matched.push(event);
+        continue;
+      }
+      const eventAliases = actorAliases(user)
+        .concat(event.payload?.evidence || [])
+        .map((value) => normalizeCampaignLabel(value))
+        .filter(Boolean);
+      if (eventAliases.some((alias) => aliasNorms.has(alias) || [...aliasNorms].some((needle) => alias.includes(needle) || needle.includes(alias)))) {
+        matched.push(event);
+      }
+    }
+    return matched;
+  }
+
   async assess(message, targetUser = actorFromMessage(message), text = message.text || '') {
     const bounded = boundedText(text);
     const policy = this.chatPolicy(message.chat?.id);
     this.rememberUser(message.chat, targetUser, bounded);
-    const dkgIntel = await this.dkg.queryRiskIndicators({ username: targetUser.username, userId: targetUser.id, aliases: actorAliases(targetUser), text: bounded });
+    const aliases = actorAliases(targetUser);
+    const dkgIntel = await this.dkg.queryRiskIndicators({ username: targetUser.username, userId: targetUser.id, aliases, text: bounded });
 
     // Phase 4: Check for prior high-severity admin actions on this actor across communities
     const adminHistory = (typeof this.dkg.queryAdminHistoryForActor === 'function')
       ? await this.dkg.queryAdminHistoryForActor({
           userId: targetUser.id,
           username: targetUser.username,
-          aliases: actorAliases(targetUser)
+          aliases
         }).catch(() => ({ hasPriorAdminAction: false, hasPriorFalsePositive: false, events: [], falsePositiveEvents: [] }))
       : { hasPriorAdminAction: false, hasPriorFalsePositive: false, events: [], falsePositiveEvents: [] };
 
@@ -3541,7 +3603,26 @@ export class TelegramShieldBot {
       analysis.confidence = Math.min(99, Math.max(analysis.confidence || 0, (analysis.confidence || 0) + 15));
       analysis.evidence = [...(analysis.evidence || []), `Active watchlist entry ${watch.id}: ${watch.payload?.reason || 'admin watch'}`];
     }
+    const campaignFingerprint = matchKnownCampaignFingerprint(targetUser, this.knownCampaignPatterns());
+    if (campaignFingerprint && !falsePositiveReview) {
+      analysis.confidence = Math.max(analysis.confidence || 0, policy.restrictThreshold);
+      analysis.is_scam = true;
+      analysis.scam_type = analysis.scam_type && analysis.scam_type !== 'unknown' ? analysis.scam_type : 'known_campaign';
+      analysis.evidence = [
+        ...(analysis.evidence || []),
+        `Known scam campaign fingerprint: ${campaignFingerprint.pattern}`
+      ];
+    }
+    if (targetUser.sangmata?.evidence) {
+      analysis.evidence = [...(analysis.evidence || []), targetUser.sangmata.evidence];
+    }
     const risk = combineRisk({ analysis, dkgIntel: effectiveIntel, threshold: policy.actionThreshold });
+    const localBanRoots = this.localBanRootsForTarget(targetUser);
+    const dkgBanRoots = (adminHistory.events || []).filter((event) => event.eventType === 'ban_executed' || event.eventType === 'review_upheld').length;
+    risk.known_campaign_fingerprint = campaignFingerprint || null;
+    risk.local_ban_roots = localBanRoots.length;
+    risk.dkg_ban_roots = dkgBanRoots;
+    risk.campaign_key = risk.campaign_key || (campaignFingerprint ? `alias:${campaignFingerprint.pattern}` : '');
     if (!falsePositiveReview) return risk;
     return {
       ...risk,
@@ -3553,8 +3634,149 @@ export class TelegramShieldBot {
       dkg_backed: false,
       dkg_evidence: [],
       dkg_artifact_evidence: [],
+      known_campaign_fingerprint: null,
       evidence: [...(risk.evidence || []), `admin false-positive review ${falsePositiveReview.id} suppresses autonomous enforcement`]
     };
+  }
+
+  /**
+   * Proactively process SangMata rename alerts from group polling (getUpdates).
+   * Clear known campaigns (e.g. BC GAME) with prior ban roots auto-ban + channel notice.
+   * @returns {Promise<boolean>} true if message was handled as SangMata
+   */
+  async handleSangMataMessage(message) {
+    if (message.chat?.type === 'private') return false;
+    const text = messageText(message) || message.text || '';
+    const target = sangmataTargetFromText(text);
+    if (!target?.id) return false;
+
+    const from = message.from || {};
+    const fromSangMataBot = isSangMataBotUser(from);
+    // Accept SangMata bot posts and plain-text rename alerts (forwards / mirrors).
+    if (!fromSangMataBot && !/\bUser\s+\d{5,}\s+changed\s+name\s+from\b/i.test(text)) return false;
+
+    const chatId = message.chat.id;
+    const idempotencyKey = `sangmata-auto:${chatId}:${message.message_id || ''}:${target.id}`;
+    const already = this.store.all().some((event) => (
+      ['ban_executed', 'risk_review_needed', 'risk_action_suppressed', 'sangmata_campaign_check'].includes(event.event_type)
+      && event.payload?.sangmata_source_message_id
+      && String(event.payload.sangmata_source_message_id) === String(message.message_id || '')
+      && String(event.chat?.id || '') === String(chatId)
+    ));
+    if (already) return true;
+
+    const targetText = [
+      text,
+      target.sangmata?.oldName || '',
+      target.sangmata?.newName || '',
+      target.sangmata?.evidence || ''
+    ].filter(Boolean).join('\n');
+    const risk = await this.assess({ ...message, from: target, text: targetText }, target, targetText);
+    const policy = this.chatPolicy(chatId);
+    const eligibility = evaluateKnownCampaignAutoBan({
+      target,
+      risk,
+      patterns: this.knownCampaignPatterns(),
+      localBanRoots: Number(risk.local_ban_roots || 0),
+      dkgBanRoots: Number(risk.dkg_ban_roots || 0),
+      minBanRoots: this.config.knownCampaignMinBanRoots || 2,
+      enabled: this.config.knownCampaignAutoBan !== false,
+      banThreshold: policy.banThreshold
+    });
+
+    if (!eligibility.eligible) {
+      await this.record('sangmata_campaign_check', { ...message, from: target }, {
+        ...risk,
+        target,
+        target_key: targetKey(target),
+        sangmata_source_message_id: message.message_id || '',
+        sangmata: target.sangmata,
+        auto_ban_eligible: false,
+        auto_ban_reason: eligibility.reason,
+        recommended_action: risk.confidence >= policy.warnThreshold ? 'admin_review' : 'monitor',
+        evidence: [
+          ...(risk.evidence || []),
+          target.sangmata?.evidence || '',
+          `SangMata rename polled; auto-ban not taken (${eligibility.reason})`
+        ].filter(Boolean)
+      }, { writeDkg: false, idempotencyKey: `${idempotencyKey}:check` });
+      if (risk.confidence >= policy.restrictThreshold) {
+        await this.applyRiskAction({ ...message, from: target, text: targetText }, {
+          ...risk,
+          evidence: [...(risk.evidence || []), 'SangMata rename alert held for admin review']
+        });
+      }
+      return true;
+    }
+
+    const enforcement = await this.enforceConfirmedScam(
+      chatId,
+      target,
+      [message.message_id].filter(Boolean),
+      idempotencyKey
+    );
+    if (!enforcement.banned) {
+      await this.record('risk_action_suppressed', { ...message, from: target }, {
+        ...risk,
+        target,
+        target_key: targetKey(target),
+        sangmata_source_message_id: message.message_id || '',
+        recommended_action: 'admin_review',
+        auto_ban_reason: eligibility.reason,
+        suppression_reason: enforcement.reason,
+        evidence: [
+          ...(risk.evidence || []),
+          target.sangmata?.evidence || '',
+          `Known campaign auto-ban suppressed: ${enforcement.reason}`
+        ].filter(Boolean)
+      }, { writeDkg: false, idempotencyKey: `${idempotencyKey}:suppressed` });
+      return true;
+    }
+
+    const campaignLabel = eligibility.campaignLabel || target.sangmata?.newName || 'known campaign';
+    const publicLabel = plainUserLabel(target);
+    await this.recordBanEvidenceInBackground(
+      { ...message, from: target, text: targetText },
+      target,
+      {
+        ...risk,
+        confidence: Math.max(Number(risk.confidence || 0), policy.banThreshold),
+        scam_type: risk.scam_type || 'known_campaign',
+        recommended_action: 'ban',
+        known_campaign_auto_ban: true,
+        campaign_key: risk.campaign_key || `alias:${eligibility.fingerprint?.pattern || campaignLabel}`,
+        local_ban_roots: risk.local_ban_roots,
+        dkg_ban_roots: risk.dkg_ban_roots
+      },
+      `auto-ban known campaign (${campaignLabel}) after SangMata rename`,
+      {
+        source: 'known_campaign_auto_ban',
+        sangmataEvidence: target.sangmata?.evidence || '',
+        deletedMessageCount: enforcement.deleted || 0,
+        deleteAttemptCount: enforcement.attempted || 0,
+        repliedMessageId: message.message_id || '',
+        idempotencyKey: `${idempotencyKey}:ban`
+      }
+    );
+    // Ensure sangmata source message id is on the ban event for idempotency (recordBanEvidence may not set it)
+    await this.record('sangmata_campaign_check', { ...message, from: target }, {
+      target,
+      target_key: targetKey(target),
+      sangmata_source_message_id: message.message_id || '',
+      auto_ban_eligible: true,
+      auto_ban_reason: eligibility.reason,
+      ban_roots: eligibility.banRoots,
+      campaign_label: campaignLabel,
+      evidence: [`Known campaign auto-ban executed for ${campaignLabel}`]
+    }, { writeDkg: false, idempotencyKey: `${idempotencyKey}:done` });
+
+    const notice = [
+      `TRACaBot removed ${publicLabel} — matches repeated ${campaignLabel}–style scam campaign with prior ban evidence.`,
+      'Admins can reverse via Reviews in /start if needed.'
+    ].join(' ');
+    await this.send(chatId, notice, { reply_to_message_id: message.message_id || undefined }).catch(() => null);
+    this.store.incrementMetric?.('known_campaign_auto_bans');
+    return true;
   }
 
   reportHistory(reporter, target) {
@@ -4708,6 +4930,8 @@ export class TelegramShieldBot {
     }
     if (await this.handleMentionReplyScan(message)) return;
     if (this.isBareBotMention(message)) return;
+    // Poll group SangMata rename alerts (getUpdates) → known-campaign auto-ban when clear
+    if (await this.handleSangMataMessage(message)) return;
     if (await this.handleAlertReply(message)) return;
     if (this.isNaturalFalsePositiveReview(message) && await this.handleNaturalFalsePositiveReview(message)) return;
     if (await this.handleNaturalLanguageRequest(message)) return;

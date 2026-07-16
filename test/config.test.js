@@ -68,6 +68,18 @@ test('loadConfig parses boolean environment values strictly', () => {
   assert.throws(() => loadConfig({ TRACABOT_AUTO_BAN: 'maybe' }), /Invalid boolean/);
 });
 
+test('loadConfig known-campaign auto-ban defaults and parsing', () => {
+  assert.equal(loadConfig({}).knownCampaignAutoBan, true);
+  assert.equal(loadConfig({}).knownCampaignMinBanRoots, 2);
+  assert.deepEqual(loadConfig({}).knownCampaignPatterns, []);
+  assert.equal(loadConfig({ TRACABOT_KNOWN_CAMPAIGN_AUTO_BAN: 'false' }).knownCampaignAutoBan, false);
+  assert.equal(loadConfig({ TRACABOT_KNOWN_CAMPAIGN_MIN_BAN_ROOTS: '3' }).knownCampaignMinBanRoots, 3);
+  assert.deepEqual(
+    loadConfig({ TRACABOT_KNOWN_CAMPAIGN_PATTERNS: 'bc game, OtherWave' }).knownCampaignPatterns,
+    ['bc game', 'OtherWave']
+  );
+});
+
 test('loadConfig requires explicit opt-in for unauthenticated skill writes', () => {
   assert.equal(loadConfig({}).skillAllowUnauthenticatedWrites, false);
   assert.equal(loadConfig({ TRACABOT_SKILL_ALLOW_UNAUTHENTICATED_WRITES: 'true' }).skillAllowUnauthenticatedWrites, true);

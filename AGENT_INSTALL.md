@@ -244,6 +244,18 @@ TRACABOT_PROACTIVE_SCAN_MINUTES=30
 
 Enable `TRACABOT_AUTO_RESTRICT` and `TRACABOT_AUTO_BAN` only after sandbox validation with your thresholds and admin policy.
 
+### Known campaign auto-ban (SangMata)
+
+TRACaBot long-polls Telegram like any group member. When **SangMata** (or an equivalent rename alert) posts `User <id> changed name from … to …`, TRACaBot assesses the renamed account. If the new/old name matches a **known scam campaign fingerprint** (built-in includes **BC GAME** / `bcgame`) **and** there are enough prior ban roots (local store and/or DKG admin history; default **2**), it can **auto-ban**, delete known messages when rights allow, and post a calm channel notice. Admins reverse via **Reviews** in `/start` (writes a new corrective event; never overwrites ban memory).
+
+```env
+TRACABOT_KNOWN_CAMPAIGN_AUTO_BAN=true
+TRACABOT_KNOWN_CAMPAIGN_MIN_BAN_ROOTS=2
+# TRACABOT_KNOWN_CAMPAIGN_PATTERNS=bc game,othercampaign
+```
+
+This path is narrower than full `TRACABOT_AUTO_BAN` and stays off for weak single-message signals.
+
 ---
 
 ## Phase 5: First Run & Validation
