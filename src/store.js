@@ -88,6 +88,11 @@ export class EventStore {
         status TEXT NOT NULL,
         updated_at TEXT NOT NULL
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS ban_candidates (
+        candidate_key TEXT PRIMARY KEY, body TEXT NOT NULL CHECK (json_valid(body)),
+        status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL, review_started_at TEXT, error TEXT
+      ) STRICT;
     `);
     this.migrateSchema();
     this.insertEvent = this.db.prepare('INSERT OR IGNORE INTO events (id, event_type, timestamp, dedupe_key, source_update_id, body) VALUES (?, ?, ?, ?, ?, ?)');
@@ -98,6 +103,8 @@ export class EventStore {
     const eventColumns = new Set(this.db.prepare('PRAGMA table_info(events)').all().map((column) => column.name));
     if (!eventColumns.has('dedupe_key')) this.db.exec('ALTER TABLE events ADD COLUMN dedupe_key TEXT');
     if (!eventColumns.has('source_update_id')) this.db.exec('ALTER TABLE events ADD COLUMN source_update_id INTEGER');
+    const candidateColumns = new Set(this.db.prepare('PRAGMA table_info(ban_candidates)').all().map((column) => column.name));
+    if (!candidateColumns.has('review_started_at')) this.db.exec('ALTER TABLE ban_candidates ADD COLUMN review_started_at TEXT');
     this.db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS events_dedupe_key ON events(dedupe_key) WHERE dedupe_key IS NOT NULL;
       PRAGMA user_version = 2;
@@ -217,6 +224,36 @@ export class EventStore {
   failUpdate(botKey, updateId, error) {
     this.db.prepare("UPDATE telegram_updates SET status='failed', error=?, updated_at=? WHERE bot_key=? AND update_id=? AND status='processing'")
       .run(String(error || '').slice(0, 500), new Date().toISOString(), botKey, updateId);
+  }
+
+  enqueueBanCandidate(message) {
+    const key = `${message.chat.id}:${message.from.id}:${message.message_id}`;
+    const body = JSON.stringify({ chat: { id: message.chat.id, type: message.chat.type },
+      from: { id: message.from.id }, message_id: message.message_id,
+      text: String(message.text || message.caption || '').slice(0, 700), date: message.date });
+    this.db.prepare("INSERT OR IGNORE INTO ban_candidates(candidate_key,body,status,updated_at) VALUES (?,?,'pending',?)")
+      .run(key, body, new Date().toISOString());
+  }
+
+  nextBanCandidate() {
+    this.db.prepare("UPDATE ban_candidates SET status='failed',error='Worker exited during review; manual check required' WHERE status='processing' AND updated_at<?")
+      .run(new Date(Date.now() - 5 * 60000).toISOString());
+    const row = this.db.prepare("SELECT candidate_key,body FROM ban_candidates WHERE status='pending' ORDER BY updated_at LIMIT 1").get();
+    if (!row) return null;
+    this.db.prepare("UPDATE ban_candidates SET status='processing',attempts=attempts+1,updated_at=?,review_started_at=? WHERE candidate_key=? AND status='pending'")
+      .run(new Date().toISOString(), new Date().toISOString(), row.candidate_key);
+    return { key: row.candidate_key, message: JSON.parse(row.body) };
+  }
+
+  finishBanCandidate(key, error = '') {
+    this.db.prepare('UPDATE ban_candidates SET status=?,error=?,updated_at=? WHERE candidate_key=?')
+      .run(error ? 'failed' : 'done', error.slice(0, 500), new Date().toISOString(), key);
+  }
+
+  banReviewBudget(limit = 5) {
+    const count = this.db.prepare('SELECT count(*) AS n FROM ban_candidates WHERE review_started_at>=?')
+      .get(new Date(Date.now() - 24 * 3600000).toISOString()).n;
+    return count < limit;
   }
 
   beginEffect(key, kind, request, { staleAction = 'retry' } = {}) {

@@ -46,9 +46,43 @@ test('combines DKG evidence with local analysis and triggers admin review thresh
 
 test('known campaign fingerprints match BC GAME style labels', () => {
   assert.equal(normalizeCampaignLabel('BC GAME'), 'bcgame');
+  assert.equal(normalizeCampaignLabel('Bc Game'), 'bcgame');
   const hit = matchKnownCampaignFingerprint({ first_name: 'BC GAME', sangmata: { oldName: 'qqq', newName: 'BC GAME' } });
   assert.equal(hit.pattern, 'bcgame');
+  assert.equal(matchKnownCampaignFingerprint({
+    first_name: 'Bc Game',
+    sangmata: { oldName: 'Rodasio Viela nueva', newName: 'Bc Game' }
+  })?.pattern, 'bcgame');
   assert.equal(matchKnownCampaignFingerprint({ first_name: 'Totally Normal User' }), null);
+});
+
+test('known campaign fingerprints normalize fullwidth BC GAME labels', () => {
+  assert.equal(normalizeCampaignLabel('ＢＣ ＧＡＭＥ'), 'bcgame');
+  assert.ok(matchKnownCampaignFingerprint({ first_name: 'ＢＣ ＧＡＭＥ' }));
+});
+
+test('known campaign fingerprints reject labels shorter than the campaign pattern', () => {
+  for (const first_name of ['B', 'C', 'BC', 'Game']) {
+    assert.equal(matchKnownCampaignFingerprint({ first_name }), null);
+  }
+});
+
+test('known campaign fingerprints reject embedded campaign substrings', () => {
+  for (const first_name of ['abcgame', 'bcgamechanger', 'notbcgame']) {
+    assert.equal(matchKnownCampaignFingerprint({ first_name }), null);
+  }
+  assert.ok(matchKnownCampaignFingerprint({ first_name: 'Official BC GAME Bonus' }));
+});
+
+test('known campaign fingerprints only match current identity labels', () => {
+  assert.equal(matchKnownCampaignFingerprint({
+    first_name: 'Alice',
+    sangmata: { oldName: 'BC GAME', newName: 'Alice' }
+  }), null);
+  assert.equal(matchKnownCampaignFingerprint({
+    first_name: 'Alice',
+    identityChange: { oldName: 'BC GAME', newName: 'Alice' }
+  }), null);
 });
 
 test('evaluateKnownCampaignAutoBan requires fingerprint plus ban roots', () => {

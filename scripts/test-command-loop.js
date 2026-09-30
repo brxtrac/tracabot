@@ -8,6 +8,8 @@ import { analyzeMessage } from '../src/scam-analyzer.js';
 import { EventStore } from '../src/store.js';
 import { TelegramShieldBot } from '../src/telegram.js';
 
+const temporaryStoreDirectory = mkdtempSync(join(tmpdir(), 'tracabot-live-loop-'));
+const databasePath = join(temporaryStoreDirectory, 'events.sqlite');
 const config = {
   ...loadConfig(),
   telegramToken: 'stub-token',
@@ -16,7 +18,9 @@ const config = {
   testMode: true,
   actionThreshold: 80,
   proactiveScanMinutes: 30,
-  storePath: join(mkdtempSync(join(tmpdir(), 'tracabot-live-loop-')), 'events.jsonl')
+  storePath: databasePath,
+  databasePath,
+  legacyStorePath: join(temporaryStoreDirectory, 'events.jsonl')
 };
 const sharedTriples = [];
 const adapterClient = {

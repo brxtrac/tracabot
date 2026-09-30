@@ -121,6 +121,21 @@ test('extracts investment partnership lure patterns for DKG lookups', () => {
   assert.deepEqual(extractPatterns(text), ['investment-partnership-lure']);
 });
 
+test('extracts gambling promotion patterns from emoji-obfuscated offers', () => {
+  const text = '🔤🔤 GAME is dropping 💲1️⃣0️⃣0️⃣ for all new players! Claim the bonus and bet now. Funds hit your wallet instantly.';
+  assert.deepEqual(extractPatterns(text), ['gambling-promotion']);
+});
+
+test('extracts gambling promotion patterns from fullwidth campaign text', () => {
+  const text = 'ＢＣ ＧＡＭＥ bonus for new players. Claim the bonus and get in now.';
+  assert.deepEqual(extractPatterns(text), ['gambling-promotion']);
+});
+
+test('does not extract gambling promotion patterns from ordinary discussion', () => {
+  const text = 'The group discussed casino regulation and betting odds during the community call.';
+  assert.deepEqual(extractPatterns(text), []);
+});
+
 test('ignores report-only DKG evidence without independent local confidence', async () => {
   const dkg = new DkgClient({ contextGraph: 'test' });
   dkg.queryBindings = async () => [
@@ -281,6 +296,94 @@ test('admin history escapes identifiers and ignores false-positive or non-produc
   assert.match(queries[0], /targetUsername/);
   assert.match(queries[0], /targetKey/);
   assert.doesNotMatch(queries[0], /UNION \{ \?x \?y \?z \}/);
+});
+
+test('campaign moderation roots accept VM and admin-verified SWM hard decisions only', async () => {
+  const calls = [];
+  const dkg = new DkgClient({ contextGraph: 'tracabot' });
+  dkg.queryBindings = async (sparql, options = {}) => {
+    calls.push({ sparql, options });
+    if (options.view === 'verifiable-memory') return [
+      {
+        g: 'did:dkg:context-graph:tracabot/_verifiable_memory/1',
+        s: 'https://tracabot.org/ontology#event/vm-ban',
+        eventType: 'ban_executed',
+        confidence: '91',
+        campaignLabel: 'alias:bcgame'
+      },
+      {
+        g: 'did:dkg:context-graph:tracabot/_verifiable_memory/2',
+        s: 'https://tracabot.org/ontology#event/test-ban',
+        eventType: 'ban_executed',
+        confidence: '99',
+        campaignLabel: 'BC GAME',
+        testMode: 'true'
+      }
+    ];
+    return [
+      {
+        g: 'did:dkg:context-graph:tracabot/_shared_memory/3',
+        s: 'https://tracabot.org/ontology#event/swm-upheld',
+        eventType: 'review_upheld',
+        confidence: '85',
+        campaignLabel: 'Bc Game',
+        adminVerified: 'true'
+      },
+      {
+        g: 'did:dkg:context-graph:tracabot/_shared_memory/4',
+        s: 'https://tracabot.org/ontology#event/swm-unverified',
+        eventType: 'ban_executed',
+        confidence: '95',
+        campaignLabel: 'bcgame'
+      },
+      {
+        g: 'did:dkg:context-graph:tracabot/_shared_memory/5',
+        s: 'https://tracabot.org/ontology#event/report-only',
+        eventType: 'report_submitted',
+        confidence: '100',
+        campaignLabel: 'bcgame',
+        adminVerified: 'true'
+      },
+      {
+        g: 'did:dkg:context-graph:tracabot/_shared_memory/6',
+        s: 'https://tracabot.org/ontology#event/other-campaign',
+        eventType: 'ban_executed',
+        confidence: '95',
+        campaignLabel: 'othergame',
+        adminVerified: 'true'
+      }
+    ];
+  };
+
+  const result = await dkg.queryCampaignModerationRoots({ fingerprints: ['ＢＣ ＧＡＭＥ'] });
+
+  assert.deepEqual(result.events.map((event) => event.eventId), ['vm-ban', 'swm-upheld']);
+  assert.deepEqual(result.events.map((event) => event.trustLayer), ['verifiable_memory', 'admin_reviewed_shared_memory']);
+  assert.deepEqual(calls.map((call) => call.options.view), ['verifiable-memory', 'shared-working-memory']);
+  assert.ok(calls.every((call) => call.options.includeSharedMemory === false));
+  assert.match(calls[0].sparql, /actorAlias/);
+  assert.match(calls[0].sparql, /targetLabel/);
+  assert.match(calls[0].sparql, /campaignKey/);
+  assert.match(calls[0].sparql, /VALUES \?campaignFingerprint \{ "bcgame" \}/);
+  assert.match(calls[0].sparql, /FILTER\(REPLACE\(REPLACE\(LCASE\(STR\(\?campaignLabel\)\)/);
+  assert.doesNotMatch(calls[0].sparql, /<https:\/\/tracabot\.org\/ontology#evidence>/);
+});
+
+test('campaign moderation roots deduplicate event IDs across memory tiers', async () => {
+  const dkg = new DkgClient({ contextGraph: 'tracabot' });
+  dkg.queryBindings = async (_sparql, options = {}) => [{
+    g: `did:dkg:context-graph:tracabot/${options.view === 'verifiable-memory' ? '_verifiable_memory' : '_shared_memory'}/7`,
+    s: 'https://tracabot.org/ontology#event/same-root',
+    eventType: 'ban_executed',
+    confidence: '90',
+    campaignLabel: 'alias:bcgame',
+    adminVerified: 'true'
+  }];
+
+  const result = await dkg.queryCampaignModerationRoots({ fingerprints: ['bcgame'] });
+
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0].trustLayer, 'verifiable_memory');
 });
 
 test('context oracle prefers verified clear over older risk evidence', async () => {
@@ -464,6 +567,25 @@ test('verified-memory publish stays off unless explicitly enabled', async () => 
   });
   assert.equal(result.publish, undefined);
   assert.equal(adapterClient.calls.some(([method]) => method === 'knowledgeAssetPublish'), false);
+});
+
+test('falls back to sealed working memory when SWM prerequisite is unavailable', async () => {
+  const swmError = new Error('500: A promote prerequisite is temporarily unavailable');
+  const adapterClient = makeFlakyShareAdapterClient({ failures: [swmError, swmError, swmError] });
+  const dkg = new DkgClient({ contextGraph: 'tracabot', dkgPublishVerified: false }, { adapterClient });
+  const result = await dkg.writeEvent({
+    id: 'evt-swm-down',
+    event_type: 'fraud_finding',
+    timestamp: '2026-04-30T00:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    payload: { confidence: 99, local_confidence: 99, evidence: ['strong scam evidence'] }
+  });
+
+  const createCalls = adapterClient.calls.filter(([method]) => method === 'createKnowledgeAsset');
+  assert.equal(createCalls.length, 4);
+  assert.equal(createCalls.at(-1)[3].alsoShareSwm, false);
+  assert.equal(result.swmDegraded, true);
+  assert.match(result.output, /promote prerequisite/);
 });
 
 test('writes scam domains as DKG indicators', async () => {

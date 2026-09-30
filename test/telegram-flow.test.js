@@ -55,6 +55,9 @@ function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = nu
     async ensureContextGraph() {},
     async queryAdminHistoryForActor() {
       return { hasPriorAdminAction: false, events: [] };
+    },
+    async queryCampaignModerationRoots() {
+      return { events: [] };
     }
   };
   const analyzer = () => ({
@@ -519,6 +522,24 @@ test('obvious wallet verification scam is deleted and published without DKG evid
   assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user.id === 4244 && event.payload.recommended_action === 'delete_and_review'));
 });
 
+test('obfuscated gambling bonus promo is published for review without content-only auto-ban', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] }
+  });
+  await bot.handleMessage({
+    chat: { id: -100, title: 'demo' },
+    from: { id: 4248, username: 'promo_account', is_bot: false },
+    message_id: 49,
+    text: '🔤🔤 GAME is dropping 💲1️⃣0️⃣0️⃣ for all new players! Claim the bonus and bet now. Funds hit your wallet instantly.'
+  });
+  assert.equal(calls.some((call) => call.method === 'banChatMember' && call.payload.user_id === 4248), false);
+  assert.equal(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 4248), false);
+  assert.ok(bot.store.all().some((event) => event.event_type === 'fraud_finding' && event.user.id === 4248 && event.payload.scam_type === 'gambling_promotion'));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user.id === 4248 && event.payload.recommended_action === 'delete_and_review'));
+});
+
 test('new bot members are ignored by proactive join moderation', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   await bot.handleNewMembers({
@@ -584,6 +605,105 @@ test('chat_member joins receive memory-card join challenge', async () => {
   assert.ok(calls.some((call) => call.method === 'restrictChatMember' && call.payload.user_id === 48 && call.payload.permissions.can_send_messages === false));
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Memory Check')));
   assert.ok(bot.store.all().some((event) => event.event_type === 'join_challenge_started' && event.user.id === 48));
+});
+
+test('chat_member identity change auto-bans active known campaign with same-chat alias proof', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  bot.dkg.queryAdminHistoryForActor = async () => ({
+    hasPriorAdminAction: true,
+    hasPriorFalsePositive: false,
+    events: [
+      { eventId: 'ban-a', eventType: 'ban_executed', confidence: 95, adminVerified: true },
+      { eventId: 'ban-b', eventType: 'ban_executed', confidence: 92 }
+    ],
+    falsePositiveEvents: []
+  });
+  const chat = { id: -1001532392671, title: 'OriginTrail Community', type: 'supergroup' };
+  bot.store.append({
+    id: 'prior-identity-8420821339',
+    event_type: 'join_challenge_start_failed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 8420821339, first_name: 'Rodasio', last_name: 'Viela nueva', username: 'RodasioVielanueva' },
+    payload: {}
+  });
+  bot.currentUpdateId = 94434936;
+
+  await bot.handleChatMemberUpdate({
+    chat,
+    from: { id: 1, username: 'admin' },
+    date: 1784509240,
+    old_chat_member: { status: 'restricted', is_member: true, user: { id: 8420821339, first_name: 'Bc Game', is_bot: false } },
+    new_chat_member: { status: 'restricted', is_member: true, user: { id: 8420821339, first_name: 'Bc Game', is_bot: false } }
+  });
+
+  assert.ok(calls.some((call) => call.method === 'banChatMember' && String(call.payload.user_id) === '8420821339'));
+  const check = bot.store.all().find((event) => event.event_type === 'identity_campaign_check');
+  assert.equal(check.payload.identity_source_id, 94434936);
+  assert.match(JSON.stringify(check.payload.evidence), /Rodasio Viela nueva -> Bc Game/);
+  const ban = bot.store.all().find((event) => event.event_type === 'ban_executed');
+  assert.equal(ban.payload.identity_source, 'chat_member');
+  assert.equal(ban.payload.identity_source_id, 94434936);
+  assert.equal(ban.payload.auto_ban_reason, 'previous_admin_ban_same_actor');
+  assert.equal(ban.payload.ban_roots, 1);
+  assert.equal(ban.payload.campaign_label, 'bcgame');
+  assert.match(JSON.stringify(ban.payload.evidence), /Rodasio Viela nueva -> Bc Game/);
+});
+
+test('chat_member identity change rejects unrelated same-chat event as alias proof', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo', type: 'supergroup' };
+  bot.store.append({
+    id: 'synthetic-prior-identity',
+    event_type: 'campaign_observed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 49, first_name: 'Old Alias' },
+    payload: {}
+  });
+  await bot.handleChatMemberUpdate({
+    chat,
+    old_chat_member: { status: 'member', user: { id: 49, first_name: 'Bc Game', is_bot: false } },
+    new_chat_member: { status: 'member', user: { id: 49, first_name: 'Bc Game', is_bot: false } }
+  });
+  assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
+  assert.equal(bot.store.all().some((event) => event.event_type === 'identity_campaign_check'), false);
+});
+
+test('chat_member departed restricted member does not trigger known-campaign ban', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -1001532392671, title: 'OriginTrail Community', type: 'supergroup' };
+  bot.store.append({
+    id: 'prior-departed-identity',
+    event_type: 'join_challenge_start_failed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 8420821339, first_name: 'Rodasio', last_name: 'Viela nueva' },
+    payload: {}
+  });
+
+  await bot.handleChatMemberUpdate({
+    chat,
+    from: { id: 8420821339, first_name: 'Bc Game', is_bot: false },
+    date: 1784509240,
+    old_chat_member: { status: 'restricted', is_member: true, user: { id: 8420821339, first_name: 'Bc Game', is_bot: false } },
+    new_chat_member: { status: 'restricted', is_member: false, user: { id: 8420821339, first_name: 'Bc Game', is_bot: false } }
+  });
+
+  assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
+  assert.equal(bot.store.all().some((event) => event.event_type === 'identity_campaign_check'), false);
+});
+
+test('chat_member campaign label without prior same-chat identity does not auto-ban', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  await bot.handleChatMemberUpdate({
+    chat: { id: -100, title: 'demo', type: 'supergroup' },
+    from: { id: 1, username: 'admin' },
+    old_chat_member: { status: 'restricted', is_member: true, user: { id: 49, first_name: 'Bc Game', is_bot: false } },
+    new_chat_member: { status: 'restricted', is_member: true, user: { id: 49, first_name: 'Bc Game', is_bot: false } }
+  });
+  assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
+  assert.equal(bot.store.all().some((event) => event.event_type === 'identity_campaign_check'), false);
 });
 
 test('polling requests chat member updates for joins', async () => {
@@ -1101,6 +1221,105 @@ test('review crash after enforcement repairs evidence without replaying ban', as
   assert.equal(bot.store.all().filter((item) => item.event_type === 'ban_executed' && item.payload.target_event_id === event.id).length, 1);
 });
 
+test('partial grouped review evidence repairs without replaying enforcement', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, type: 'supergroup' };
+  const events = [51, 52].map((messageId) => ({
+    id: `partial-${messageId}-review`,
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 77, username: 'suspect' },
+    payload: { confidence: 95, target_chat_id: '-100', source_message_id: messageId, evidence: ['wallet drain'] }
+  }));
+  events.forEach((event) => bot.store.append(event));
+  const originalRecord = bot.record.bind(bot);
+  let reviewWrites = 0;
+  bot.record = async (eventType, ...args) => {
+    if (eventType === 'review_upheld' && ++reviewWrites === 2) throw new Error('simulated partial review evidence crash');
+    return originalRecord(eventType, ...args);
+  };
+
+  await assert.rejects(
+    bot.handleCallbackQuery({
+      id: 'partial-review-first',
+      from: { id: 1, username: 'admin' },
+      message: { chat, message_id: 93 },
+      data: bot.reviewActionKeyboard('admin', events[0].id)[0][0].callback_data
+    }),
+    /simulated partial review evidence crash/
+  );
+  bot.record = originalRecord;
+  const remaining = events.find((event) => !bot.reviewResolutionFor(event.id));
+  await bot.handleCallbackQuery({
+    id: 'partial-review-retry',
+    from: { id: 1, username: 'admin' },
+    message: { chat, message_id: 94 },
+    data: bot.reviewActionKeyboard('admin', remaining.id)[0][0].callback_data
+  });
+
+  assert.equal(calls.filter((call) => call.method === 'banChatMember' && call.payload.user_id === 77).length, 1);
+  const decisions = bot.store.all().filter((item) => item.event_type === 'review_upheld' && events.some((event) => event.id === item.payload.target_event_id));
+  assert.equal(decisions.length, 2);
+  assert.equal(new Set(decisions.map((item) => item.payload.review_decision_key)).size, 1);
+  assert.ok(decisions.every((item) => item.payload.review_batch_event_ids.length === 2));
+  const bans = bot.store.all().filter((item) => item.event_type === 'ban_executed' && item.payload.review_decision_key === decisions[0].payload.review_decision_key);
+  assert.equal(bans.length, 1);
+});
+
+test('review crash before ban evidence repairs record without replaying enforcement', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, type: 'supergroup' };
+  const event = {
+    id: 'confirm-crash-before-ban-evidence',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 77, username: 'suspect' },
+    payload: { confidence: 95, target_chat_id: '-100', source_message_id: 53, evidence: ['wallet drain'] }
+  };
+  bot.store.append(event);
+  const originalRecord = bot.record.bind(bot);
+  let failBanEvidence = true;
+  bot.record = async (eventType, ...args) => {
+    if (eventType === 'ban_executed' && failBanEvidence) {
+      failBanEvidence = false;
+      throw new Error('simulated crash before ban evidence commit');
+    }
+    return originalRecord(eventType, ...args);
+  };
+  const data = bot.reviewActionKeyboard('admin', event.id)[0][0].callback_data;
+
+  await assert.rejects(
+    bot.handleCallbackQuery({ id: 'ban-evidence-first', from: { id: 1, username: 'admin' }, message: { chat, message_id: 95 }, data }),
+    /simulated crash before ban evidence commit/
+  );
+  await bot.handleCallbackQuery({ id: 'ban-evidence-retry', from: { id: 1, username: 'admin' }, message: { chat, message_id: 96 }, data });
+
+  assert.equal(calls.filter((call) => call.method === 'banChatMember' && call.payload.user_id === 77).length, 1);
+  assert.equal(bot.store.all().filter((item) => item.event_type === 'review_upheld' && item.payload.target_event_id === event.id).length, 1);
+  assert.equal(bot.store.all().filter((item) => item.event_type === 'ban_executed' && item.payload.target_event_id === event.id).length, 1);
+});
+
+test('failed background review evidence restores pending queue item', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const event = {
+    id: 'background-review-write-failure',
+    event_type: 'proactive_cross_group_warning',
+    timestamp: new Date().toISOString(),
+    chat: { id: -100, type: 'supergroup' },
+    user: { id: 77, username: 'suspect' },
+    payload: { confidence: 90, target_chat_id: -100, evidence: ['prior admin action'] }
+  };
+  bot.store.append(event);
+  bot.recordReviewDecisionForEvents = async () => { throw new Error('simulated background evidence failure'); };
+
+  assert.equal(bot.recordReviewDecisionInBackground({ chat: event.chat, from: { id: 1, username: 'admin' } }, [event], 'reject', 'safe'), 1);
+  assert.equal(bot.pendingReviewItems({ chatId: event.chat.id, scope: 'current' }).length, 0);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(bot.pendingReviewItems({ chatId: event.chat.id, scope: 'current' }).some((item) => item.id === event.id));
+});
+
 test('concurrent confirmations on different events for one target enforce one grouped decision', async () => {
   const { bot, calls } = makeBot({ canBan: true, trustedUserIds: [1, 2] });
   const chat = { id: -100, type: 'supergroup' };
@@ -1113,15 +1332,116 @@ test('concurrent confirmations on different events for one target enforce one gr
     payload: { confidence: 95, target_chat_id: '-100', source_message_id: messageId, evidence: ['wallet drain'] }
   }));
   events.forEach((event) => bot.store.append(event));
-  await Promise.all(events.map((event, index) => bot.handleCallbackQuery({
-    id: `confirm-group-${index}`,
-    from: { id: index + 1, username: `admin${index}` },
-    message: { chat, message_id: 90 + index },
-    data: bot.reviewActionKeyboard('admin', event.id)[0][0].callback_data
-  })));
+  const originalCall = bot.call.bind(bot);
+  let releaseBan;
+  let banStarted;
+  const started = new Promise((resolve) => { banStarted = resolve; });
+  const blocked = new Promise((resolve) => { releaseBan = resolve; });
+  bot.call = async (method, payload, options) => {
+    if (method === 'banChatMember') {
+      banStarted();
+      await blocked;
+    }
+    return originalCall(method, payload, options);
+  };
+  const first = bot.handleCallbackQuery({
+    id: 'confirm-group-0',
+    from: { id: 1, username: 'admin1' },
+    message: { chat, message_id: 90 },
+    data: bot.reviewActionKeyboard('admin', events[0].id)[0][0].callback_data
+  });
+  await started;
+  await bot.handleCallbackQuery({
+    id: 'confirm-group-1',
+    from: { id: 2, username: 'admin2' },
+    message: { chat, message_id: 91 },
+    data: bot.reviewActionKeyboard('admin', events[1].id)[0][0].callback_data
+  });
+  releaseBan();
+  await first;
   assert.equal(calls.filter((call) => call.method === 'banChatMember' && call.payload.user_id === 77).length, 1);
+  assert.deepEqual(calls.filter((call) => call.method === 'deleteMessage' && [41, 42].includes(call.payload.message_id)).map((call) => call.payload.message_id).sort(), [41, 42]);
+  assert.ok(calls.some((call) => call.method === 'answerCallbackQuery' && call.payload.text === 'Review decision in progress'));
   assert.equal(bot.store.all().filter((item) => item.event_type === 'review_upheld' && events.some((event) => event.id === item.payload.target_event_id)).length, 2);
   assert.equal(bot.store.all().filter((item) => item.event_type === 'ban_executed' && events.some((event) => event.id === item.payload.target_event_id)).length, 1);
+});
+
+test('completed legacy target decision does not block later review evidence', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, type: 'supergroup' };
+  const target = { id: 77, username: 'suspect' };
+  const legacyKey = 'review:-100:legacy-target-group:decision';
+  bot.store.beginEffect(legacyKey, 'review-decision', { decision: 'confirm', chatId: -100, target: 'id:77' });
+  bot.store.completeEffect(legacyKey, { decision: 'confirm', reviewed: 1 });
+  const event = {
+    id: 'new-evidence-after-legacy-decision',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: target,
+    payload: { confidence: 95, target_chat_id: '-100', source_message_id: 51, evidence: ['new wallet drain'] }
+  };
+  bot.store.append(event);
+
+  await bot.handleCallbackQuery({
+    id: 'confirm-after-legacy',
+    from: { id: 1, username: 'admin' },
+    message: { chat, message_id: 91 },
+    data: bot.reviewActionKeyboard('admin', event.id)[0][0].callback_data
+  });
+
+  assert.equal(calls.filter((call) => call.method === 'banChatMember' && call.payload.user_id === target.id).length, 1);
+  assert.ok(bot.store.all().some((item) => item.event_type === 'review_upheld' && item.payload.target_event_id === event.id));
+});
+
+test('review decision only clears pending events captured before enforcement', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const chat = { id: -100, type: 'supergroup' };
+  const target = { id: 77, username: 'suspect' };
+  const first = {
+    id: 'review-before-enforcement',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: target,
+    payload: { confidence: 95, target_chat_id: '-100', source_message_id: 61, evidence: ['first evidence'] }
+  };
+  bot.store.append(first);
+  const originalCall = bot.call.bind(bot);
+  let releaseBan;
+  let banStarted;
+  const started = new Promise((resolve) => { banStarted = resolve; });
+  const blocked = new Promise((resolve) => { releaseBan = resolve; });
+  bot.call = async (method, payload, options) => {
+    if (method === 'banChatMember') {
+      banStarted();
+      await blocked;
+    }
+    return originalCall(method, payload, options);
+  };
+
+  const decision = bot.handleCallbackQuery({
+    id: 'confirm-before-new-evidence',
+    from: { id: 1, username: 'admin' },
+    message: { chat, message_id: 92 },
+    data: bot.reviewActionKeyboard('admin', first.id)[0][0].callback_data
+  });
+  await started;
+  const later = {
+    id: 'review-during-enforcement',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: target,
+    payload: { confidence: 96, target_chat_id: '-100', source_message_id: 62, evidence: ['new evidence during enforcement'] }
+  };
+  bot.store.append(later);
+  releaseBan();
+  await decision;
+
+  assert.equal(bot.isPendingReviewEvent(first), false);
+  assert.equal(bot.isPendingReviewEvent(later), true);
+  assert.ok(bot.pendingReviewItems({ chatId: chat.id, scope: 'current' }).some((item) => item.id === later.id));
 });
 
 test('review queue uses admin-scoped inline buttons and callback decisions', async () => {
@@ -2536,7 +2856,7 @@ test('SangMata poll auto-bans BC GAME campaign with prior ban roots and notifies
     hasPriorAdminAction: true,
     hasPriorFalsePositive: false,
     events: [
-      { eventId: 'ban-a', eventType: 'ban_executed', confidence: 95, created: '2026-07-01T00:00:00.000Z' },
+      { eventId: 'ban-a', eventType: 'ban_executed', confidence: 95, adminVerified: true, created: '2026-07-01T00:00:00.000Z' },
       { eventId: 'ban-b', eventType: 'ban_executed', confidence: 90, created: '2026-07-02T00:00:00.000Z' }
     ],
     falsePositiveEvents: []
@@ -2576,6 +2896,227 @@ test('SangMata poll auto-bans BC GAME campaign with prior ban roots and notifies
   const ban = bot.store.all().find((event) => event.event_type === 'ban_executed' && String(event.user?.id) === '777888999');
   assert.ok(ban);
   assert.match(JSON.stringify(ban.payload.evidence || []), /known campaign|SangMata|BC GAME/i);
+});
+
+test('SangMata poll auto-bans exact mixed-case Bc Game rename with prior hard evidence', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    dkgIntel: {
+      riskScore: 90,
+      reportsAcrossCommunities: 2,
+      wallets: [],
+      patterns: ['known_campaign'],
+      evidence: [{ source: 'https://tracabot.org/ontology#event/bcgame-prior', eventId: 'bcgame-prior' }]
+    }
+  });
+  bot.dkg.queryAdminHistoryForActor = async () => ({
+    hasPriorAdminAction: true,
+    hasPriorFalsePositive: false,
+    events: [
+      { eventId: 'ban-a', eventType: 'ban_executed', confidence: 95, adminVerified: true, created: '2026-07-01T00:00:00.000Z' },
+      { eventId: 'review-b', eventType: 'review_upheld', confidence: 95, created: '2026-07-02T00:00:00.000Z' }
+    ],
+    falsePositiveEvents: []
+  });
+
+  const chat = { id: -100, title: 'demo' };
+  await bot.handleMessage({
+    chat,
+    message_id: 9004,
+    from: { id: 461843263, username: 'SangMataInfo_bot', is_bot: true },
+    text: 'User 8420821339 changed name from Rodasio Viela nueva to Bc Game'
+  });
+
+  assert.ok(calls.some((call) => call.method === 'banChatMember' && String(call.payload.user_id) === '8420821339'));
+  const ban = bot.store.all().find((event) => event.event_type === 'ban_executed' && String(event.user?.id) === '8420821339');
+  assert.ok(ban);
+  assert.equal(ban.user.sangmata.oldName, 'Rodasio Viela nueva');
+  assert.equal(ban.user.sangmata.newName, 'Bc Game');
+  assert.equal(ban.payload.known_campaign_auto_ban, true);
+  assert.equal(ban.payload.identity_source, 'sangmata');
+  assert.equal(ban.payload.identity_source_id, 9004);
+  assert.equal(ban.payload.sangmata_source_message_id, 9004);
+  assert.match(JSON.stringify(ban.payload.evidence || []), /SangMata rename alert: Rodasio Viela nueva -> Bc Game/);
+});
+
+test('SangMata poll reuses trusted campaign DKG roots across actor IDs', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] },
+    analyzer: () => ({ is_scam: false, confidence: 0, scam_type: 'unknown', evidence: [], recommended_action: 'ignore' })
+  });
+  bot.dkg.queryAdminHistoryForActor = async () => ({
+    hasPriorAdminAction: false,
+    hasPriorFalsePositive: false,
+    events: [],
+    falsePositiveEvents: []
+  });
+  bot.dkg.queryCampaignModerationRoots = async ({ fingerprints }) => {
+    assert.deepEqual(fingerprints, ['bcgame', 'bcgamebonus']);
+    return {
+      events: [
+        { eventId: 'campaign-ban-a', eventType: 'ban_executed', confidence: 85, trustLayer: 'admin_reviewed_shared_memory', ual: 'did:dkg:context-graph:tracabot/_shared_memory/474' },
+        { eventId: 'campaign-ban-b', eventType: 'ban_executed', confidence: 85, trustLayer: 'admin_reviewed_shared_memory', ual: 'did:dkg:context-graph:tracabot/_shared_memory/477' }
+      ]
+    };
+  };
+
+  await bot.handleMessage({
+    chat: { id: -1001532392671, title: 'OriginTrail Community' },
+    message_id: 9010,
+    from: { id: 461843263, username: 'SangMataInfo_bot', is_bot: true },
+    text: 'User 6852262029 changed name from Alice to BC GAME - Bonus'
+  });
+
+  assert.equal(calls.some((call) => call.method === 'banChatMember' && String(call.payload.user_id) === '6852262029'), false);
+  const check = bot.store.all().find((event) => event.event_type === 'sangmata_campaign_check');
+  assert.equal(check.payload.auto_ban_reason, 'insufficient_independent_admin_bans');
+});
+
+test('actor-specific DKG overturn suppresses campaign-root auto-ban', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] }
+  });
+  bot.dkg.queryAdminHistoryForActor = async () => ({
+    hasPriorAdminAction: false,
+    hasPriorFalsePositive: true,
+    events: [],
+    falsePositiveEvents: [{ eventId: 'actor-clear', eventType: 'review_overturned', confidence: 100 }]
+  });
+  bot.dkg.queryCampaignModerationRoots = async () => ({
+    events: [
+      { eventId: 'campaign-ban-a', eventType: 'ban_executed', confidence: 95 },
+      { eventId: 'campaign-ban-b', eventType: 'ban_executed', confidence: 95 }
+    ]
+  });
+
+  await bot.handleMessage({
+    chat: { id: -100, title: 'demo' },
+    message_id: 9011,
+    from: { id: 461843263, username: 'SangMataInfo_bot', is_bot: true },
+    text: 'User 6852262029 changed name from Alice to BC GAME - Bonus'
+  });
+
+  assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
+  const check = bot.store.all().find((event) => event.event_type === 'sangmata_campaign_check');
+  assert.equal(check.payload.auto_ban_reason, 'false_positive_suppressed');
+  assert.deepEqual(check.payload.dkg_campaign_roots, []);
+});
+
+test('SangMata-shaped text from an untrusted sender cannot auto-ban', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    dkgIntel: {
+      riskScore: 95,
+      reportsAcrossCommunities: 3,
+      patterns: ['known_campaign'],
+      evidence: [{ source: 'https://tracabot.org/ontology#event/bcgame-prior', eventId: 'bcgame-prior' }]
+    }
+  });
+  bot.dkg.queryAdminHistoryForActor = async () => ({
+    hasPriorAdminAction: true,
+    hasPriorFalsePositive: false,
+    events: [
+      { eventId: 'ban-a', eventType: 'ban_executed', confidence: 95 },
+      { eventId: 'ban-b', eventType: 'ban_executed', confidence: 95 }
+    ],
+    falsePositiveEvents: []
+  });
+
+  await bot.handleMessage({
+    chat: { id: -100, title: 'demo' },
+    message_id: 9005,
+    from: { id: 123, username: 'ordinary_member', is_bot: false },
+    text: 'User 8420821339 changed name from Rodasio Viela nueva to BC GAME'
+  });
+
+  assert.equal(calls.some((call) => call.method === 'banChatMember' && String(call.payload.user_id) === '8420821339'), false);
+  assert.equal(bot.store.all().some((event) => event.event_type === 'sangmata_campaign_check'), false);
+});
+
+test('SangMata-like username from a non-bot cannot auto-ban', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  bot.dkg.queryCampaignModerationRoots = async () => ({
+    events: [
+      { eventId: 'campaign-ban-a', eventType: 'ban_executed', confidence: 95 },
+      { eventId: 'campaign-ban-b', eventType: 'ban_executed', confidence: 95 }
+    ]
+  });
+
+  await bot.handleMessage({
+    chat: { id: -100, title: 'demo' },
+    message_id: 90051,
+    from: { id: 123, username: 'fake_sangmata_bot', is_bot: false },
+    text: 'User 8420821339 changed name from Rodasio Viela nueva to BC GAME'
+  });
+
+  assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
+  assert.equal(bot.store.all().some((event) => event.event_type === 'sangmata_campaign_check'), false);
+});
+
+test('cross-actor local ban roots require the same current campaign fingerprint', () => {
+  const { bot } = makeBot({ canBan: true });
+  const timestamp = new Date().toISOString();
+  bot.store.append({ id: 'old-name-root', event_type: 'ban_executed', timestamp, user: { id: '1', first_name: 'Alice' }, payload: {} });
+  bot.store.append({ id: 'short-name-root', event_type: 'ban_executed', timestamp, user: { id: '2', first_name: 'BC' }, payload: {} });
+  bot.store.append({ id: 'unverified-campaign-root', event_type: 'ban_executed', timestamp, user: { id: '3', first_name: 'BC GAME - Promo' }, payload: {} });
+  bot.store.append({ id: 'campaign-root', event_type: 'ban_executed', timestamp, user: { id: '4', first_name: 'BC GAME - Promo' }, payload: { admin_verified: true } });
+
+  const roots = bot.localBanRootsForTarget({
+    id: '999',
+    first_name: 'BC GAME - Bonus',
+    sangmata: { oldName: 'Alice', newName: 'BC GAME - Bonus' }
+  });
+
+  assert.deepEqual(roots.map((event) => event.id), ['campaign-root']);
+});
+
+test('same-actor local ban roots remain available without campaign-wide authority', () => {
+  const { bot } = makeBot({ canBan: true });
+  bot.store.append({
+    id: 'same-actor-root',
+    event_type: 'ban_executed',
+    timestamp: new Date().toISOString(),
+    user: { id: '999', first_name: 'Alice' },
+    payload: {}
+  });
+
+  const roots = bot.localBanRootsForTarget({ id: '999', first_name: 'BC GAME - Bonus' });
+
+  assert.deepEqual(roots.map((event) => event.id), ['same-actor-root']);
+});
+
+test('SangMata rename away from a campaign label cannot auto-ban', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    dkgIntel: {
+      riskScore: 95,
+      reportsAcrossCommunities: 3,
+      patterns: ['known_campaign'],
+      evidence: [{ source: 'https://tracabot.org/ontology#event/bcgame-prior', eventId: 'bcgame-prior' }]
+    }
+  });
+  bot.dkg.queryAdminHistoryForActor = async () => ({
+    hasPriorAdminAction: true,
+    hasPriorFalsePositive: false,
+    events: [
+      { eventId: 'ban-a', eventType: 'ban_executed', confidence: 95 },
+      { eventId: 'ban-b', eventType: 'ban_executed', confidence: 95 }
+    ],
+    falsePositiveEvents: []
+  });
+
+  await bot.handleMessage({
+    chat: { id: -100, title: 'demo' },
+    message_id: 9006,
+    from: { id: 461843263, username: 'SangMataInfo_bot', is_bot: true },
+    text: 'User 8420821339 changed name from BC GAME to Alice Normal'
+  });
+
+  assert.equal(calls.some((call) => call.method === 'banChatMember' && String(call.payload.user_id) === '8420821339'), false);
+  const check = bot.store.all().find((event) => event.event_type === 'sangmata_campaign_check');
+  assert.equal(check?.payload?.auto_ban_reason, 'no_campaign_fingerprint');
 });
 
 test('SangMata poll does not auto-ban without campaign ban roots', async () => {
@@ -3264,10 +3805,11 @@ test('stats menu combines weekly receipts and daily activity without digest dupl
 
 test('/review list is compact and groups duplicate targets', async () => {
   const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
   const timestamp = new Date().toISOString();
-  bot.store.append({ id: 'evt-review-1', event_type: 'risk_review_needed', timestamp, user: { id: 1505519171, username: 'molociao' }, payload: { confidence: 99, evidence: ['Crypto lure terms: giveaway; Impersonation indicators: mod'] } });
-  bot.store.append({ id: 'evt-review-2', event_type: 'risk_review_needed', timestamp, user: { id: 1505519171, username: 'molociao' }, payload: { confidence: 90, evidence: ['Urgency language: now; Impersonation indicators: admin'] } });
-  const panel = await openMenuPanel(bot, calls, { id: -100, title: 'demo' }, { id: 1, username: 'admin' }, 'Reviews', 'review-compact');
+  bot.store.append({ id: 'evt-review-1', event_type: 'risk_review_needed', timestamp, chat, user: { id: 1505519171, username: 'molociao' }, payload: { target_chat_id: chat.id, confidence: 99, evidence: ['Crypto lure terms: giveaway; Impersonation indicators: mod'] } });
+  bot.store.append({ id: 'evt-review-2', event_type: 'risk_review_needed', timestamp, chat, user: { id: 1505519171, username: 'molociao' }, payload: { target_chat_id: chat.id, confidence: 90, evidence: ['Urgency language: now; Impersonation indicators: admin'] } });
+  const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Reviews', 'review-compact');
   const reply = panel.text || '';
   assert.match(reply, /@molociao<\/a> \(ID 1505519171\)/);
   assert.match(reply, /\(\+1 more\)/);
@@ -3283,9 +3825,9 @@ test('inline false-positive review clears all pending reviews for that user', as
   const { bot, calls, dkgWrites } = makeBot({ canBan: true });
   const chat = { id: -100, title: 'demo' };
   const timestamp = new Date().toISOString();
-  bot.store.append({ id: 'evt-inline-1', event_type: 'risk_review_needed', timestamp, user: { id: 1505519171, username: 'molociao' }, payload: { confidence: 99, evidence: ['Crypto lure terms: giveaway'] } });
-  bot.store.append({ id: 'evt-inline-2', event_type: 'risk_review_needed', timestamp, user: { id: 1505519171, username: 'molociao' }, payload: { confidence: 90, evidence: ['Impersonation indicators: admin'] } });
-  bot.store.append({ id: 'evt-inline-other', event_type: 'risk_review_needed', timestamp, user: { id: 472024168, username: 'r4ge13' }, payload: { confidence: 75, evidence: ['Urgency language: now'] } });
+  bot.store.append({ id: 'evt-inline-1', event_type: 'risk_review_needed', timestamp, chat, user: { id: 1505519171, username: 'molociao' }, payload: { target_chat_id: chat.id, confidence: 99, evidence: ['Crypto lure terms: giveaway'] } });
+  bot.store.append({ id: 'evt-inline-2', event_type: 'risk_review_needed', timestamp, chat, user: { id: 1505519171, username: 'molociao' }, payload: { target_chat_id: chat.id, confidence: 90, evidence: ['Impersonation indicators: admin'] } });
+  bot.store.append({ id: 'evt-inline-other', event_type: 'risk_review_needed', timestamp, chat, user: { id: 472024168, username: 'r4ge13' }, payload: { target_chat_id: chat.id, confidence: 75, evidence: ['Urgency language: now'] } });
 
   const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Reviews', 'inline-review-clear');
   const open = buttonByText(panel, 'molociao');
@@ -3311,9 +3853,9 @@ test('inline confirmed scam review clears all pending reviews for that user', as
   const { bot, calls, dkgWrites } = makeBot({ canBan: true });
   const chat = { id: -100, title: 'demo' };
   const timestamp = new Date().toISOString();
-  bot.store.append({ id: 'evt-confirm-1', event_type: 'risk_review_needed', timestamp, user: { id: 7631795279, username: 'GLOBEADMIN' }, payload: { confidence: 75, evidence: ['Impersonation indicators: admin'] } });
-  bot.store.append({ id: 'evt-confirm-2', event_type: 'risk_review_needed', timestamp, user: { id: 7631795279, username: 'GLOBEADMIN' }, payload: { confidence: 80, evidence: ['Duplicate impersonation indicators: admin'] } });
-  bot.store.append({ id: 'evt-confirm-other', event_type: 'risk_review_needed', timestamp, user: { id: 472024168, username: 'r4ge13' }, payload: { confidence: 75, evidence: ['Urgency language: now'] } });
+  bot.store.append({ id: 'evt-confirm-1', event_type: 'risk_review_needed', timestamp, chat, user: { id: 7631795279, username: 'GLOBEADMIN' }, payload: { target_chat_id: chat.id, confidence: 75, evidence: ['Impersonation indicators: admin'] } });
+  bot.store.append({ id: 'evt-confirm-2', event_type: 'risk_review_needed', timestamp, chat, user: { id: 7631795279, username: 'GLOBEADMIN' }, payload: { target_chat_id: chat.id, confidence: 80, evidence: ['Duplicate impersonation indicators: admin'] } });
+  bot.store.append({ id: 'evt-confirm-other', event_type: 'risk_review_needed', timestamp, chat, user: { id: 472024168, username: 'r4ge13' }, payload: { target_chat_id: chat.id, confidence: 75, evidence: ['Urgency language: now'] } });
 
   const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Reviews', 'inline-confirm-clear');
   await bot.handleCallbackQuery({ id: 'confirm-open', from: { id: 1, username: 'admin' }, message: { chat, message_id: 44 }, data: buttonByText(panel, 'GLOBEADMIN').callback_data });
@@ -3329,12 +3871,103 @@ test('inline confirmed scam review clears all pending reviews for that user', as
   assert.equal(dkgWrites.filter((event) => event.event_type === 'review_upheld').length, 2);
 });
 
+test('persisted short UUID confirm callback acknowledges and enforces review', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -1001532392671, title: 'OriginTrail Community' };
+  bot.store.append({
+    id: '84d96003-e90e-44f9-98f3-2b7b7218786b',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 8319596956, first_name: 'Armin', last_name: 'Hahn' },
+    payload: { target_chat_id: chat.id, confidence: 99, scam_type: 'investment_scam', source_message_id: '', evidence: ['investment scam evidence'] }
+  });
+
+  await bot.handleCallbackQuery({
+    id: 'persisted-confirm',
+    from: { id: 1, username: 'admin' },
+    message: { chat, message_id: 15726 },
+    data: 'tc:v1:review-confirm:admin:84d96003-e90e-44'
+  });
+
+  const answers = calls.filter((call) => call.method === 'answerCallbackQuery' && call.payload.callback_query_id === 'persisted-confirm');
+  assert.deepEqual(answers.map((call) => call.payload.text), ['Confirming scam...']);
+  assert.ok(calls.some((call) => call.method === 'banChatMember' && String(call.payload.user_id) === '8319596956'));
+  assert.ok(bot.store.all().some((event) => event.event_type === 'review_upheld' && event.payload.target_event_id === '84d96003-e90e-44f9-98f3-2b7b7218786b'));
+});
+
+test('missing and expired review callbacks return one visible status', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  const event = {
+    id: '84d96003-e90e-44f9-98f3-2b7b7218786c',
+    event_type: 'risk_review_needed',
+    timestamp: new Date(Date.now() - 1000).toISOString(),
+    chat,
+    user: { id: 77, username: 'reviewed_user' },
+    payload: { target_chat_id: chat.id, confidence: 90, evidence: ['review evidence'] }
+  };
+  bot.store.append(event);
+  bot.store.append({
+    id: 'resolved-review',
+    event_type: 'review_upheld',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 1, username: 'admin' },
+    payload: { target_event_id: event.id, review_decision: 'confirm', reviewed_target: event.user, target_chat_id: chat.id, review_chat_id: chat.id, resolves_target_pending_reviews: true, evidence: ['confirmed'] }
+  });
+
+  await bot.handleCallbackQuery({ id: 'missing-review', from: { id: 1, username: 'admin' }, message: { chat, message_id: 80 }, data: 'tc:v1:review-confirm:admin:00000000-0000-00' });
+  await bot.handleCallbackQuery({ id: 'expired-review', from: { id: 1, username: 'admin' }, message: { chat, message_id: 81 }, data: 'tc:v1:review-confirm:admin:84d96003-e90e-44' });
+
+  const answerTexts = (id) => calls
+    .filter((call) => call.method === 'answerCallbackQuery' && call.payload.callback_query_id === id)
+    .map((call) => call.payload.text);
+  assert.deepEqual(answerTexts('missing-review'), ['Review item not found']);
+  assert.deepEqual(answerTexts('expired-review'), ['Already reviewed or expired']);
+});
+
+test('concurrent opposite review callbacks return visible in-progress status', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  bot.store.append({
+    id: 'concurrent-review-event',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 88, username: 'concurrent_user' },
+    payload: { target_chat_id: chat.id, confidence: 95, evidence: ['review evidence'] }
+  });
+  let releaseEnforcement;
+  let enforcementStarted;
+  const enforcementGate = new Promise((resolve) => { releaseEnforcement = resolve; });
+  const enforcementStart = new Promise((resolve) => { enforcementStarted = resolve; });
+  bot.enforceConfirmedScam = async () => {
+    enforcementStarted();
+    await enforcementGate;
+    return { banned: true, reason: 'banned', attempted: 0, deleted: 0, failed: 0 };
+  };
+
+  const confirm = bot.handleCallbackQuery({ id: 'concurrent-confirm', from: { id: 1, username: 'admin' }, message: { chat, message_id: 82 }, data: 'tc:v1:review-confirm:admin:concurrent-revie' });
+  await enforcementStart;
+  await bot.handleCallbackQuery({ id: 'concurrent-reject', from: { id: 1, username: 'admin' }, message: { chat, message_id: 82 }, data: 'tc:v1:review-reject:admin:concurrent-revie' });
+  releaseEnforcement();
+  await confirm;
+
+  const rejectAnswers = calls
+    .filter((call) => call.method === 'answerCallbackQuery' && call.payload.callback_query_id === 'concurrent-reject')
+    .map((call) => call.payload.text);
+  assert.deepEqual(rejectAnswers, ['Review decision in progress']);
+  assert.equal(bot.store.all().filter((event) => event.event_type === 'review_upheld').length, 1);
+  assert.equal(bot.store.all().filter((event) => event.event_type === 'review_overturned').length, 0);
+});
+
 test('inline false-positive review clears large grouped queues at once', async () => {
   const { bot, calls, dkgWrites } = makeBot({ canBan: true });
   const chat = { id: -100, title: 'demo' };
   const timestamp = new Date().toISOString();
   for (let i = 1; i <= 12; i += 1) {
-    bot.store.append({ id: `evt-brx-many-${i}`, event_type: 'risk_review_needed', timestamp, user: { id: 1354777145, username: 'BRX86' }, payload: { confidence: 0, evidence: [`admin false-positive review suppresses autonomous enforcement ${i}`] } });
+    bot.store.append({ id: `evt-brx-many-${i}`, event_type: 'risk_review_needed', timestamp, chat, user: { id: 1354777145, username: 'BRX86' }, payload: { target_chat_id: chat.id, confidence: 0, evidence: [`admin false-positive review suppresses autonomous enforcement ${i}`] } });
   }
 
   const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Reviews', 'inline-many-clear');
@@ -3415,11 +4048,12 @@ test('pending review list uses one store snapshot for large duplicate queues', a
 
 test('/review list explains long queues without overloading buttons', async () => {
   const { bot, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
   const timestamp = new Date().toISOString();
   for (let i = 1; i <= 7; i += 1) {
-    bot.store.append({ id: `evt-review-long-${i}`, event_type: 'risk_review_needed', timestamp, user: { id: 8000 + i, username: `review_${i}` }, payload: { confidence: 80, evidence: [`signal ${i}`] } });
+    bot.store.append({ id: `evt-review-long-${i}`, event_type: 'risk_review_needed', timestamp, chat, user: { id: 8000 + i, username: `review_${i}` }, payload: { target_chat_id: chat.id, confidence: 80, evidence: [`signal ${i}`] } });
   }
-  const reply = await openMenuPanel(bot, calls, { id: -100, title: 'demo' }, { id: 1, username: 'admin' }, 'Reviews', 'review-long');
+  const reply = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Reviews', 'review-long');
   assert.match(reply.text || '', /Showing the first 5 targets/);
   assert.equal(reply.reply_markup.inline_keyboard.filter((row) => row[0]?.callback_data?.includes('review-open')).length, 5);
   assert.equal(reply.reply_markup.inline_keyboard.flat().filter((button) => button.text === '📊 Stats').length, 1);
@@ -3431,8 +4065,8 @@ test('/review list does not globally hide targets previously rejected by admin',
   const { bot, calls } = makeBot({ canBan: true });
   const chat = { id: -100, title: 'demo' };
   const timestamp = new Date().toISOString();
-  bot.store.append({ id: 'evt-brx-pending', event_type: 'risk_review_needed', timestamp, user: { id: 1354777145, username: 'BRX86' }, payload: { confidence: 0, evidence: ['prior false positive suppressed enforcement'] } });
-  bot.store.append({ id: 'evt-rage-pending', event_type: 'risk_review_needed', timestamp, user: { id: 472024168, username: 'r4ge13' }, payload: { confidence: 75, evidence: ['Urgency language: now'] } });
+  bot.store.append({ id: 'evt-brx-pending', event_type: 'risk_review_needed', timestamp, chat, user: { id: 1354777145, username: 'BRX86' }, payload: { target_chat_id: chat.id, confidence: 0, evidence: ['prior false positive suppressed enforcement'] } });
+  bot.store.append({ id: 'evt-rage-pending', event_type: 'risk_review_needed', timestamp, chat, user: { id: 472024168, username: 'r4ge13' }, payload: { target_chat_id: chat.id, confidence: 75, evidence: ['Urgency language: now'] } });
   bot.store.append({ id: 'evt-brx-reject', event_type: 'review_overturned', timestamp, user: { id: 1, username: 'admin' }, payload: { target_event_id: 'previous-brx', review_decision: 'reject', reviewed_target: { id: 1354777145, username: 'BRX86' }, reviewed_target_key: 'id:1354777145', evidence: ['admin rejected BRX flag'] } });
 
   const panel = await openMenuPanel(bot, calls, chat, { id: 1, username: 'admin' }, 'Reviews', 'review-not-hidden');
@@ -3523,6 +4157,53 @@ test('/review list separates current channel from other-channel context', async 
   assert.equal(panel.reply_markup.inline_keyboard.filter((row) => row[0]?.callback_data?.includes('review-open')).length, 1);
 });
 
+test('legacy review without channel metadata cannot be actioned from a channel', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const event = {
+    id: 'legacy-chatless-review',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    user: { id: 303, username: 'legacy_target' },
+    payload: { confidence: 90, evidence: ['legacy signal'] }
+  };
+  bot.store.append(event);
+
+  assert.equal(bot.pendingReviewItems({ chatId: -100, scope: 'current' }).length, 0);
+  await bot.handleCallbackQuery({
+    id: 'legacy-chatless-confirm',
+    from: { id: 1, username: 'admin' },
+    message: { chat: { id: -100, title: 'current' }, message_id: 52 },
+    data: bot.reviewActionKeyboard('admin', event.id)[0][0].callback_data
+  });
+
+  assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
+  assert.equal(bot.reviewResolutionFor(event.id), null);
+  assert.ok(calls.some((call) => call.method === 'answerCallbackQuery' && call.payload.text === 'Review channel unavailable'));
+});
+
+test('review visibility cannot be changed from another channel', async () => {
+  const { bot, calls } = makeBot({ canBan: true });
+  const event = {
+    id: 'cross-channel-hide-review',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat: { id: -200, title: 'origin' },
+    user: { id: 304, username: 'scoped_target' },
+    payload: { target_chat_id: -200, confidence: 90, evidence: ['scoped signal'] }
+  };
+  bot.store.append(event);
+
+  await bot.handleCallbackQuery({
+    id: 'cross-channel-hide',
+    from: { id: 1, username: 'admin' },
+    message: { chat: { id: -100, title: 'other' }, message_id: 53 },
+    data: bot.reviewActionKeyboard('admin', event.id)[1][0].callback_data
+  });
+
+  assert.equal(bot.store.all().some((item) => item.event_type === 'review_hidden' && item.payload.target_event_id === event.id), false);
+  assert.ok(calls.some((call) => call.method === 'answerCallbackQuery' && call.payload.text === 'Review belongs to another channel'));
+});
+
 test('same-channel review clears only same-channel target queue', async () => {
   const { bot, calls, dkgWrites } = makeBot({ canBan: true });
   const timestamp = new Date().toISOString();
@@ -3597,10 +4278,11 @@ test('pending review notices stay in origin channel and respect cooldown', async
 
 test('natural language false positive review rejects matching user queue', async () => {
   const { bot, dkgWrites, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
   const timestamp = new Date().toISOString();
-  bot.store.append({ id: 'evt-review-1', event_type: 'risk_review_needed', timestamp, user: { id: 1505519171, username: 'molociao' }, payload: { confidence: 99, evidence: ['Crypto lure terms: giveaway'] } });
-  bot.store.append({ id: 'evt-review-2', event_type: 'risk_review_needed', timestamp, user: { id: 1505519171, username: 'molociao' }, payload: { confidence: 90, evidence: ['Impersonation indicators: admin'] } });
-  await bot.handleMessage({ chat: { id: -100, title: 'demo' }, from: { id: 1, username: 'admin' }, message_id: 16, text: '@tracethembot @molociao is not a scammer' });
+  bot.store.append({ id: 'evt-review-1', event_type: 'risk_review_needed', timestamp, chat, user: { id: 1505519171, username: 'molociao' }, payload: { target_chat_id: chat.id, confidence: 99, evidence: ['Crypto lure terms: giveaway'] } });
+  bot.store.append({ id: 'evt-review-2', event_type: 'risk_review_needed', timestamp, chat, user: { id: 1505519171, username: 'molociao' }, payload: { target_chat_id: chat.id, confidence: 90, evidence: ['Impersonation indicators: admin'] } });
+  await bot.handleMessage({ chat, from: { id: 1, username: 'admin' }, message_id: 16, text: '@tracethembot @molociao is not a scammer' });
   assert.equal(dkgWrites.filter((event) => event.event_type === 'review_overturned').length, 2);
   assert.ok(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('cleared 2 pending reviews')));
   assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text).includes('Processing false positive correction')), false);
@@ -3610,9 +4292,9 @@ test('natural admin review reply rejects all pending reviews for listed user', a
   const { bot, dkgWrites, calls } = makeBot({ canBan: true });
   const chat = { id: -100, title: 'demo' };
   const timestamp = new Date().toISOString();
-  bot.store.append({ id: 'evt-brx-1', event_type: 'risk_review_needed', timestamp, user: { id: 1354777145, username: 'BRX86' }, payload: { confidence: 0, evidence: ['prior false positive'] } });
-  bot.store.append({ id: 'evt-brx-2', event_type: 'risk_review_needed', timestamp, user: { id: 1354777145, username: 'BRX86' }, payload: { confidence: 10, evidence: ['thin signal'] } });
-  bot.store.append({ id: 'evt-other-1', event_type: 'risk_review_needed', timestamp, user: { id: 472024168, username: 'r4ge13' }, payload: { confidence: 75, evidence: ['Urgency language: now'] } });
+  bot.store.append({ id: 'evt-brx-1', event_type: 'risk_review_needed', timestamp, chat, user: { id: 1354777145, username: 'BRX86' }, payload: { target_chat_id: chat.id, confidence: 0, evidence: ['prior false positive'] } });
+  bot.store.append({ id: 'evt-brx-2', event_type: 'risk_review_needed', timestamp, chat, user: { id: 1354777145, username: 'BRX86' }, payload: { target_chat_id: chat.id, confidence: 10, evidence: ['thin signal'] } });
+  bot.store.append({ id: 'evt-other-1', event_type: 'risk_review_needed', timestamp, chat, user: { id: 472024168, username: 'r4ge13' }, payload: { target_chat_id: chat.id, confidence: 75, evidence: ['Urgency language: now'] } });
 
   await bot.handleMessage({ chat, from: { id: 1, username: 'admin' }, message_id: 21, text: '@tracethembot @BRX86 is not a scammer' });
 
@@ -3745,11 +4427,12 @@ test('LLM classifies non-admin alert reply dispute as appeal', async () => {
 
 test('natural language false positive review clears all matching pending reviews', async () => {
   const { bot, dkgWrites, calls } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
   const timestamp = new Date().toISOString();
   for (let i = 1; i <= 12; i += 1) {
-    bot.store.append({ id: `evt-review-${i}`, event_type: 'risk_review_needed', timestamp, user: { id: 86, username: 'BRX86' }, payload: { confidence: 80 + i, evidence: [`pending signal ${i}`] } });
+    bot.store.append({ id: `evt-review-${i}`, event_type: 'risk_review_needed', timestamp, chat, user: { id: 86, username: 'BRX86' }, payload: { target_chat_id: chat.id, confidence: 80 + i, evidence: [`pending signal ${i}`] } });
   }
-  await bot.handleMessage({ chat: { id: -100, title: 'demo' }, from: { id: 1, username: 'admin' }, message_id: 17, text: '@tracethembot @BRX86 is not a scammer either' });
+  await bot.handleMessage({ chat, from: { id: 1, username: 'admin' }, message_id: 17, text: '@tracethembot @BRX86 is not a scammer either' });
   assert.equal(dkgWrites.filter((event) => event.event_type === 'review_overturned').length, 12);
   const replies = calls.filter((call) => call.method === 'sendMessage').map((call) => String(call.payload.text || ''));
   assert.ok(replies.some((text) => text.includes('cleared 12 pending reviews')));
@@ -3776,6 +4459,142 @@ test('admin false-positive permanently suppresses future flags even after seven 
 
   assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('flagged this for admin review')), false);
   assert.equal(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user?.id === 4242), false);
+});
+
+test('proactive scan does not replay observations resolved by same-channel review or ban', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  const reviewed = { id: 4242, username: 'reviewed_user' };
+  const banned = { id: 4343, username: 'banned_user' };
+  const observedAt = new Date(Date.now() - 2000).toISOString();
+  const resolvedAt = new Date(Date.now() - 1000).toISOString();
+  bot.rememberUser(chat, reviewed, 'old reviewed evidence');
+  bot.rememberUser(chat, banned, 'old banned evidence');
+  bot.observedUsers.get(`${chat.id}:${reviewed.id}`).lastSeen = observedAt;
+  bot.observedUsers.get(`${chat.id}:${banned.id}`).lastSeen = observedAt;
+  bot.store.append({
+    id: 'review-resolution-after-observation',
+    event_type: 'review_upheld',
+    timestamp: resolvedAt,
+    chat,
+    user: { id: 1, username: 'admin' },
+    payload: { reviewed_target: reviewed, target_chat_id: chat.id, review_chat_id: chat.id, resolves_target_pending_reviews: true, evidence: ['confirmed'] }
+  });
+  bot.store.append({
+    id: 'ban-resolution-after-observation',
+    event_type: 'ban_executed',
+    timestamp: resolvedAt,
+    chat,
+    user: banned,
+    payload: { target: banned, target_chat_id: chat.id, evidence: ['banned'] }
+  });
+
+  const before = bot.store.all().length;
+  bot.nextProactiveScanAt = 0;
+  await bot.proactiveScan();
+
+  assert.equal(bot.store.all().length, before);
+});
+
+test('proactive scan does not replay observations rejected by same-channel review', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  const target = { id: 4545, username: 'false_positive_user' };
+  bot.rememberUser(chat, target, 'old rejected evidence');
+  bot.observedUsers.get(`${chat.id}:${target.id}`).lastSeen = new Date(Date.now() - 2000).toISOString();
+  bot.store.append({
+    id: 'false-positive-resolution-after-observation',
+    event_type: 'review_overturned',
+    timestamp: new Date(Date.now() - 1000).toISOString(),
+    chat,
+    user: { id: 1, username: 'admin' },
+    payload: { reviewed_target: target, target_chat_id: chat.id, review_chat_id: chat.id, resolves_target_pending_reviews: true, evidence: ['rejected'] }
+  });
+  assert.equal(bot.targetResolutionForObservation(bot.observedUsers.get(`${chat.id}:${target.id}`))?.event_type, 'review_overturned');
+
+  const before = bot.store.all().length;
+  bot.nextProactiveScanAt = 0;
+  await bot.proactiveScan();
+
+  assert.equal(bot.store.all().length, before);
+});
+
+test('proactive scan does not treat cross-channel context review as target-chat resolution', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const targetChat = { id: -100, title: 'target' };
+  const reviewChat = { id: -200, title: 'review' };
+  const target = { id: 4646, username: 'cross_channel_user' };
+  bot.rememberUser(targetChat, target, 'unresolved target-chat evidence');
+  bot.observedUsers.get(`${targetChat.id}:${target.id}`).lastSeen = new Date(Date.now() - 2000).toISOString();
+  bot.store.append({
+    id: 'cross-channel-context-review',
+    event_type: 'review_upheld',
+    timestamp: new Date(Date.now() - 1000).toISOString(),
+    chat: reviewChat,
+    user: { id: 1, username: 'admin' },
+    payload: {
+      reviewed_target: target,
+      target_chat_id: targetChat.id,
+      review_chat_id: reviewChat.id,
+      review_scope: 'cross_channel',
+      review_jurisdiction: 'context_only',
+      resolves_target_pending_reviews: false,
+      evidence: ['context-only confirmation']
+    }
+  });
+
+  bot.nextProactiveScanAt = 0;
+  await bot.proactiveScan();
+
+  assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user?.id === target.id));
+});
+
+test('proactive scan allows evidence observed after earlier target resolution', async () => {
+  const { bot } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  const target = { id: 4444, username: 'repeat_user' };
+  bot.store.append({
+    id: 'earlier-target-resolution',
+    event_type: 'review_upheld',
+    timestamp: new Date(Date.now() - 2000).toISOString(),
+    chat,
+    user: { id: 1, username: 'admin' },
+    payload: { reviewed_target: target, target_chat_id: chat.id, review_chat_id: chat.id, resolves_target_pending_reviews: true, evidence: ['confirmed earlier evidence'] }
+  });
+  bot.rememberUser(chat, target, 'new concrete evidence');
+  bot.observedUsers.get(`${chat.id}:${target.id}`).lastSeen = new Date(Date.now() - 1000).toISOString();
+
+  bot.nextProactiveScanAt = 0;
+  await bot.proactiveScan();
+
+  assert.ok(bot.store.all().some((event) => event.event_type === 'risk_review_needed' && event.user?.id === target.id));
+});
+
+test('review batch cutoff does not suppress observation added during enforcement', () => {
+  const { bot } = makeBot({ canBan: true });
+  const chat = { id: -100, title: 'demo' };
+  const target = { id: 4747, username: 'new_observation' };
+  const cutoff = new Date(Date.now() - 2000).toISOString();
+  bot.rememberUser(chat, target, 'new evidence during enforcement');
+  const entry = bot.observedUsers.get(`${chat.id}:${target.id}`);
+  entry.lastSeen = new Date(Date.now() - 1000).toISOString();
+  bot.store.append({
+    id: 'review-completed-after-new-observation',
+    event_type: 'review_upheld',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 1, username: 'admin' },
+    payload: {
+      reviewed_target: target,
+      target_chat_id: chat.id,
+      review_chat_id: chat.id,
+      resolves_target_pending_reviews: true,
+      review_batch_cutoff: cutoff,
+      evidence: ['confirmed earlier batch']
+    }
+  });
+
+  assert.equal(bot.targetResolutionForObservation(entry), null);
 });
 
 test('local admin false-positive suppresses prior-community warning creation', async () => {
@@ -3854,6 +4673,69 @@ test('proactive cross-group warning creates channel-local pending review notice 
 
   // Risk boosted as expected from the history path
   assert.ok((risk.confidence || 0) >= 70, 'risk should be boosted by cross-group prior action');
+});
+
+test('disabled proactive cross-group alerts keep evidence without notifying channel', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    configOverrides: { proactiveAlertCrossGroup: false, warnThreshold: 50 }
+  });
+  bot.dkg.queryAdminHistoryForActor = async () => ({
+    hasPriorAdminAction: true,
+    events: [{ eventType: 'ban_executed', confidence: 92, id: 'prior-ban-muted' }]
+  });
+  const message = {
+    chat: { id: -200101, title: 'quiet-group' },
+    from: { id: 780, username: 'prior_risk' },
+    message_id: 72,
+    text: 'hello'
+  };
+
+  await bot.assess(message, message.from, message.text);
+
+  assert.ok(bot.store.all().some((event) => event.event_type === 'proactive_cross_group_warning' && event.user?.id === message.from.id));
+  assert.equal(calls.some((call) => call.method === 'sendMessage' && String(call.payload.text || '').includes('pending review item')), false);
+});
+
+test('disabled proactive cross-group alert replay does not notify channel', async () => {
+  const { bot, calls } = makeBot({
+    canBan: true,
+    configOverrides: { proactiveAlertCrossGroup: false }
+  });
+  const message = {
+    chat: { id: -200102, title: 'quiet-replay-group' },
+    from: { id: 781, username: 'prior_risk_replay' },
+    message_id: 73,
+    text: 'hello'
+  };
+  bot.currentUpdateId = 500;
+  const payload = { confidence: 90, evidence: ['prior admin action'] };
+
+  const first = await bot.record('proactive_cross_group_warning', message, payload, { writeDkg: false });
+  const replay = await bot.record('proactive_cross_group_warning', message, payload, { writeDkg: false });
+
+  assert.equal(replay.id, first.id);
+  assert.equal(calls.some((call) => call.method === 'sendMessage'), false);
+});
+
+test('repeated assessment reuses unresolved proactive cross-group warning', async () => {
+  const { bot } = makeBot({
+    canBan: true,
+    configOverrides: { proactiveAlertCrossGroup: true, warnThreshold: 50 }
+  });
+  bot.dkg.queryAdminHistoryForActor = async () => ({
+    hasPriorAdminAction: true,
+    events: [{ eventType: 'ban_executed', confidence: 92, id: 'prior-ban-repeat' }]
+  });
+  const chat = { id: -200100, title: 'demo-group' };
+  const target = { id: 779, username: 'repeat_warning' };
+  bot.pendingReviewItems({ chatId: chat.id, scope: 'current' });
+
+  await bot.assess({ chat, from: target, message_id: 70, text: 'first message' }, target, 'first message');
+  await bot.assess({ chat, from: target, message_id: 71, text: 'second message' }, target, 'second message');
+
+  assert.equal(bot.store.all().filter((event) => event.event_type === 'proactive_cross_group_warning' && event.user?.id === target.id).length, 1);
+  assert.ok(bot.pendingReviewItems({ chatId: chat.id, scope: 'current' }).some((event) => event.user?.id === target.id));
 });
 
 test('cross-group warning review notice opens same-channel review queue', async () => {

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { createHmac } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import { canonicalizeMessageText, detectGamblingPromotion } from './message-patterns.js';
 
 const NS = 'https://tracabot.org/ontology#';
 const DCTERMS_CREATED = 'http://purl.org/dc/terms/created';
@@ -36,6 +37,15 @@ function eventIdFromSource(source = '') {
   return cleanValue(source).split('/').pop() || '';
 }
 
+function normalizeCampaignFingerprint(value = '') {
+  return cleanValue(value)
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/^alias:/, '')
+    .replace(/^@/, '')
+    .replace(/[^a-z0-9]/g, '');
+}
+
 function actorAliases(user = {}) {
   return [
     user.username,
@@ -51,7 +61,7 @@ function normalizedIdentity(value = '') {
   return String(value).toLowerCase().replace(/^@/, '').replace(/[^\p{L}\p{N}_-]/gu, '');
 }
 
-function pseudonym(key, kind, value = '') {
+export function pseudonym(key, kind, value = '') {
   const normalized = normalizedIdentity(value);
   if (!normalized) return '';
   return `hmac:v1:${createHmac('sha256', key).update(`${kind}:${normalized}`).digest('hex')}`;
@@ -200,6 +210,11 @@ function assertionNameForEvent(event = {}) {
 function isRetryableDkgError(error) {
   const message = error instanceof Error ? error.message : String(error || '');
   return /timeout|timed?\s*out|econnreset|econnrefused|enetunreach|socket|fetch failed|temporar|503|502|504|429/i.test(message);
+}
+
+function isSharePrerequisiteUnavailable(error) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return /promote prerequisite|no-swm|shared working memory|swm/i.test(message) && isRetryableDkgError(error);
 }
 
 async function loadOpenClawAdapter(config = {}) {
@@ -557,6 +572,7 @@ export class DkgClient {
       mode: 'openclaw-dkg-adapter',
       output,
       ...parseWriteOutput(output),
+      ...write,
       shareOperation: write.shareOperationId || write.workspaceOperationId || '',
       graph: write.graph || `did:dkg:context-graph:${this.config.contextGraph}/_shared_memory`,
       ual: write.graph || `did:dkg:context-graph:${this.config.contextGraph}/_shared_memory`,
@@ -565,13 +581,113 @@ export class DkgClient {
       eventId: event.id,
       triples
     };
-    if (this.config.dkgPublishVerified === false || !shouldAutoPublishEvent({ ...event, config: this.config })) return result;
+    if (write.swmDegraded || this.config.dkgPublishVerified === false || !shouldAutoPublishEvent({ ...event, config: this.config })) return result;
     try {
       result.publish = await this.publishEvent(assertionName, subject);
     } catch (error) {
       result.publish_error = error instanceof Error ? error.message : String(error);
     }
     return result;
+  }
+
+  async stageConversationArtifact(event) {
+    if (this.config.dkgWrites === false) return null;
+    if (Buffer.byteLength(this.config.dkgPseudonymKey || '', 'utf8') < 32) throw new Error('TRACABOT_DKG_PSEUDONYM_KEY must be at least 32 bytes when DKG writes are enabled');
+    await this.ensureContextGraph();
+    const client = await this.client();
+    const name = `tracabot-draft-${event.id}`;
+    if (typeof client.createKnowledgeAsset !== 'function') throw new Error('DKG adapter cannot stage Working Memory Knowledge Assets');
+    const subject = `${NS}event/${event.id}`;
+    await client.createKnowledgeAsset(this.config.contextGraph, name, {
+      finalize: false,
+      alsoShareSwm: false,
+      quads: [
+        { subject, predicate: 'rdf:type', object: `${NS}conversation_artifact` },
+        { subject, predicate: `${NS}eventId`, object: literal(event.id) },
+        { subject, predicate: `${NS}eventType`, object: literal('conversation_artifact') },
+        { subject, predicate: `${NS}publicationStatus`, object: literal('working_memory') },
+        { subject, predicate: `${NS}sourceMessageId`, object: literal(event.payload.source_message_id || '') },
+        { subject, predicate: `${NS}communityId`, object: literal(event.payload.community_id || '') },
+        { subject, predicate: `${NS}telegramChatId`, object: literal(String(event.chat?.id || '').startsWith('hmac:v1:') ? event.chat.id : pseudonym(this.pseudonymKey, 'telegram-chat', event.chat?.id || '')) },
+        { subject, predicate: `${NS}actorIdentity`, object: literal(String(event.user?.id || '').startsWith('hmac:v1:') ? event.user.id : pseudonym(this.pseudonymKey, 'telegram-user', event.user?.id || '')) },
+        { subject, predicate: `${NS}messageText`, object: literal(String(event.payload.message_text || '').slice(0, 500)) },
+        { subject, predicate: `${NS}confidence`, object: literal(event.payload.confidence || 0) },
+        { subject, predicate: `${NS}scamType`, object: literal(event.payload.scam_type || '') },
+        { subject, predicate: `${NS}artifactQuality`, object: literal(event.payload.artifact_quality || 0) },
+        { subject, predicate: `${NS}expiresAt`, object: literal(event.payload.expires_at || '') },
+        { subject, predicate: `<${DCTERMS_CREATED}>`, object: literal(event.timestamp) }
+      ]
+    });
+    return { name, subject, layer: 'working-memory' };
+  }
+
+  async pendingConversationArtifacts({ limit = 25 } = {}) {
+    const sparql = `SELECT ?s ?id ?text ?confidence ?quality ?expires ?chat ?user ?username ?created WHERE { GRAPH ?g {
+      ?s <${NS}eventType> "conversation_artifact" ; <${NS}eventId> ?id ; <${NS}messageText> ?text ; <${NS}expiresAt> ?expires .
+      OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}artifactQuality> ?quality . }
+      OPTIONAL { ?s <${NS}telegramChatId> ?chat . } OPTIONAL { ?s <${NS}actorIdentity> ?user . }
+      OPTIONAL { ?s <${NS}username> ?username . } OPTIONAL { ?s <${DCTERMS_CREATED}> ?created . }
+    } } ORDER BY ?expires LIMIT ${Math.min(100, Math.max(1, Number(limit) || 25))}`;
+    if (this.config.dkgReads === false) throw new Error('DKG reads disabled; cannot curate Working Memory');
+    const client = await this.client();
+    const response = await client.query(sparql, { contextGraphId: this.config.contextGraph, view: 'working-memory', includeSharedMemory: false });
+    const bindings = response?.result?.bindings || response?.bindings;
+    if (!Array.isArray(bindings)) throw new Error('DKG Working Memory query unavailable; curation stopped');
+    return bindings.filter((row) => cleanValue(row.s).startsWith(`${NS}event/`) && String(cleanValue(row.id)).length > 0).map((row) => ({
+      id: cleanValue(row.id), text: cleanValue(row.text), confidence: numeric(row.confidence), quality: numeric(row.quality),
+      expires: cleanValue(row.expires), chatId: cleanValue(row.chat), userId: cleanValue(row.user),
+      username: cleanValue(row.username), created: cleanValue(row.created)
+    }));
+  }
+
+  async resolveConversationArtifact(id, { share = false } = {}) {
+    const client = await this.client();
+    const name = `tracabot-draft-${id}`;
+    if (share) {
+      if (typeof client.knowledgeAssetFinalize !== 'function' || typeof client.knowledgeAssetShare !== 'function') throw new Error('DKG adapter cannot promote Working Memory asset');
+      await client.knowledgeAssetFinalize(this.config.contextGraph, name);
+      return client.knowledgeAssetShare(this.config.contextGraph, name);
+    }
+    if (typeof client.knowledgeAssetDiscard !== 'function') throw new Error('DKG adapter cannot discard Working Memory asset');
+    return client.knowledgeAssetDiscard(this.config.contextGraph, name);
+  }
+
+  async annotateConversationArtifact(id, review) {
+    if (this.config.dkgWrites === false) throw new Error('DKG writes disabled');
+    const client = await this.client();
+    if (typeof client.knowledgeAssetWrite !== 'function') throw new Error('DKG adapter cannot annotate WM draft');
+    const subject = `${NS}event/${id}`;
+    return client.knowledgeAssetWrite(this.config.contextGraph, `tracabot-draft-${id}`, [
+      { subject, predicate: `${NS}curatorModel`, object: literal('9router/cx/gpt-6-sol:medium') },
+      { subject, predicate: `${NS}curatorDecision`, object: literal(review.action) },
+      { subject, predicate: `${NS}curatorCategory`, object: literal(review.category) },
+      { subject, predicate: `${NS}curatorReason`, object: literal(review.reason) },
+      { subject, predicate: `${NS}curatorEvidence`, object: literal(review.evidence) }
+    ]);
+  }
+
+  async confirmedSwmScamHistory(userId) {
+    if (this.config.dkgReads === false) throw new Error('DKG reads disabled');
+    if (!userId || Buffer.byteLength(this.config.dkgPseudonymKey || '') < 32) throw new Error('Exact actor identity unavailable');
+    const identity = pseudonym(this.pseudonymKey, 'telegram-user', String(userId));
+    const sparql = `SELECT ?g ?s ?type ?verified ?created ?testMode WHERE { GRAPH ?g {
+      ?s <${NS}actorIdentity> ${literal(identity)} ; <${NS}eventType> ?type ; <${NS}adminVerified> ?verified .
+      OPTIONAL { ?s <${DCTERMS_CREATED}> ?created . }
+      OPTIONAL { ?s <${NS}testMode> ?testMode . }
+    } } ORDER BY DESC(?created) LIMIT 51`;
+    const client = await this.client();
+    const response = await client.query(sparql, { contextGraphId: this.config.contextGraph, view: 'shared-working-memory', includeSharedMemory: false });
+    const bindings = response?.result?.bindings || response?.bindings;
+    if (!Array.isArray(bindings)) throw new Error('Shared Working Memory history unavailable');
+    if (bindings.length > 50 || bindings.some((row) => !Number.isFinite(Date.parse(cleanValue(row.created))))) {
+      throw new Error('Shared Working Memory history incomplete; ban blocked');
+    }
+    const decisions = bindings.filter((row) => isProductionBindingForContext(row, this.config.contextGraph) && cleanValue(row.verified) === 'true')
+      .map((row) => ({ eventId: eventIdFromSource(row.s), eventType: cleanValue(row.type), created: cleanValue(row.created) }))
+      .filter((row) => row.eventId && Number.isFinite(Date.parse(row.created)))
+      .sort((a, b) => Date.parse(b.created) - Date.parse(a.created));
+    if (decisions[0]?.eventType === 'review_overturned') return [];
+    return decisions.filter((row) => ['ban_executed', 'review_upheld'].includes(row.eventType)).slice(0, 3);
   }
 
   async writeThroughMemoryLifecycle(client, name, triples) {
@@ -601,10 +717,31 @@ export class DkgClient {
         };
       } catch (error) {
         lastError = error;
-        if (!isRetryableDkgError(error) || index === attempts.length - 1) throw error;
+        if (!isRetryableDkgError(error)) throw error;
+        if (index === attempts.length - 1) {
+          if (isSharePrerequisiteUnavailable(error)) return this.knowledgeAssetWorkingMemoryFallback(client, name, triples, error);
+          throw error;
+        }
       }
     }
     throw lastError;
+  }
+
+  async knowledgeAssetWorkingMemoryFallback(client, name, triples, shareError) {
+    const created = await client.createKnowledgeAsset(this.config.contextGraph, name, {
+      quads: triples,
+      alsoShareSwm: false
+    });
+    return {
+      assertionName: name,
+      assertionUri: created?.assertionUri || created?.knowledgeAssetUri || '',
+      shareOperationId: '',
+      graph: created?.graph || `did:dkg:context-graph:${this.config.contextGraph}/_working_memory`,
+      triplesWritten: created?.triplesWritten ?? created?.written ?? triples.length,
+      swmDegraded: true,
+      shareError: shareError instanceof Error ? shareError.message : String(shareError || ''),
+      knowledgeAsset: created
+    };
   }
 
   async shareWithRetry(client, triples) {
@@ -708,7 +845,7 @@ export class DkgClient {
     if (!exact.length && !fallback.length) return { hasPriorAdminAction: false, events: [] };
 
     // Build SPARQL to find high-severity events involving this actor
-    const query = (clauses) => this.queryBindings(`
+    const query = (clauses, view = 'verifiable-memory') => this.queryBindings(`
       SELECT ?g ?s ?eventType ?confidence ?scamType ?created ?chatId ?username ?eventSource ?testMode ?adminVerified ?trustedGlobalClear ?verifiedMemoryAuthority ?tracBackedGlobalAuthority ?verifiedMemoryCandidate ?communityVerifiedFlag WHERE {
         GRAPH ?g {
           ${clauses.join(' UNION ')}
@@ -728,10 +865,12 @@ export class DkgClient {
           OPTIONAL { ?s <${NS}communityVerifiedFlag> ?communityVerifiedFlag . }
         }
       } LIMIT 30
-    `, { view: 'verifiable-memory', includeSharedMemory: false });
+    `, { view, includeSharedMemory: false });
 
     let bindings = exact.length ? await query(exact) : [];
+    if (exact.length) bindings.push(...await query(exact, 'shared-working-memory'));
     if (!bindings.length && fallback.length) bindings = await query(fallback);
+    if (!bindings.length && fallback.length) bindings = await query(fallback, 'shared-working-memory');
 
     const severeTypes = ['ban_executed', 'review_upheld', 'fraud_finding'];
     const severeEvents = bindings
@@ -741,6 +880,7 @@ export class DkgClient {
         eventType: cleanValue(b.eventType),
         confidence: Number(cleanValue(b.confidence)) || 0,
         scamType: cleanValue(b.scamType),
+        adminVerified: cleanValue(b.adminVerified) === 'true',
         ual: cleanValue(b.g),
         created: cleanValue(b.created)
       }))
@@ -774,6 +914,71 @@ export class DkgClient {
       events: severeEvents,
       falsePositiveEvents
     };
+  }
+
+  async queryCampaignModerationRoots({ fingerprints = [] } = {}) {
+    const needles = new Set(fingerprints.map(normalizeCampaignFingerprint).filter(Boolean));
+    if (!needles.size) return { events: [] };
+    const fingerprintValues = [...needles].map(literal).join(' ');
+
+    const labelClauses = [
+      'actorAlias',
+      'targetLabel',
+      'targetUsername',
+      'username',
+      'campaignKey',
+      'sangmataNewName'
+    ].map((predicate) => `{ ?s <${NS}${predicate}> ?campaignLabel . }`);
+    const sparql = `
+      SELECT ?g ?s ?eventType ?confidence ?campaignLabel ?adminVerified ?testMode ?created ?communityId ?domain ?wallet WHERE {
+        GRAPH ?g {
+          ${labelClauses.join(' UNION ')}
+          VALUES ?campaignFingerprint { ${fingerprintValues} }
+          FILTER(REPLACE(REPLACE(LCASE(STR(?campaignLabel)), "^alias:", ""), "[^a-z0-9]", "") = ?campaignFingerprint)
+          OPTIONAL { ?s <${NS}eventType> ?eventType . }
+          OPTIONAL { ?s <${NS}confidence> ?confidence . }
+          OPTIONAL { ?s <${NS}adminVerified> ?adminVerified . }
+           OPTIONAL { ?s <${NS}testMode> ?testMode . }
+           OPTIONAL { ?s <${NS}communityId> ?communityId . }
+           OPTIONAL { ?s <${NS}scamDomain> ?domain . }
+           OPTIONAL { ?s <${NS}wallet> ?wallet . }
+          OPTIONAL { ?s <${DCTERMS_CREATED}> ?created . }
+        }
+      } LIMIT 100
+    `;
+    const [vm, swm] = await Promise.all([
+      this.queryBindings(sparql, { view: 'verifiable-memory', includeSharedMemory: false }),
+      this.queryBindings(sparql, { view: 'shared-working-memory', includeSharedMemory: false })
+    ]);
+    const byEvent = new Map();
+    for (const [bindings, trustLayer] of [[vm, 'verifiable_memory'], [swm, 'admin_reviewed_shared_memory']]) {
+      for (const binding of bindings) {
+        if (!isProductionBindingForContext(binding, this.config.contextGraph)) continue;
+        const eventType = cleanValue(binding.eventType);
+        const confidence = numeric(binding.confidence || '0');
+        const adminVerified = cleanValue(binding.adminVerified).toLowerCase() === 'true';
+        const matchedFingerprint = normalizeCampaignFingerprint(binding.campaignLabel);
+        const eventId = eventIdFromSource(binding.s);
+        if (!eventId || !needles.has(matchedFingerprint)) continue;
+        if (!['ban_executed', 'review_upheld'].includes(eventType) || confidence < 70) continue;
+        if (trustLayer !== 'verifiable_memory' && !adminVerified) continue;
+        if (byEvent.has(eventId)) continue;
+        byEvent.set(eventId, {
+          eventId,
+          eventType,
+          confidence,
+          campaignLabel: cleanValue(binding.campaignLabel),
+          matchedFingerprint,
+          adminVerified,
+          communityId: cleanValue(binding.communityId),
+          indicators: [cleanValue(binding.domain), cleanValue(binding.wallet)].filter(Boolean),
+          trustLayer,
+          ual: cleanValue(binding.g),
+          created: cleanValue(binding.created)
+        });
+      }
+    }
+    return { events: [...byEvent.values()] };
   }
 
   async queryContextOracle({ userId = '', username = '', aliases = [], text = '' } = {}) {
@@ -953,12 +1158,13 @@ export function extractDomains(text = '') {
 }
 
 export function extractPatterns(text = '') {
-  const lower = text.toLowerCase();
+  const lower = canonicalizeMessageText(text).toLowerCase();
   const patterns = [];
   if (/airdrop|free\s+(usdt|eth|btc)|giveaway/.test(lower)) patterns.push('fake-airdrop');
   if (/seed phrase|private key|verify wallet|connect wallet/.test(lower)) patterns.push('wallet-drain');
   if (/admin|support|moderator|official/.test(lower)) patterns.push('impersonation');
   if (/institutional investment|investment partnership|\bvc\b|venture capital|serious investors?|serious partners?|collab(?:oration)?|partnership proposal/.test(lower)) patterns.push('investment-partnership-lure');
   if (/urgent|hurry|claim now|limited/.test(lower)) patterns.push('urgency-pressure');
+  if (detectGamblingPromotion(lower).matched) patterns.push('gambling-promotion');
   return [...new Set(patterns)];
 }

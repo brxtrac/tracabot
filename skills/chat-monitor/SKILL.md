@@ -12,6 +12,6 @@ Core tools: `monitor_chat_event` + `decide_artefact_action` (via the tracabot sk
 
 `monitor_chat_event` classifies incoming chat messages for scam/spam risk (with DKG Shared Memory lookup) and can write unsafe events.
 
-`decide_artefact_action` (the artefact curator) makes the WM / SWM / admin-review decision. It performs live queries against the Tracabot Context Graph for prior admin actions on the actor (including cross-group history) and returns a recommendation plus graph evidence.
+`decide_artefact_action` recommends `local_wm_draft`, `commit_to_swm`, or `queue_for_admin_review`. It can query prior admin actions, including cross-group history, and returns that evidence. It does not promote Working Memory Knowledge Assets. Production promotion is `node ./bin/tracabot-curator.js --once`, which requires an explicit OpenCode `tracabot-curator` approval.
 
 External OpenClaw agents can poll chats and use the curator for intelligent, memory-aware artefact decisions. The live Tracabot bot also consults the curator for low-confidence tactic candidates.

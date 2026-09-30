@@ -27,7 +27,7 @@ function hasDkgEvidence(dkgIntel = {}) {
 
 function hasStrongLocalPattern(analysis = {}) {
   const evidence = (analysis.evidence || []).join('\n');
-  if (/changed identity after joining|resembles configured admin|Investment-profit testimonial lure/i.test(evidence)) return true;
+  if (/changed identity after joining|resembles configured admin|Investment-profit testimonial lure|High-confidence gambling bonus promotion/i.test(evidence)) return true;
   if (/Active watchlist entry/i.test(evidence)) return true;
   if (/Suspicious link or claim-link pattern/i.test(evidence) && /Crypto lure terms|Impersonation indicators|Suspicious request to move help\/support into DMs/i.test(evidence)) return true;
   return false;
@@ -101,6 +101,7 @@ export function isObviousLocalScam(risk = {}) {
 /** Normalize campaign / display labels for fingerprint matching (e.g. "BC GAME" → "bcgame"). */
 export function normalizeCampaignLabel(value = '') {
   return String(value || '')
+    .normalize('NFKC')
     .toLowerCase()
     .replace(/^@/, '')
     .replace(/[^a-z0-9]/g, '');
@@ -121,13 +122,16 @@ export function campaignLabelsFromTarget(target = {}) {
     target.last_name,
     target.label,
     [target.first_name, target.last_name].filter(Boolean).join(' '),
-    target.sangmata?.oldName,
-    target.sangmata?.newName
+    target.sangmata?.newName,
+    target.identityChange?.newName
   ].filter(Boolean);
 }
 
 export function matchKnownCampaignFingerprint(target = {}, patterns = DEFAULT_KNOWN_CAMPAIGN_PATTERNS) {
-  const labels = campaignLabelsFromTarget(target).map(normalizeCampaignLabel).filter(Boolean);
+  const labels = campaignLabelsFromTarget(target).map((value) => ({
+    normalized: normalizeCampaignLabel(value),
+    tokens: String(value || '').normalize('NFKC').toLowerCase().match(/[a-z0-9]+/g) || []
+  })).filter((label) => label.normalized);
   const needles = (patterns?.length ? patterns : DEFAULT_KNOWN_CAMPAIGN_PATTERNS)
     .map(normalizeCampaignLabel)
     .filter(Boolean);
@@ -135,8 +139,16 @@ export function matchKnownCampaignFingerprint(target = {}, patterns = DEFAULT_KN
   for (const label of labels) {
     for (const needle of needles) {
       if (!needle) continue;
-      if (label === needle || label.includes(needle) || needle.includes(label)) {
-        return { matchedLabel: label, pattern: needle };
+      let tokenMatch = false;
+      for (let start = 0; start < label.tokens.length && !tokenMatch; start += 1) {
+        let combined = '';
+        for (let index = start; index < label.tokens.length && combined.length < needle.length; index += 1) {
+          combined += label.tokens[index];
+          if (combined === needle) tokenMatch = true;
+        }
+      }
+      if (label.normalized === needle || tokenMatch) {
+        return { matchedLabel: label.normalized, pattern: needle };
       }
     }
   }
@@ -196,6 +208,23 @@ export function evaluateKnownCampaignAutoBan({
     confidence,
     campaignLabel: fingerprint.matchedLabel || fingerprint.pattern
   };
+}
+
+export function evaluateConfirmedCampaignBan({ exactActorRoots = [], campaignRoots = [], currentIndicators = [], overturned = false } = {}) {
+  if (overturned) return { eligible: false, reason: 'admin_overturned' };
+  const valid = (root) => root?.eventType === 'ban_executed' && root.adminVerified === true && root.eventId;
+  const exact = exactActorRoots.find(valid);
+  if (exact) return { eligible: true, reason: 'previous_admin_ban_same_actor', roots: [exact.eventId] };
+  const independent = new Map();
+  for (const root of campaignRoots.filter(valid)) {
+    if (root.communityId && !independent.has(root.communityId)) independent.set(root.communityId, root);
+  }
+  if (independent.size < 2) return { eligible: false, reason: 'insufficient_independent_admin_bans' };
+  const indicators = new Set(currentIndicators.map((item) => String(item).toLowerCase()));
+  if (![...independent.values()].some((root) => (root.indicators || []).some((item) => indicators.has(String(item).toLowerCase())))) {
+    return { eligible: false, reason: 'missing_shared_campaign_indicator' };
+  }
+  return { eligible: true, reason: 'confirmed_campaign', roots: [...independent.values()].map((root) => root.eventId) };
 }
 
 export function formatRiskAssessment({ target, risk }) {

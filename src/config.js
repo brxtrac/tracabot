@@ -185,6 +185,7 @@ export function loadConfig(env = process.env) {
     autoRestrict: parseBoolean(env.TRACABOT_AUTO_RESTRICT, false),
     autoBan: parseBoolean(env.TRACABOT_AUTO_BAN, false),
     knownCampaignAutoBan,
+    highConfidenceAutoBan: parseBoolean(env.TRACABOT_HIGH_CONFIDENCE_AUTO_BAN, false),
     knownCampaignMinBanRoots,
     knownCampaignPatterns,
     warnThreshold,

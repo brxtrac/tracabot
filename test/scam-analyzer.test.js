@@ -62,6 +62,15 @@ test('detects display names that copy configured admin handles', () => {
   assert.ok(result.confidence >= 60);
 });
 
+test('detects fullwidth display names that copy configured admin handles', () => {
+  const result = analyzeMessage({
+    text: 'message me for support',
+    user: { first_name: 'ＢＲＸ８６', adminUsernames: ['brx86'] }
+  });
+  assert.equal(result.scam_type, 'impersonation');
+  assert.ok(result.confidence >= 60);
+});
+
 test('detects investment profit testimonial Telegram scams', () => {
   const result = analyzeMessage({
     text: 'From Zero to $685K profit I joined Alpha Trading (https://t.me/alpha_trading_cricle) 16 months ago and within the past 3 months I earned $685,000 thanks to the coaching and education Mr Theo provides. The strategy and community support made all the difference.',
@@ -83,4 +92,45 @@ test('detects admin-targeted institutional partnership outreach lures', () => {
   assert.equal(result.scam_type, 'investment_scam');
   assert.ok(result.confidence >= 70);
   assert.match(result.evidence.join('\n'), /partnership outreach/);
+});
+
+test('detects emoji-obfuscated gambling bonus promotions', () => {
+  const result = analyzeMessage({
+    text: '🔤🔤 GAME is dropping 💲1️⃣0️⃣0️⃣ for all new players! 💰 Claim the bonus and bet on the Spain vs. Argentina final. Funds hit your wallet instantly. Get in now❗️',
+    user: { username: 'promo_account' }
+  });
+  assert.equal(result.is_scam, true);
+  assert.equal(result.recommended_action, 'ban');
+  assert.equal(result.scam_type, 'gambling_promotion');
+  assert.ok(result.confidence >= 90);
+  assert.match(result.evidence.join('\n'), /gambling bonus promotion/);
+});
+
+test('does not flag ordinary gambling discussion', () => {
+  const result = analyzeMessage({
+    text: 'Do you think Spain will win the final? I do not gamble, but the betting odds surprised me.',
+    user: { username: 'sports_fan' }
+  });
+  assert.equal(result.is_scam, false);
+  assert.ok(result.confidence < 70);
+  assert.doesNotMatch(result.evidence.join('\n'), /gambling bonus promotion/);
+});
+
+test('does not flag warnings about gambling promotions', () => {
+  const result = analyzeMessage({
+    text: 'Admins urgently warned new players that casino signup bonus offers expire now. Never trust them.',
+    user: { username: 'community_moderator' }
+  });
+  assert.equal(result.is_scam, false);
+  assert.ok(result.confidence < 70);
+  assert.doesNotMatch(result.evidence.join('\n'), /gambling bonus promotion/);
+});
+
+test('does not flag warnings that quote gambling promotion copy', () => {
+  const result = analyzeMessage({
+    text: 'Admins: do not claim the bonus. Casino scammers say funds hit your wallet instantly. Report these BC GAME messages.',
+    user: { username: 'community_moderator' }
+  });
+  assert.notEqual(result.scam_type, 'gambling_promotion');
+  assert.doesNotMatch(result.evidence.join('\n'), /gambling bonus promotion/);
 });

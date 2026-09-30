@@ -1,3 +1,5 @@
+import { canonicalizeMessageText, detectGamblingPromotion } from './message-patterns.js';
+
 const URGENCY = ['urgent', 'hurry', 'fast', 'last chance', 'limited', 'now', 'expires'];
 const CRYPTO_LURES = ['airdrop', 'free usdt', 'giveaway', 'double your', 'seed phrase', 'private key'];
 const WALLET_LURE_PATTERNS = [
@@ -37,7 +39,7 @@ function matchesAny(text, terms) {
 }
 
 function normalizeHandle(value = '') {
-  return String(value).toLowerCase().replace(/^@/, '').replace(/[^a-z0-9]/g, '');
+  return String(value).normalize('NFKC').toLowerCase().replace(/^@/, '').replace(/[^a-z0-9]/g, '');
 }
 
 function adminImpersonationMatches(user = {}) {
@@ -51,17 +53,19 @@ function adminImpersonationMatches(user = {}) {
 }
 
 export function analyzeMessage({ text = '', user = {}, globalIntel = null }) {
+  const normalizedText = canonicalizeMessageText(text);
   const evidence = [];
-  const urgency = matchesAny(text, URGENCY);
-  const lures = matchesAny(text, CRYPTO_LURES);
-  const walletLures = WALLET_LURE_PATTERNS.filter((pattern) => pattern.test(text));
+  const urgency = matchesAny(normalizedText, URGENCY);
+  const lures = matchesAny(normalizedText, CRYPTO_LURES);
+  const walletLures = WALLET_LURE_PATTERNS.filter((pattern) => pattern.test(normalizedText));
   const userIdentityText = `${user.username || ''} ${user.first_name || ''}`;
-  const impersonation = matchesAny(text, IMPERSONATION);
+  const impersonation = matchesAny(normalizedText, IMPERSONATION);
   const identityImpersonation = matchesAny(userIdentityText, IMPERSONATION);
-  const links = LINK_PATTERNS.filter((pattern) => pattern.test(text));
-  const investmentTestimonials = INVESTMENT_TESTIMONIAL_PATTERNS.filter((pattern) => pattern.test(text));
-  const partnershipLures = PARTNERSHIP_LURE_PATTERNS.filter((pattern) => pattern.test(text));
-  const dmHelp = DM_HELP_PATTERNS.filter((pattern) => pattern.test(text));
+  const links = LINK_PATTERNS.filter((pattern) => pattern.test(normalizedText));
+  const investmentTestimonials = INVESTMENT_TESTIMONIAL_PATTERNS.filter((pattern) => pattern.test(normalizedText));
+  const partnershipLures = PARTNERSHIP_LURE_PATTERNS.filter((pattern) => pattern.test(normalizedText));
+  const dmHelp = DM_HELP_PATTERNS.filter((pattern) => pattern.test(normalizedText));
+  const gamblingPromotion = detectGamblingPromotion(normalizedText);
   const adminCopycats = adminImpersonationMatches(user);
   const adminRenameCopycat = Boolean(user.adminRenameCopycat);
 
@@ -94,6 +98,10 @@ export function analyzeMessage({ text = '', user = {}, globalIntel = null }) {
     score += 55;
     evidence.push('Investment/partnership outreach lure');
   }
+  if (gamblingPromotion.matched) {
+    score += 85;
+    evidence.push('High-confidence gambling bonus promotion');
+  }
   if (dmHelp.length) {
     score += 40;
     evidence.push('Suspicious request to move help/support into DMs');
@@ -113,7 +121,7 @@ export function analyzeMessage({ text = '', user = {}, globalIntel = null }) {
   }
 
   const confidence = Math.max(0, Math.min(99, score));
-  const scamType = investmentTestimonials.length || partnershipLures.length ? 'investment_scam' : impersonation.length || identityImpersonation.length || adminCopycats.length || adminRenameCopycat || dmHelp.length ? 'impersonation' : lures.length || walletLures.length ? 'giveaway' : links.length ? 'phishing' : 'other';
+  const scamType = investmentTestimonials.length || partnershipLures.length ? 'investment_scam' : gamblingPromotion.matched ? 'gambling_promotion' : impersonation.length || identityImpersonation.length || adminCopycats.length || adminRenameCopycat || dmHelp.length ? 'impersonation' : lures.length || walletLures.length ? 'giveaway' : links.length ? 'phishing' : 'other';
   const isScam = confidence >= 70;
   const recommendedAction = confidence >= 90 ? 'ban' : confidence >= 70 ? 'warn' : 'ignore';
 

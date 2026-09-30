@@ -10,11 +10,20 @@ version: 1.0.0
 
 This skill helps the Tracabot agent (and external OpenClaw agents) make high-quality decisions about what belongs in Working Memory vs. Shared Memory vs. the admin review queue.
 
+## Two curators, different jobs
+
+Do not treat these as the same tool.
+
+- `decide_artefact_action` on `node ./bin/tracabot-skill.js` is a recommendation only. It scores a draft and can look up prior admin history. It returns `local_wm_draft`, `commit_to_swm`, or `queue_for_admin_review`. It does not promote a Working Memory Knowledge Asset by itself.
+- `node ./bin/tracabot-curator.js --once` is the production DKG gate. It lists unsealed Working Memory drafts, drops weak or expired ones, and asks the OpenCode `tracabot-curator` agent (`9router/cx/gpt-6-sol`, variant `medium`) for JSON. Promote only when the message itself supports concrete fraud, impersonation, or harmful scam behavior and the evidence string is an exact substring. Invalid, unavailable, or `hold` reviews never share. Run one instance per bot identity.
+
 ## Tool
 
-Call via the tracabot skill bridge or directly:
+Call the recommendation through the tracabot skill bridge:
 
-`sort_conversation_artifact` (extended) and new `decide_artefact_action`
+`decide_artefact_action`
+
+Use `sort_conversation_artifact` only for the separate OpenClaw learning-loop sorter. That path is not the DKG Working Memory curator.
 
 Core logic:
 - Takes a draft artefact or monitored chat event + optional graph context.

@@ -14,7 +14,9 @@
   "bin": {
     "tracabot": "bin/tracabot.js",
     "tracabot-skill": "bin/tracabot-skill.js",
-    "tracabot-openclaw-learning-loop": "bin/openclaw-learning-loop.js"
+    "tracabot-openclaw-learning-loop": "bin/openclaw-learning-loop.js",
+    "tracabot-curator": "bin/tracabot-curator.js",
+    "tracabot-telegram-artifacts": "bin/telegram-artifacts.js"
   },
   "scripts": {
     "start": "node ./bin/tracabot.js",
