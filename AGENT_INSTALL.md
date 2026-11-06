@@ -342,6 +342,55 @@ And publish `docs/TRACABOT_CHALLENGE_ASSET.md` as a Knowledge Asset (or use the 
 
 ---
 
+## Phase 6.4: Public Reader and Community Onboarding
+
+The reader is local-only by default and adds no dependencies:
+
+```bash
+npm run web
+# http://127.0.0.1:8787
+```
+
+It exposes free, sanitized read routes (`/api/public/status`, `/incidents`, `/campaigns`, `/policy`, `/onboarding`). Do not describe the endpoint as public until you have placed it behind a reverse proxy or private tunnel and verified access yourself. The reader does not expose raw private graph data.
+
+Writes are disabled until you configure operator-issued tokens:
+
+```env
+TRACABOT_COMMUNITY_TOKENS=[{"token":"replace-with-a-long-random-value","communityId":"community-one","name":"Community One","scopes":["evidence:write"]}]
+```
+
+Generate each token with `openssl rand -hex 32` and deliver it privately. The token is bound to one `communityId`; request bodies cannot override the tenant. `POST /api/public/evidence` stages only `observation` or `allegation` and requires an `Idempotency-Key` header. It never accepts admin verification, confirmed-scam status, confidence, or ban instructions.
+
+Membership requests are recorded for manual review:
+
+```bash
+npm run membership -- list
+npm run membership -- approve <requestId> "Verified community admin"
+npm run membership -- reject <requestId> "No verifiable contact"
+```
+
+Approval only records a local decision. It does not create a token, a graph, or a chain transaction. After approval, verify the community's DKG node and graph, add a scoped token, and restart the reader.
+
+Automatic evidence promotion is controlled by:
+
+```env
+TRACABOT_AUTO_PROMOTE_EVIDENCE=true
+TRACABOT_EVIDENCE_HIGH_CONFIDENCE_THRESHOLD=85
+TRACABOT_EVIDENCE_PROMOTION_THRESHOLD=85
+```
+
+Admin bans are evidence signals, not proof. Model-only suspicion cannot become a confirmed-scam record or cause a ban. Retracted reviews suppress promotion. See `docs/PUBLIC_GRAPH.md` for the full boundary and API examples.
+
+The exact DKG/OpenClaw setup supported by this repository remains:
+
+```bash
+npm install -g @origintrail-official/dkg
+dkg openclaw setup --workspace /root/.openclaw/workspace --name tracabot --port 9200 --no-fund
+curl -fsS http://127.0.0.1:9200/api/status
+```
+
+An external OriginTrail edge-node installer may exist, but this repository does not verify or deploy it. Do not claim an edge node, chain deployment, Context Graph registration, or Verified Memory publish until the operator verifies it.
+
 ## Phase 7: Switching to the Public Shared Graph (When Ready)
 
 When the user wants their community to benefit from (and contribute to) the global `tracabot` intelligence:
@@ -384,6 +433,9 @@ Start diagnostics with `sudo systemctl status tracabot.service` and `sudo journa
 - [ ] No webhook or competing `getUpdates` process uses the bot token
 - [ ] `npm start` succeeds and `/start` plus `/scan` work
 - [ ] (Optional) Learning loop running
+- [ ] (Optional) `npm run web` serves the sanitized reader; public exposure verified separately
+- [ ] (Optional) Community write tokens are scoped, random, and stored outside Git
+- [ ] (Optional) Membership requests reviewed manually; no automatic write access
 - [ ] (Production) `docs/tracabot.service.example` installed with correct paths/user and service is active
 
 Once these are green, the installation is complete and the bot is contributing to (or benefiting from) shared DKG intelligence.

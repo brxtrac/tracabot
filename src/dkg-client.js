@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createHmac } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { canonicalizeMessageText, detectGamblingPromotion } from './message-patterns.js';
+import { publicIdFor } from './evidence-policy.js';
 
 const NS = 'https://tracabot.org/ontology#';
 const DCTERMS_CREATED = 'http://purl.org/dc/terms/created';
@@ -345,6 +346,10 @@ function eventTriples(event, pseudonymKey = '') {
     { subject, predicate: `${NS}localConfidence`, object: literal(event.payload?.local_confidence ?? '') },
     { subject, predicate: `${NS}dkgConfidence`, object: literal(event.payload?.dkg_confidence ?? '') },
     { subject, predicate: `${NS}scamType`, object: literal(event.payload?.scam_type || '') },
+    { subject, predicate: `${NS}claimLevel`, object: literal(event.payload?.claim_level || '') },
+    { subject, predicate: `${NS}evidenceFingerprint`, object: literal(event.payload?.evidence_fingerprint || '') },
+    { subject, predicate: `${NS}evidencePolicyVersion`, object: literal(event.payload?.evidence_policy_version || '') },
+    { subject, predicate: `${NS}sourceEventType`, object: literal(event.payload?.source_event_type || '') },
     { subject, predicate: `${NS}evidence`, object: literal(JSON.stringify(evidence)) },
     { subject, predicate: `${NS}status`, object: literal(event.payload?.publication_status || status) }
   ];
@@ -869,6 +874,7 @@ export class DkgClient {
 
     let bindings = exact.length ? await query(exact) : [];
     if (exact.length) bindings.push(...await query(exact, 'shared-working-memory'));
+    const exactActorMatch = exact.length > 0 && bindings.length > 0;
     if (!bindings.length && fallback.length) bindings = await query(fallback);
     if (!bindings.length && fallback.length) bindings = await query(fallback, 'shared-working-memory');
 
@@ -878,6 +884,7 @@ export class DkgClient {
       .map(b => ({
         eventId: eventIdFromSource(b.s),
         eventType: cleanValue(b.eventType),
+        exactActorMatch,
         confidence: Number(cleanValue(b.confidence)) || 0,
         scamType: cleanValue(b.scamType),
         adminVerified: cleanValue(b.adminVerified) === 'true',
@@ -890,6 +897,7 @@ export class DkgClient {
       .map(b => ({
         eventId: eventIdFromSource(b.s),
         eventType: cleanValue(b.eventType),
+        exactActorMatch,
         confidence: Number(cleanValue(b.confidence)) || 0,
         scamType: cleanValue(b.scamType),
         adminVerified: cleanValue(b.adminVerified) === 'true',
@@ -979,6 +987,80 @@ export class DkgClient {
       }
     }
     return { events: [...byEvent.values()] };
+  }
+
+  /**
+   * Sanitized read for the public site. Returns only public campaign fields;
+   * never actor usernames, raw community ids, message text, or private evidence.
+   */
+  async queryPublicCampaigns({ limit = 20 } = {}) {
+    const max = Math.min(100, Math.max(1, Number(limit) || 20));
+    const sparql = `
+      SELECT ?g ?s ?confidence ?scamType ?created ?campaignKey ?campaignEventCount ?campaignCommunityCount ?domain ?wallet ?pattern ?communityToken ?actorIdentity ?claimLevel ?evidenceFingerprint WHERE {
+        GRAPH ?g {
+          ?s <${NS}eventType> "fraud_campaign" .
+          OPTIONAL { ?s <${NS}confidence> ?confidence . }
+          OPTIONAL { ?s <${NS}scamType> ?scamType . }
+          OPTIONAL { ?s <${DCTERMS_CREATED}> ?created . }
+          OPTIONAL { ?s <${NS}campaignKey> ?campaignKey . }
+          OPTIONAL { ?s <${NS}campaignEventCount> ?campaignEventCount . }
+          OPTIONAL { ?s <${NS}campaignCommunityCount> ?campaignCommunityCount . }
+          OPTIONAL { ?s <${NS}scamDomain> ?domain . }
+          OPTIONAL { ?s <${NS}wallet> ?wallet . }
+          OPTIONAL { ?s <${NS}scamPattern> ?pattern . }
+          OPTIONAL { ?s <${NS}communityToken> ?communityToken . }
+          OPTIONAL { ?s <${NS}actorIdentity> ?actorIdentity . }
+          OPTIONAL { ?s <${NS}claimLevel> ?claimLevel . }
+          OPTIONAL { ?s <${NS}evidenceFingerprint> ?evidenceFingerprint . }
+        }
+      } LIMIT ${max * 20}
+    `;
+    const rows = await this.queryBindings(sparql, { view: 'shared-working-memory', includeSharedMemory: false });
+    const byEvent = new Map();
+    for (const binding of rows) {
+      if (!isProductionBindingForContext(binding, this.config.contextGraph)) continue;
+      const eventId = eventIdFromSource(binding.s);
+      if (!eventId) continue;
+      const confidence = numeric(binding.confidence || '0');
+      const claimLevel = cleanValue(binding.claimLevel);
+      if (confidence < 70 && !['confirmed_scam', 'high_confidence_flag', 'admin_enforcement'].includes(claimLevel)) continue;
+      let record = byEvent.get(eventId);
+      if (!record) {
+        record = {
+          publicId: publicIdFor({ id: eventId }),
+          eventType: 'fraud_campaign',
+          claimLevel: claimLevel || (confidence >= 85 ? 'high_confidence_flag' : 'observation'),
+          confidence,
+          scamType: cleanValue(binding.scamType) || 'campaign',
+          createdAt: cleanValue(binding.created),
+          campaignKey: cleanValue(binding.campaignKey),
+          eventCount: numeric(binding.campaignEventCount || '0'),
+          communityCount: numeric(binding.campaignCommunityCount || '0'),
+          indicators: { domains: [], wallets: [], patterns: [] },
+          actorRef: cleanValue(binding.actorIdentity),
+          communityRef: cleanValue(binding.communityToken),
+          evidenceFingerprint: cleanValue(binding.evidenceFingerprint),
+          evidenceRefs: [],
+          provenance: { policy: 'tracabot-evidence-v1', layer: 'shared_working_memory', source: 'context_graph' }
+        };
+        byEvent.set(eventId, record);
+      }
+      const domain = cleanValue(binding.domain);
+      const wallet = cleanValue(binding.wallet);
+      const pattern = cleanValue(binding.pattern);
+      if (domain && !record.indicators.domains.includes(domain)) record.indicators.domains.push(domain);
+      if (wallet && !record.indicators.wallets.includes(wallet)) record.indicators.wallets.push(wallet);
+      if (pattern && !record.indicators.patterns.includes(pattern)) record.indicators.patterns.push(pattern);
+    }
+    return [...byEvent.values()]
+      .sort((a, b) => Date.parse(b.createdAt || '') - Date.parse(a.createdAt || ''))
+      .slice(0, max)
+      .map((record) => ({
+        ...record,
+        summary: `Corroborated ${record.scamType} campaign shared across ${record.communityCount || 'multiple'} community reference${record.communityCount === 1 ? '' : 's'}.`,
+        evidenceCount: record.eventCount,
+        evidenceRootCount: record.eventCount
+      }));
   }
 
   async queryContextOracle({ userId = '', username = '', aliases = [], text = '' } = {}) {

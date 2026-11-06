@@ -198,6 +198,30 @@ test('loadConfig parses conversation artifact working-memory policy', () => {
   assert.throws(() => loadConfig({ TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS: '80' }), /TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS/);
 });
 
+test('loadConfig validates evidence policy and community write tokens', () => {
+  const defaults = loadConfig({});
+  assert.equal(defaults.autoPromoteEvidence, true);
+  assert.equal(defaults.publicHost, '127.0.0.1');
+  assert.deepEqual(defaults.communityTokens, []);
+  assert.equal(defaults.evidenceHighConfidenceThreshold, 85);
+  assert.equal(defaults.evidenceMinIndependentCommunities, 2);
+
+  const config = loadConfig({
+    TRACABOT_EVIDENCE_HIGH_CONFIDENCE_THRESHOLD: '90',
+    TRACABOT_EVIDENCE_MIN_INDEPENDENT_COMMUNITIES: '3',
+    TRACABOT_COMMUNITY_TOKENS: JSON.stringify([
+      { token: '0123456789abcdef', communityId: 'community-one', name: 'One' }
+    ])
+  });
+  assert.equal(config.evidenceHighConfidenceThreshold, 90);
+  assert.equal(config.evidenceMinIndependentCommunities, 3);
+  assert.equal(config.communityTokens[0].communityId, 'community-one');
+  assert.throws(() => loadConfig({ TRACABOT_COMMUNITY_TOKENS: 'not-json' }), /TRACABOT_COMMUNITY_TOKENS/);
+  assert.throws(() => loadConfig({ TRACABOT_COMMUNITY_TOKENS: JSON.stringify([{ token: 'short', communityId: 'x' }]) }), /at least 16/);
+  assert.throws(() => loadConfig({ TRACABOT_EVIDENCE_PROMOTION_THRESHOLD: '101' }), /TRACABOT_EVIDENCE_PROMOTION_THRESHOLD/);
+  assert.throws(() => loadConfig({ TRACABOT_PUBLIC_MAX_BODY_BYTES: '10' }), /TRACABOT_PUBLIC_MAX_BODY_BYTES/);
+});
+
 test('loadConfig parses pending review notification policy', () => {
   const defaults = loadConfig({});
   assert.equal(defaults.pendingReviewNotifications, true);

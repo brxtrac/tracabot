@@ -49,6 +49,29 @@ function parseKnownCampaignPatterns(value = '') {
     .filter(Boolean);
 }
 
+function parseCommunityTokens(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`TRACABOT_COMMUNITY_TOKENS must be a JSON array: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!Array.isArray(parsed)) throw new Error('TRACABOT_COMMUNITY_TOKENS must be a JSON array');
+  return parsed.map((entry, index) => {
+    const token = String(entry?.token || '').trim();
+    const communityId = String(entry?.communityId || entry?.community_id || '').trim();
+    if (token.length < 16) throw new Error(`TRACABOT_COMMUNITY_TOKENS[${index}].token must be at least 16 characters`);
+    if (!communityId || communityId.length > 128) throw new Error(`TRACABOT_COMMUNITY_TOKENS[${index}].communityId must be 1-128 characters`);
+    const scopes = Array.isArray(entry?.scopes) && entry.scopes.length ? entry.scopes : ['evidence:write'];
+    if (scopes.some((scope) => !['evidence:write'].includes(scope))) {
+      throw new Error(`TRACABOT_COMMUNITY_TOKENS[${index}].scopes supports only evidence:write`);
+    }
+    return { token, communityId, name: String(entry?.name || '').trim().slice(0, 120), scopes: [...new Set(scopes)] };
+  });
+}
+
 export function loadConfig(env = process.env) {
   const contextGraph = env.TRACABOT_CONTEXT_GRAPH || 'tracabot';
   const warnThreshold = Number(env.TRACABOT_WARN_THRESHOLD || 60);
@@ -124,6 +147,45 @@ export function loadConfig(env = process.env) {
   const knownCampaignPatterns = parseKnownCampaignPatterns(env.TRACABOT_KNOWN_CAMPAIGN_PATTERNS || '');
   if (!Number.isFinite(knownCampaignMinBanRoots) || knownCampaignMinBanRoots < 1 || knownCampaignMinBanRoots > 20) {
     throw new Error('TRACABOT_KNOWN_CAMPAIGN_MIN_BAN_ROOTS must be a number from 1 to 20');
+  }
+  const communityTokens = parseCommunityTokens(env.TRACABOT_COMMUNITY_TOKENS || '');
+  const evidenceHighConfidenceThreshold = Number(env.TRACABOT_EVIDENCE_HIGH_CONFIDENCE_THRESHOLD || 85);
+  const evidenceLocalConfidenceThreshold = Number(env.TRACABOT_EVIDENCE_LOCAL_CONFIDENCE_THRESHOLD || 60);
+  const evidenceMinIndependentSignals = Number(env.TRACABOT_EVIDENCE_MIN_INDEPENDENT_SIGNALS || 2);
+  const evidenceMinIndependentCommunities = Number(env.TRACABOT_EVIDENCE_MIN_INDEPENDENT_COMMUNITIES || 2);
+  const evidencePromotionThreshold = Number(env.TRACABOT_EVIDENCE_PROMOTION_THRESHOLD || 85);
+  const autoPromoteIntervalMs = Number(env.TRACABOT_AUTO_PROMOTE_INTERVAL_MS || 300000);
+  const publicPort = Number(env.TRACABOT_PUBLIC_PORT || 8787);
+  const publicRateLimitPerHour = Number(env.TRACABOT_PUBLIC_RATE_LIMIT_PER_HOUR || 30);
+  const publicJoinRateLimitPerHour = Number(env.TRACABOT_PUBLIC_JOIN_RATE_LIMIT_PER_HOUR || 5);
+  for (const [name, value] of [
+    ['TRACABOT_EVIDENCE_HIGH_CONFIDENCE_THRESHOLD', evidenceHighConfidenceThreshold],
+    ['TRACABOT_EVIDENCE_LOCAL_CONFIDENCE_THRESHOLD', evidenceLocalConfidenceThreshold],
+    ['TRACABOT_EVIDENCE_PROMOTION_THRESHOLD', evidencePromotionThreshold]
+  ]) {
+    if (!Number.isFinite(value) || value < 1 || value > 100) throw new Error(`${name} must be a number from 1 to 100`);
+  }
+  for (const [name, value] of [
+    ['TRACABOT_EVIDENCE_MIN_INDEPENDENT_SIGNALS', evidenceMinIndependentSignals],
+    ['TRACABOT_EVIDENCE_MIN_INDEPENDENT_COMMUNITIES', evidenceMinIndependentCommunities]
+  ]) {
+    if (!Number.isFinite(value) || value < 1 || value > 10) throw new Error(`${name} must be a number from 1 to 10`);
+  }
+  if (!Number.isFinite(autoPromoteIntervalMs) || autoPromoteIntervalMs < 30000) {
+    throw new Error('TRACABOT_AUTO_PROMOTE_INTERVAL_MS must be at least 30000');
+  }
+  if (!Number.isFinite(publicPort) || publicPort < 0 || publicPort > 65535) {
+    throw new Error('TRACABOT_PUBLIC_PORT must be a number from 0 to 65535');
+  }
+  const publicMaxBodyBytes = Number(env.TRACABOT_PUBLIC_MAX_BODY_BYTES || 32768);
+  if (!Number.isFinite(publicMaxBodyBytes) || publicMaxBodyBytes < 1024 || publicMaxBodyBytes > 1048576) {
+    throw new Error('TRACABOT_PUBLIC_MAX_BODY_BYTES must be a number from 1024 to 1048576');
+  }
+  for (const [name, value] of [
+    ['TRACABOT_PUBLIC_RATE_LIMIT_PER_HOUR', publicRateLimitPerHour],
+    ['TRACABOT_PUBLIC_JOIN_RATE_LIMIT_PER_HOUR', publicJoinRateLimitPerHour]
+  ]) {
+    if (!Number.isFinite(value) || value < 1 || value > 10000) throw new Error(`${name} must be a number from 1 to 10000`);
   }
   if (dkgMode !== 'openclaw-adapter') {
     throw new Error('TRACABOT_DKG_MODE currently supports only openclaw-adapter');
@@ -255,7 +317,22 @@ export function loadConfig(env = process.env) {
     dailySafeTipIntervalHours: Number(env.TRACABOT_DAILY_SAFE_TIP_INTERVAL_HOURS ?? 0),
     artefactReviewThreshold: Number(env.TRACABOT_ARTEFACT_REVIEW_THRESHOLD || 70),
     proactiveAlertCrossGroup: parseBoolean(env.TRACABOT_PROACTIVE_ALERT_CROSS_GROUP, true),
-    skillAllowUnauthenticatedWrites: parseBoolean(env.TRACABOT_SKILL_ALLOW_UNAUTHENTICATED_WRITES, false)
+    skillAllowUnauthenticatedWrites: parseBoolean(env.TRACABOT_SKILL_ALLOW_UNAUTHENTICATED_WRITES, false),
+    evidenceHighConfidenceThreshold,
+    evidenceLocalConfidenceThreshold,
+    evidenceMinIndependentSignals,
+    evidenceMinIndependentCommunities,
+    evidencePromotionThreshold,
+    autoPromoteEvidence: parseBoolean(env.TRACABOT_AUTO_PROMOTE_EVIDENCE, true),
+    autoPromoteIntervalMs,
+    publicHost: env.TRACABOT_PUBLIC_HOST || '127.0.0.1',
+    publicPort,
+    publicBaseUrl: env.TRACABOT_PUBLIC_BASE_URL || '',
+    publicReadDkg: parseBoolean(env.TRACABOT_PUBLIC_READ_DKG, true),
+    publicRateLimitPerHour,
+    publicJoinRateLimitPerHour,
+    publicMaxBodyBytes,
+    communityTokens
   };
 }
 

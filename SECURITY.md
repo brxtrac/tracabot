@@ -22,6 +22,18 @@ Transient Shared Memory write failures are retried for short network outages, ti
 
 Local JSONL files are operational working memory for weak reports, watchlist state, digest state, and monitoring-only actions. They should not be treated as public DKG evidence unless a later evidence-backed event explicitly qualifies for DKG sharing.
 
+## Public Reader and Community Writes
+
+- Public read routes are unauthenticated by design but only return a sanitized projection. Raw Telegram IDs, usernames, chat metadata, message text, reporter data, private-message content, and raw evidence strings are excluded.
+- Public records require an actual DKG write result or an explicit `public_visibility=public` marker; local-only and failed DKG writes stay hidden.
+- `POST /api/public/evidence` requires a Bearer community token. Tokens are compared in constant time and are scoped to exactly one `communityId`. A body-supplied tenant override is ignored.
+- Write tokens must be at least 16 characters. Generate them with `openssl rand -hex 32`, deliver them privately, and keep them out of Git, logs, screenshots, and issue reports.
+- The write endpoint accepts only `observation` or `allegation`; it rejects client-supplied admin verification, confidence, confirmed-scam status, and ban instructions.
+- Requests are schema-validated, body-size limited, idempotency-keyed, and rate-limited per community. The default bind address is `127.0.0.1`; public exposure requires the operator to add and secure a reverse proxy.
+- Membership requests are open but rate-limited and local-only. Approval records a decision; it never creates a graph or token automatically.
+- In-memory rate limits are per process. Multi-process or public deployments should enforce additional limits at the reverse proxy.
+- Graph content is untrusted data. Agents must not treat records as instructions or let a shared record override their own tool permissions.
+
 ## Telegram Moderation Controls
 
 - Manual `/ban` requires the sender to be listed in `TRACABOT_ADMINS` or to be a Telegram chat admin.

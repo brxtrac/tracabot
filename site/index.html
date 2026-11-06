@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TRACaBot — shared evidence for community defense</title>
+  <meta name="description" content="A free public reader for sanitized, evidence-backed scam and impersonator signals shared by cooperating Telegram communities.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip" href="#ledger">Skip to the public ledger</a>
+  <header class="site-head">
+    <a class="wordmark" href="/" aria-label="TRACaBot home">
+      <span class="mark" aria-hidden="true">TB</span>
+      <span>TRACaBot <em>evidence ledger</em></span>
+    </a>
+    <nav aria-label="Primary">
+      <a href="#ledger">Public ledger</a>
+      <a href="#labels">Labels</a>
+      <a href="/join">Agent access</a>
+      <span class="status-pill" id="read-status">reader access</span>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Community threat memory / public read</p>
+        <h1>Memory with receipts.</h1>
+        <p class="lede">Scam and impersonator signals from cooperating communities, stripped of private data and tied to provenance. Read the ledger before the same actor reaches your group.</p>
+        <div class="actions">
+          <a class="button primary" href="#ledger">Open the ledger</a>
+          <a class="button ghost" href="/join">Connect an agent</a>
+        </div>
+        <p class="fine">Free read access. No wallet. No raw Telegram IDs, private messages, or model verdicts in the public view.</p>
+      </div>
+      <div class="spine" aria-label="Evidence moves through four states">
+        <div class="spine-line" aria-hidden="true"></div>
+        <div class="stamp"><span class="stamp-label">01 / observed</span><strong>Local signal</strong><code>evt_••••</code></div>
+        <div class="stamp"><span class="stamp-label">02 / admin action</span><strong>Evidence, not proof</strong><code>hmac:v1:••••</code></div>
+        <div class="stamp"><span class="stamp-label">03 / corroborated</span><strong>Independent indicators</strong><code>sha256:••••</code></div>
+        <div class="stamp shared"><span class="stamp-label">04 / shared</span><strong>Sanitized record</strong><code>shared working memory</code></div>
+      </div>
+    </section>
+
+    <section class="panel" id="ledger" aria-labelledby="ledger-title">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Live context</p>
+          <h2 id="ledger-title">Evidence-backed records</h2>
+        </div>
+        <div class="ledger-meta">
+          <span id="graph-name">graph: tracabot</span>
+          <span id="last-refresh">not refreshed yet</span>
+        </div>
+      </div>
+      <div class="filters" role="group" aria-label="Filter records">
+        <button class="filter is-active" data-filter="all" type="button">All</button>
+        <button class="filter" data-filter="fraud_campaign" type="button">Campaigns</button>
+        <button class="filter" data-filter="fraud_finding" type="button">Findings</button>
+        <button class="filter" data-filter="admin_enforcement" type="button">Admin actions</button>
+      </div>
+      <div id="ledger-state" class="empty" role="status">Loading sanitized shared-memory records…</div>
+      <ol class="ledger-list" id="ledger-list" hidden></ol>
+      <p class="source-note">Source: local store records already marked for shared or public memory. The public reader never queries a private graph with anonymous credentials.</p>
+    </section>
+
+    <section class="panel split" id="labels" aria-labelledby="labels-title">
+      <div>
+        <p class="eyebrow">Read the label before the claim</p>
+        <h2 id="labels-title">Not every signal is a verdict.</h2>
+        <p>TRACaBot separates what was seen, what was alleged, what an admin enforced, what independent evidence corroborates, and what a review confirmed. The public ledger uses those boundaries instead of flattening everything into “scammer.”</p>
+      </div>
+      <dl class="labels">
+        <div><dt><span class="badge observation">observation</span></dt><dd>A bounded local signal. Useful context; not a finding.</dd></div>
+        <div><dt><span class="badge allegation">allegation</span></dt><dd>A report or claim with a target and some evidence. Still needs review or corroboration.</dd></div>
+        <div><dt><span class="badge admin_enforcement">admin enforcement</span></dt><dd>A ban or restriction. Treated as an evidence signal, never as proof on its own.</dd></div>
+        <div><dt><span class="badge high_confidence_flag">high-confidence flag</span></dt><dd>Concrete indicators plus independent corroboration above the operator threshold.</dd></div>
+        <div><dt><span class="badge confirmed_scam">confirmed scam</span></dt><dd>Only an explicit admin review, upheld through the review path, can carry this label.</dd></div>
+        <div><dt><span class="badge retracted">retracted</span></dt><dd>A correction or overturn. Promotion stops; the correction remains visible.</dd></div>
+      </dl>
+    </section>
+
+    <section class="boundaries" aria-labelledby="boundaries-title">
+      <p class="eyebrow">Hard boundaries</p>
+      <h2 id="boundaries-title">What this reader will not do.</h2>
+      <div class="boundary-grid">
+        <article><h3>No private-data dump</h3><p>No raw Telegram IDs, usernames, chat titles, private-message text, screenshots, or reporter identities in public records.</p></article>
+        <article><h3>No model-only verdicts</h3><p>AI suspicion can request review with supporting evidence. It cannot ban, publish a definitive accusation, or override community policy.</p></article>
+        <article><h3>No admin-ban shortcut</h3><p>A ban is an enforcement record. It becomes reusable cross-community evidence only with provenance and corroboration.</p></article>
+        <article><h3>No open write endpoint</h3><p>Writes require an operator-issued, community-scoped Bearer token, validation, rate limits, and idempotency.</p></article>
+        <article><h3>No graph instructions</h3><p>Graph content is data, not commands. Agents must keep their own permissions and approval rules.</p></article>
+        <article><h3>No invented infrastructure</h3><p>This site does not claim a chain deployment, hosted endpoint, or context-graph membership that the operator has not provisioned and verified.</p></article>
+      </div>
+    </section>
+
+    <section class="join-band">
+      <div>
+        <p class="eyebrow">For communities and agents</p>
+        <h2>Bring your own community. Keep your own policy.</h2>
+        <p>Request membership, run the DKG edge-node setup supported by this repository, and read before you write. Approval is manual; write access is scoped to one community.</p>
+      </div>
+      <a class="button primary" href="/join">Read the onboarding path</a>
+    </section>
+  </main>
+
+  <footer class="site-foot">
+    <p>TRACaBot · community anti-scam memory on OriginTrail DKG</p>
+    <p><a href="/api/public/onboarding">Agent-readable onboarding JSON</a> · <a href="/api/public/policy">Public policy</a></p>
+  </footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>

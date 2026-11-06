@@ -118,6 +118,27 @@ TRACaBot applies graduated autonomous enforcement by default: low-confidence eve
 
 Conversation artifact logging is controlled by `TRACABOT_WM_ARTIFACTS`, `TRACABOT_WM_ARTIFACT_MIN_CONFIDENCE`, `TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS`, `TRACABOT_WM_ARTIFACT_REDACT`, and `TRACABOT_WM_ARTIFACT_SHARE_LOW_CONFIDENCE`. By default, raw identifiers are redacted and low-quality artifacts stay local.
 
+## Public Reader and Bounded Community Writes
+
+TRACaBot ships a dependency-free public reader and a scoped evidence API:
+
+```bash
+npm run web
+# local by default: http://127.0.0.1:8787
+```
+
+The reader is free and unauthenticated. It returns only sanitized evidence already marked for shared/public memory: hashed public IDs, claim level, normalized domains/wallets/patterns, HMAC actor references, counts, timestamps, and provenance. It never returns raw Telegram IDs, usernames, chat titles, private messages, screenshots, or reporter data. Campaign summaries can also be read from DKG Shared Working Memory when `TRACABOT_PUBLIC_READ_DKG=true`.
+
+Writes are closed by default. Configure an operator-issued token per community:
+
+```env
+TRACABOT_COMMUNITY_TOKENS=[{"token":"replace-with-a-long-random-value","communityId":"community-one","name":"Community One","scopes":["evidence:write"]}]
+```
+
+`POST /api/public/evidence` accepts only `observation` or `allegation`, requires consent, an idempotency key, validation, and per-community rate limits. It stages local working memory; it cannot submit `admin_verified`, `confirmed_scam`, confidence, or ban instructions. `POST /api/public/join-requests` records membership interest for manual operator review and grants nothing automatically.
+
+The evidence policy separates observations, allegations, admin enforcement, high-confidence flags, confirmed scam findings, and retractions. An admin ban is an evidence signal, never proof on its own. Model-only suspicion can request review but cannot create a confirmed-scam record. Qualifying corroborated evidence is promoted to DKG Shared Working Memory automatically by `npm run promote`, the Telegram proactive scan, or the running reader; `review_overturned` stops promotion. See [docs/PUBLIC_GRAPH.md](./docs/PUBLIC_GRAPH.md) for endpoints, claim levels, token provisioning, membership approval, and the exact supported DKG/OpenClaw setup commands.
+
 ## LLM Backends
 
 TRACaBot uses the LLM for two bounded tasks: natural-language Telegram replies and intent classification for direct bot mentions/replies. It does not use LLM output as direct enforcement authority. Slash commands, obvious natural-language intents, private-info refusals, and most scam scoring are deterministic to avoid wasting tokens.

@@ -90,6 +90,40 @@ Expected behavior:
 - Failed drafts are marked once and not retried forever.
 - Redacted artifacts do not write raw secrets, long Telegram IDs, or full wallet addresses into DKG payload text.
 
+## Evidence Policy, Promotion, and Public API
+
+Focused checks:
+
+```bash
+node --test test/evidence-policy.test.js test/evidence-promoter.test.js test/public-server.test.js
+```
+
+Run a promotion pass without a live Telegram group:
+
+```bash
+npm run promote
+```
+
+Expected behavior:
+
+- Admin ban alone stays `admin_enforcement` and is not a confirmed scam.
+- Model-only suspicion stays an observation/review item and cannot promote.
+- Corroborated high-confidence evidence is promoted once; repeated runs do not duplicate it.
+- A DKG failure records `evidence_promotion_failed` and leaves the source retryable.
+- `review_overturned` suppresses promotion.
+- Public records contain no raw Telegram IDs, usernames, chat titles, message text, or reporter data.
+- Write tokens are tenant-scoped; body-supplied tenant overrides are ignored.
+- Membership requests require consent, are deduplicated, and grant nothing automatically.
+
+Start the local reader:
+
+```bash
+npm run web
+curl -fsS http://127.0.0.1:8787/api/public/status
+```
+
+No live public deployment, chain transaction, or graph registration is created by these tests.
+
 ## Live DKG Setup
 
 Install and configure DKG/OpenClaw:

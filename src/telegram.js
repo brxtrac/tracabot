@@ -22,6 +22,17 @@ import { extractDomains, extractPatterns, extractWallets } from './dkg-client.js
 import { buildAgentIntentPrompt, buildAlertReplyClassifierPrompt, buildGeneralPrompt, buildSafetyPrompt, fallbackSafetyReply, isOnTopicDirectAddress, isSafetyQuestion, offTopicRedirect, sanitizeGeneralReply, sanitizeSafetyReply, shouldConversationallyReply } from './conversation.js';
 import { redactedOpenClawStatus } from './openclaw-config.js';
 import { TracabotSkillService } from './skill-service.js';
+import { evaluateEvidence, EVIDENCE_POLICY_VERSION } from './evidence-policy.js';
+import { promoteEligibleEvidence } from './evidence-promoter.js';
+
+export const CAMPAIGN_POLICIES = Object.freeze([
+  Object.freeze({
+    id: 'bcgame',
+    label: 'BC GAME',
+    patterns: Object.freeze([...DEFAULT_KNOWN_CAMPAIGN_PATTERNS]),
+    rule: 'Ban only with an exact Telegram ID trusted prior admin-ban OR an independently confirmed campaign (admin bans from at least two communities) with a shared domain or wallet. Name alone never bans. Overturned decisions are protected.'
+  })
+]);
 
 export const TELEGRAM_COMMANDS = [
   { command: 'start', description: 'Open Tracabot protection menu' },
@@ -681,7 +692,13 @@ export class TelegramShieldBot {
     if (target.is_bot === true || String(target.id) === String(await this.getBotId().catch(() => ''))) {
       return { banned: false, reason: 'protected_bot', attempted: 0, deleted: 0, failed: 0 };
     }
-    if (await this.isTelegramChatAdmin(chatId, target.id)) {
+    let protectedAdmin;
+    try {
+      protectedAdmin = await this.isTelegramChatAdmin(chatId, target.id, { throwOnFailure: true });
+    } catch {
+      return { banned: false, reason: 'admin_lookup_failed', attempted: 0, deleted: 0, failed: 0 };
+    }
+    if (protectedAdmin) {
       return { banned: false, reason: 'protected_admin', attempted: 0, deleted: 0, failed: 0 };
     }
     if (!await this.hasBanRights(chatId)) {
@@ -1015,7 +1032,7 @@ export class TelegramShieldBot {
   async hasBanRights(chatId) {
     try {
       const member = await this.call('getChatMember', { chat_id: chatId, user_id: await this.getBotId() });
-      return member.status === 'administrator' && member.can_restrict_members !== false;
+      return member.status === 'administrator' && member.can_restrict_members === true;
     } catch {
       return false;
     }
@@ -1043,14 +1060,17 @@ export class TelegramShieldBot {
     }
   }
 
-  async isTelegramChatAdmin(chatId, userId) {
+  async isTelegramChatAdmin(chatId, userId, { throwOnFailure = false, requireLiveLookup = false } = {}) {
     if (!userId) return false;
-    const admins = await this.getChatAdmins(chatId);
-    if (admins.some((admin) => String(admin.id) === String(userId))) return true;
+    if (!requireLiveLookup) {
+      const admins = await this.getChatAdmins(chatId);
+      if (admins.some((admin) => String(admin.id) === String(userId))) return true;
+    }
     try {
       const member = await this.call('getChatMember', { chat_id: chatId, user_id: userId });
       return ['creator', 'administrator'].includes(member.status);
-    } catch {
+    } catch (error) {
+      if (throwOnFailure) throw error;
       return false;
     }
   }
@@ -1205,6 +1225,37 @@ export class TelegramShieldBot {
       trac_backed_global_authority: verifiedMemoryAuthority,
       publish_false_positive: verifiedMemoryAuthority
     };
+  }
+
+  chatCampaignPolicyEnabled(chatId, policyId) {
+    if (!chatId || !CAMPAIGN_POLICIES.some((policy) => policy.id === policyId)) return false;
+    const latest = [...this.store.all()].reverse().find((event) => event.event_type === 'campaign_policy_setting_changed'
+      && String(event.chat?.id || '') === String(chatId)
+      && event.payload?.campaign_policy_id === policyId);
+    return latest?.payload?.enabled === true;
+  }
+
+  activeCampaignPolicy(chatId, target) {
+    return CAMPAIGN_POLICIES.find((policy) => this.chatCampaignPolicyEnabled(chatId, policy.id)
+      && matchKnownCampaignFingerprint(target, policy.patterns));
+  }
+
+  campaignSettingsText(chatId) {
+    return [
+      'Live campaign policies',
+      '',
+      ...CAMPAIGN_POLICIES.map((policy) => `${policy.label}: ${this.chatCampaignPolicyEnabled(chatId, policy.id) ? 'added (on)' : 'not added (off)'}\n${policy.rule}`),
+      '',
+      `Global campaign enforcement: ${this.config.knownCampaignAutoBan === false ? 'disabled' : 'enabled'}.`,
+      'Explicit opt-in per chat. Only actual chat admins can add/remove policies. Enforcement also requires bot admin and ban permission.'
+    ].join('\n');
+  }
+
+  campaignSettingsKeyboard(requesterId, chatId) {
+    return [
+      ...CAMPAIGN_POLICIES.map((policy) => [button(`${this.chatCampaignPolicyEnabled(chatId, policy.id) ? 'Remove' : 'Add'} ${policy.label}`, callbackData('campaign-policy-set', requesterId, policy.id, this.chatCampaignPolicyEnabled(chatId, policy.id) ? 'off' : 'on'))]),
+      [button('Settings', callbackData('settings', requesterId))]
+    ];
   }
 
   chatJoinChallengeEnabled(chatId) {
@@ -1531,6 +1582,19 @@ export class TelegramShieldBot {
       user: actorFromMessage(message),
       payload: decoratedPayload
     };
+    const policyAssessment = evaluateEvidence(event, {
+      history: this.store.all(),
+      policy: {
+        highConfidenceThreshold: this.config.evidenceHighConfidenceThreshold,
+        localConfidenceThreshold: this.config.evidenceLocalConfidenceThreshold,
+        minIndependentSignals: this.config.evidenceMinIndependentSignals,
+        minIndependentCommunities: this.config.evidenceMinIndependentCommunities,
+        promotionThreshold: this.config.evidencePromotionThreshold
+      }
+    });
+    decoratedPayload.claim_level = decoratedPayload.claim_level || policyAssessment.claimLevel;
+    decoratedPayload.evidence_fingerprint = decoratedPayload.evidence_fingerprint || policyAssessment.evidenceFingerprint;
+    decoratedPayload.evidence_policy_version = decoratedPayload.evidence_policy_version || EVIDENCE_POLICY_VERSION;
     const existingEvent = deterministicBasis ? this.store.all().find((item) => item.id === event.id) : null;
     if (existingEvent) {
       if (['risk_review_needed', 'risk_action_suppressed', 'proactive_cross_group_warning'].includes(eventType)
@@ -2220,6 +2284,7 @@ export class TelegramShieldBot {
       `🛡️ Review notifications: ${reviewNoticesOn ? '✅ on' : '⚪ off'}`,
       `⏱️ Review notification interval: ${reviewNoticeHours}h`,
       `🎚️ Protection profile: ${policy}`,
+      `Campaign policies: ${CAMPAIGN_POLICIES.filter((item) => this.chatCampaignPolicyEnabled(chatId, item.id)).map((item) => item.label).join(', ') || 'none (opt-in)'}`,
       '',
       'Tap a toggle below to switch the setting for this chat.'
     ].join('\n');
@@ -2237,6 +2302,7 @@ export class TelegramShieldBot {
       [button(`${challengeOn ? '✅' : '⚪'} Join challenge`, callbackData('challenge-set', requesterId, challengeOn ? 'off' : 'on')), button(`${languageOn ? '✅' : '⚪'} Natural language`, callbackData('conversation-set', requesterId, languageOn ? 'off' : 'on'))],
       [button(`${reviewNoticesOn ? '✅' : '⚪'} Review notices`, callbackData('review-notice-set', requesterId, reviewNoticesOn ? 'off' : 'on')), button(`⏱️ ${reviewNoticeHours}h`, callbackData('review-notice-interval', requesterId, String(nextHours)))],
       [button(`🎚️ ${policy}`, callbackData('policy-profile', requesterId, nextPolicy))],
+      [button('Campaign policies', callbackData('campaign-settings', requesterId))],
       [button('🩺 Status', callbackData('status', requesterId))],
       ...this.mainNavKeyboard(requesterId)
     ];
@@ -2664,7 +2730,7 @@ export class TelegramShieldBot {
       deleted_message_count: Number(extra.deletedMessageCount || 0),
       delete_attempt_count: Number(extra.deleteAttemptCount || 0),
       confidence: Math.max(Number(risk.confidence || 0), this.config.actionThreshold || 85),
-      admin_verified: true,
+      admin_verified: extra.adminVerified ?? true,
       scam_type: risk.scam_type || 'admin_action',
       evidence: [...(risk.evidence || []), reason, extra.sangmataEvidence || '', extra.deletedMessageCount ? `${extra.deletedMessageCount} message${extra.deletedMessageCount === 1 ? '' : 's'} deleted during ban cleanup` : extra.repliedMessageId ? 'replied scam message deletion unavailable' : '', extra.source || 'admin ban action'].filter(Boolean)
     };
@@ -3724,7 +3790,7 @@ export class TelegramShieldBot {
     risk.local_ban_roots = localBanRoots.length;
     risk.dkg_ban_roots = dkgBanRootIds.size;
     risk.dkg_campaign_roots = campaignHistory.events || [];
-    risk.dkg_exact_actor_roots = adminHistory.hasPriorFalsePositive ? [] : (adminHistory.events || []).filter((event) => event.eventType === 'ban_executed' && event.adminVerified);
+    risk.dkg_exact_actor_roots = adminHistory.hasPriorFalsePositive ? [] : (adminHistory.events || []).filter((event) => event.eventType === 'ban_executed' && event.adminVerified && event.exactActorMatch === true);
     risk.campaign_key = risk.campaign_key || (campaignFingerprint ? `alias:${campaignFingerprint.pattern}` : '');
     if (!falsePositiveReview) return risk;
     return {
@@ -3811,8 +3877,9 @@ export class TelegramShieldBot {
       currentIndicators: [...(risk.domains || []), ...(risk.wallets || [])],
       overturned: risk.recommended_action === 'ignore'
     });
-    if (this.config.knownCampaignAutoBan === false) confirmed.eligible = false;
-    if (confirmed.eligible && this.config.knownCampaignAutoBan !== false && risk.recommended_action !== 'ignore') {
+    const campaignPolicy = this.activeCampaignPolicy(chatId, target);
+    if (this.config.knownCampaignAutoBan === false || !campaignPolicy) confirmed.eligible = false;
+    if (confirmed.eligible && risk.recommended_action !== 'ignore') {
       eligibility.eligible = true;
       eligibility.reason = confirmed.reason;
       eligibility.banRoots = confirmed.roots.length;
@@ -3821,6 +3888,8 @@ export class TelegramShieldBot {
     // Local ban counts and name-only matches cannot authorize cross-group bans.
     eligibility.eligible = confirmed.eligible && (eligibility.eligible || confirmed.reason === 'previous_admin_ban_same_actor');
     if (!confirmed.eligible && eligibility.reason !== 'no_campaign_fingerprint' && eligibility.reason !== 'false_positive_suppressed') eligibility.reason = confirmed.reason;
+    if (!CAMPAIGN_POLICIES.some((item) => this.chatCampaignPolicyEnabled(chatId, item.id))) eligibility.reason = 'chat_campaign_policy_not_enabled';
+    if (this.config.knownCampaignAutoBan === false) eligibility.reason = 'known_campaign_auto_ban_disabled';
 
     if (!eligibility.eligible) {
       await this.record(checkEventType, { ...message, from: target }, {
@@ -3899,6 +3968,7 @@ export class TelegramShieldBot {
       `auto-ban known campaign (${campaignLabel}) after ${sourceLabel.toLowerCase()}`,
       {
         source: 'known_campaign_auto_ban',
+        adminVerified: false,
         sangmataEvidence: source === 'sangmata' ? sourceEvidence : '',
         deletedMessageCount: enforcement.deleted || 0,
         deleteAttemptCount: enforcement.attempted || 0,
@@ -4012,7 +4082,8 @@ export class TelegramShieldBot {
   }
 
   async maybeAutoBanConfirmedActor(message, target, risk) {
-    if (this.config.knownCampaignAutoBan === false || !target?.id || target.is_bot === true || risk.recommended_action === 'ignore') return false;
+    if (this.config.knownCampaignAutoBan === false || !target?.id || target.is_bot === true || risk.recommended_action === 'ignore'
+      || !this.activeCampaignPolicy(message.chat?.id, target)) return false;
     const decision = evaluateConfirmedCampaignBan({
       exactActorRoots: risk.dkg_exact_actor_roots || [],
       campaignRoots: risk.dkg_campaign_roots || [],
@@ -4816,6 +4887,28 @@ export class TelegramShieldBot {
       return true;
     }
 
+    if (parsed.action === 'campaign-settings' || parsed.action === 'campaign-policy-set') {
+      if (!['group', 'supergroup', 'channel'].includes(message.chat?.type)
+        || !await this.isTelegramChatAdmin(chatId, from.id, { requireLiveLookup: true }).catch(() => false)) {
+        await this.answerCallback(query.id, 'Actual chat admin required');
+        return true;
+      }
+      if (parsed.action === 'campaign-policy-set') {
+        const policyId = parsed.parts[1];
+        const value = parsed.parts[2];
+        if (!CAMPAIGN_POLICIES.some((policy) => policy.id === policyId) || !['on', 'off'].includes(value)) {
+          await this.answerCallback(query.id, 'Unknown campaign policy or setting');
+          return true;
+        }
+        await this.record('campaign_policy_setting_changed', callbackMessage, {
+          campaign_policy_id: policyId, enabled: value === 'on', moderator: from,
+          evidence: [`chat admin set campaign policy ${policyId} ${value}`]
+        }, { writeDkg: false });
+      }
+      await this.editInteractiveMessage(chatId, message.message_id, this.campaignSettingsText(chatId), this.campaignSettingsKeyboard(requester, chatId));
+      return true;
+    }
+
     if (parsed.action === 'settings') {
       if (!trusted) {
         await this.answerCallback(query.id, 'Admin only');
@@ -5466,6 +5559,10 @@ export class TelegramShieldBot {
           });
         }
       }
+    }
+    if (this.config.autoPromoteEvidence === true) {
+      await promoteEligibleEvidence({ store: this.store, dkg: this.dkg, config: this.config })
+        .catch((error) => console.error(`evidence promotion failed: ${error instanceof Error ? error.message : String(error)}`));
     }
   }
 

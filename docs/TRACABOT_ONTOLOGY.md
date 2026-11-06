@@ -12,6 +12,25 @@ Events move through this trust path:
 4. `verified_memory` - event root published into the Context Graph / Verified Memory path.
 5. `campaign_summary` - repeated evidence clustered into a reusable campaign entity.
 
+Every evidence-bearing event also carries `tracabot:claimLevel`:
+
+- `observation` - bounded local signal, model-only suspicion, or unverified submission.
+- `allegation` - report/claim with a target and some evidence.
+- `admin_enforcement` - ban or restriction; an evidence signal, not proof on its own.
+- `high_confidence_flag` - concrete indicators plus independent corroboration over threshold.
+- `confirmed_scam` - only an explicit upheld admin review.
+- `retracted` - an overturned review or correction; promotion stops.
+
+Additional provenance predicates:
+
+- `tracabot:evidenceFingerprint` - stable hash of event type, target reference, normalized indicators, roots, and evidence text.
+- `tracabot:evidencePolicyVersion` - policy version used for the claim level.
+- `tracabot:sourceEventType` - original event type when a promoted finding cites another record.
+
+The public reader (`src/public-server.js`) never returns raw RDF or arbitrary graph data. It returns a sanitized projection with hashed public IDs, normalized indicators, HMAC actor/community references, and provenance labels. Public reads are not raw private graph access.
+
+Admin bans alone are never classified as `confirmed_scam`. Model-generated text cannot independently create `confirmed_scam`, a ban, or a public definitive accusation. `review_overturned` suppresses automatic promotion and remains visible as a correction.
+
 ## Core Classes
 
 - `tracabot:UnsafeChatEvent`

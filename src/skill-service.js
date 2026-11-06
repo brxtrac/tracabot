@@ -5,6 +5,7 @@ import { EventStore } from './store.js';
 import { loadConfig, validateDkgPseudonymKey } from './config.js';
 import { combineRisk } from './risk-engine.js';
 import { LlmClient } from './llm-client.js';
+import { EVIDENCE_POLICY_VERSION, evaluateEvidence } from './evidence-policy.js';
 
 function actorAliases(user = {}) {
   return [user.username, user.first_name, [user.first_name, user.last_name].filter(Boolean).join(' ')].filter(Boolean);
@@ -58,6 +59,23 @@ function writeTokenValid(input = {}, config = {}, env = process.env) {
 
 function canWriteFromSkill(input = {}, config = {}) {
   return Boolean(config.skillAllowUnauthenticatedWrites || writeTokenValid(input, config));
+}
+
+function applyEvidenceMetadata(event, config, history) {
+  const assessment = evaluateEvidence(event, {
+    history,
+    policy: {
+      highConfidenceThreshold: config.evidenceHighConfidenceThreshold,
+      localConfidenceThreshold: config.evidenceLocalConfidenceThreshold,
+      minIndependentSignals: config.evidenceMinIndependentSignals,
+      minIndependentCommunities: config.evidenceMinIndependentCommunities,
+      promotionThreshold: config.evidencePromotionThreshold
+    }
+  });
+  event.payload.claim_level = event.payload.claim_level || assessment.claimLevel;
+  event.payload.evidence_fingerprint = event.payload.evidence_fingerprint || assessment.evidenceFingerprint;
+  event.payload.evidence_policy_version = event.payload.evidence_policy_version || EVIDENCE_POLICY_VERSION;
+  return assessment;
 }
 
 function targetFromInput(input = {}) {
@@ -355,9 +373,10 @@ export class TracabotSkillService {
         evidence: [...(risk.evidence || []), `OpenClaw monitor classified chat event as ${risk.scam_type || 'unsafe'} with ${risk.confidence || 0}% confidence`]
       }
     };
+    const assessment = applyEvidenceMetadata(event, this.config, this.store.all());
     event.dkg = await this.dkg.writeEvent(event);
     this.store.append(event);
-    return { tool: 'monitor_chat_event', monitored: true, eventId: event.id, risk, adminVerified, highConfidence, dkg: event.dkg, writesDkg: true };
+    return { tool: 'monitor_chat_event', monitored: true, eventId: event.id, risk, adminVerified, highConfidence, claimLevel: assessment.claimLevel, claimEligibleForPromotion: assessment.promotion.eligible, dkg: event.dkg, writesDkg: true };
   }
 
   async sortConversationArtifact(input = {}) {
@@ -401,10 +420,11 @@ export class TracabotSkillService {
         evidence: [...(risk.evidence || []), `OpenClaw sorted conversation artifact with quality ${quality}`, writeDkg ? `commit receipt ${receiptId} authorizes Shared Memory projection` : 'draft only; not eligible for Shared Memory until committed']
       }
     };
+    const assessment = applyEvidenceMetadata(event, this.config, this.store.all());
     if (writeDkg) event.dkg = await this.dkg.writeEvent(event);
     else event.local_only = true;
     this.store.append(event);
-    return { tool: 'sort_conversation_artifact', eventId: event.id, risk, artifactQuality: quality, writesDkg: writeDkg, dkg: event.dkg || null };
+    return { tool: 'sort_conversation_artifact', eventId: event.id, risk, artifactQuality: quality, claimLevel: assessment.claimLevel, writesDkg: writeDkg, dkg: event.dkg || null };
   }
 
   async generateSafeTip() {

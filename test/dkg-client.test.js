@@ -10,6 +10,56 @@ class DkgClient extends BaseDkgClient {
   }
 }
 
+test('admin history distinguishes reused aliases from the same Telegram ID after rename', async () => {
+  const dkg = new DkgClient({ contextGraph: 'tracabot' });
+  const root = { s: 'https://tracabot.org/ontology#event/prior-ban',
+    g: 'did:dkg:context-graph:tracabot/_shared_memory', eventType: 'ban_executed',
+    confidence: '95', adminVerified: 'true' };
+  const queries = [];
+  dkg.queryBindings = async (sparql) => {
+    queries.push(sparql);
+    return sparql.includes('telegramUserId> "111"') || sparql.includes('actorAlias> "bcgame"') ? [root] : [];
+  };
+  const reusedAlias = await dkg.queryAdminHistoryForActor({ userId: '222', aliases: ['BC GAME'] });
+  assert.equal(reusedAlias.hasPriorAdminAction, true);
+  assert.equal(reusedAlias.events[0].exactActorMatch, false);
+  assert.ok(queries.some((sparql) => sparql.includes('actorAlias> "bcgame"')));
+  queries.length = 0;
+  const renamedActor = await dkg.queryAdminHistoryForActor({ userId: '111', aliases: ['New Name'] });
+  assert.equal(renamedActor.events[0].exactActorMatch, true);
+  assert.equal(queries.some((sparql) => sparql.includes('actorAlias>')), false);
+  const aliasOnly = await dkg.queryAdminHistoryForActor({ aliases: ['BC GAME'] });
+  assert.equal(aliasOnly.events[0].exactActorMatch, false);
+});
+
+test('public campaign query returns only sanitized shared-memory fields', async () => {
+  const dkg = new DkgClient({ contextGraph: 'tracabot' });
+  const rows = [
+    { g: 'did:dkg:context-graph:tracabot/_shared_memory', s: 'https://tracabot.org/ontology#event/campaign-1',
+      confidence: '91', scamType: 'impersonation', created: '2026-11-01T10:00:00.000Z',
+      campaignKey: 'domain:verify-example.example', campaignEventCount: '4', campaignCommunityCount: '2',
+      domain: 'verify-example.example', communityToken: 'community-token-a', claimLevel: 'high_confidence_flag',
+      evidenceFingerprint: 'sha256:abc' },
+    { g: 'did:dkg:context-graph:tracabot/_shared_memory', s: 'https://tracabot.org/ontology#event/campaign-1',
+      confidence: '91', scamType: 'impersonation', created: '2026-11-01T10:00:00.000Z',
+      wallet: '0x0000000000000000000000000000000000000001', pattern: 'fake-support' },
+    { g: 'did:dkg:context-graph:other/_shared_memory', s: 'https://tracabot.org/ontology#event/campaign-2',
+      confidence: '99', claimLevel: 'confirmed_scam', scamType: 'phishing' }
+  ];
+  let query = '';
+  dkg.queryBindings = async (sparql) => { query = sparql; return rows; };
+  const records = await dkg.queryPublicCampaigns({ limit: 10 });
+  assert.equal(records.length, 1);
+  assert.match(records[0].publicId, /^evt_/);
+  assert.equal(records[0].claimLevel, 'high_confidence_flag');
+  assert.deepEqual(records[0].indicators.domains, ['verify-example.example']);
+  assert.deepEqual(records[0].indicators.wallets, ['0x0000000000000000000000000000000000000001']);
+  assert.deepEqual(records[0].indicators.patterns, ['fake-support']);
+  assert.equal(records[0].evidenceCount, 4);
+  assert.match(query, /fraud_campaign/);
+  assert.doesNotMatch(JSON.stringify(records), /telegramUserId|username|messageText/);
+});
+
 function makeAdapterClient({ publishError = null } = {}) {
   const calls = [];
   return {
