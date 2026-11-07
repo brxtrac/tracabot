@@ -370,6 +370,10 @@ test('explicit consent denial blocks promotion for private fraud and other event
     payload: { consent_to_share: false }
   }));
   eventStore.append(evidenceEvent({
+    id: 'payload-private-denied',
+    payload: { local_only: true, consent_to_share: false }
+  }));
+  eventStore.append(evidenceEvent({
     id: 'review-denied',
     event_type: 'review_upheld',
     payload: {
@@ -391,7 +395,7 @@ test('explicit consent denial blocks promotion for private fraud and other event
   const result = await promoteEligibleEvidence({ store: eventStore, dkg, config: CONFIG });
   assert.equal(result.promoted.length, 0);
   assert.equal(writes.length, 0);
-  for (const eventId of ['private-fraud-denied', 'review-denied', 'submission-denied']) {
+  for (const eventId of ['private-fraud-denied', 'payload-private-denied', 'review-denied', 'submission-denied']) {
     const skipped = result.skipped.find((item) => item.eventId === eventId);
     assert.ok(skipped, eventId);
     assert.ok(skipped.reasons.includes('sharing_consent_denied'), eventId);
