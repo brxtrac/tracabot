@@ -2,12 +2,19 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { DkgClient, extractDomains, extractPatterns, extractWallets } from './dkg-client.js';
 import { loadConfig } from './config.js';
 
 const MODEL = '9router/cx/gpt-6-sol';
 const MAX_REVIEWS = 5;
 const MAX_RESPONSE_BYTES = 16000;
+const DEFAULT_POLICY_PATH = resolve(homedir(), '.config/opencode/agents/tracabot-curator.md');
+
+function readPolicy(path) {
+  try { return readFileSync(path, 'utf8'); } catch { return ''; }
+}
 
 export function screenDraft(draft, now = Date.now()) {
   if (!Number.isFinite(Date.parse(draft.expires)) || Date.parse(draft.expires) <= now) return 'expired';
@@ -29,11 +36,13 @@ export function parseReview(content) {
   return answer;
 }
 
-async function runCurator(prompt, { runner = spawn, createSession = scheduledSession, finishSession = finishScheduledSession } = {}) {
-  const sessionID = createSession();
+async function runCurator(prompt, { runner = spawn, createSession, finishSession, cwd = process.cwd() } = {}) {
+  const create = createSession || (() => scheduledSession(cwd));
+  const finish = finishSession || ((id) => finishScheduledSession(id, cwd));
+  const sessionID = create();
   return new Promise((resolve, reject) => {
     const child = runner('opencode', ['run', '--session', sessionID, '--agent', 'tracabot-curator', '--model', `${MODEL}#medium`, '--format', 'json', '--title', 'TRACaBot evidence review', prompt],
-      { cwd: '/root/tracabot', stdio: ['ignore', 'pipe', 'pipe'] });
+      { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
     let bytes = 0;
     let error = '';
@@ -59,18 +68,18 @@ async function runCurator(prompt, { runner = spawn, createSession = scheduledSes
   });
 }
 
-function finishScheduledSession(sessionID) {
+function finishScheduledSession(sessionID, cwd = process.cwd()) {
   for (const [method, route, body] of [['post', `/api/session/${sessionID}/interrupt`, {}], ['patch', `/api/session/${sessionID}`, { archived: true }]]) {
-    const result = spawnSync('opencode', ['api', method, route, '--data', JSON.stringify(body)], { cwd: '/root/tracabot', encoding: 'utf8', timeout: 15000, maxBuffer: 65536 });
+    const result = spawnSync('opencode', ['api', method, route, '--data', JSON.stringify(body)], { cwd, encoding: 'utf8', timeout: 15000, maxBuffer: 65536 });
     if (result.status !== 0) console.error('TRACaBot scheduled session cleanup failed');
   }
 }
 
-function scheduledSession() {
-  const result = spawnSync('opencode', ['api', 'post', '/api/session', '--data', JSON.stringify({ agent: 'tracabot-curator', location: { directory: '/root/tracabot' }, model: { providerID: '9router', id: 'cx/gpt-6-sol', variant: 'medium' }, metadata: { openchamber: { kind: 'scheduled' }, automation: { job: 'tracabot-curator', owner: 'systemd', version: 1 } }, permissions: [{ action: '*', resource: '*', effect: 'deny' }] })], { cwd: '/root/tracabot', encoding: 'utf8', timeout: 15000, maxBuffer: 65536 });
+function scheduledSession(cwd = process.cwd()) {
+  const result = spawnSync('opencode', ['api', 'post', '/api/session', '--data', JSON.stringify({ agent: 'tracabot-curator', location: { directory: cwd }, model: { providerID: '9router', id: 'cx/gpt-6-sol', variant: 'medium' }, metadata: { openchamber: { kind: 'scheduled' }, automation: { job: 'tracabot-curator', owner: 'systemd', version: 1 } }, permissions: [{ action: '*', resource: '*', effect: 'deny' }] })], { cwd, encoding: 'utf8', timeout: 15000, maxBuffer: 65536 });
   if (result.status !== 0) throw new Error('Scheduled curator session creation failed');
   const session = JSON.parse(result.stdout).data;
-  if (!session?.id || session.metadata?.openchamber?.kind !== 'scheduled' || session.location?.directory !== '/root/tracabot') throw new Error('Scheduled curator ownership not confirmed');
+  if (!session?.id || session.metadata?.openchamber?.kind !== 'scheduled' || session.location?.directory !== cwd) throw new Error('Scheduled curator ownership not confirmed');
   return session.id;
 }
 
@@ -125,12 +134,14 @@ async function loadPendingDrafts(dkg, limit) {
 }
 
 export async function curateWorkingMemory({ dkg = new DkgClient(loadConfig()), limit = 100, now = Date.now(),
-  reviewer = reviewDraft, ledgerPath = '/root/tracabot/data/curator-reviews.sqlite', maxReviews = MAX_REVIEWS } = {}) {
+  reviewer = reviewDraft, ledgerPath = join(process.cwd(), 'data', 'curator-reviews.sqlite'), policyPath = process.env.TRACABOT_CURATOR_POLICY_PATH || DEFAULT_POLICY_PATH, maxReviews = MAX_REVIEWS } = {}) {
   const drafts = await loadPendingDrafts(dkg, limit);
   const results = [];
   let reviewed = 0;
   const ledger = reviewLedger(ledgerPath);
-  const policy = createHash('sha256').update(readFileSync('/root/.config/opencode/agents/tracabot-curator.md')).update(MODEL + ':medium:scheduled-v1').digest('hex');
+  // shortcut: missing or unreadable host policy falls back to a stable marker;
+  // set TRACABOT_CURATOR_POLICY_PATH in production to bind ledger entries to it.
+  const policy = createHash('sha256').update(readPolicy(policyPath) || 'unconfigured-curator-policy').update(MODEL + ':medium:scheduled-v1').digest('hex');
   try {
     for (const draft of drafts) {
       try {
