@@ -53,6 +53,10 @@ The bot stores Telegram chat/user identifiers and structured fraud evidence in i
 
 When `TRACABOT_LLM_PROVIDER=auto`, TRACaBot reads local OpenClaw configuration to discover gateway/model settings and OAuth-backed access already configured for OpenClaw. It does not copy OpenClaw credentials into `.env`, does not print them in `/status`, and falls back to deterministic templates when OpenClaw chat access is unavailable.
 
+## OpenDKG Coordination Records
+
+Public collaboration records are separate from threat evidence and private operations. Do not place private founder contacts, appeal text, raw Telegram identifiers, reporter data, message context, credentials, or private evidence in a public proposal, decision, contribution, or funding record. A shared coordination record is not a threat verdict, a curator approval, a vote, or a funding commitment. See [docs/OPENDKG_ALIGNMENT.md](./docs/OPENDKG_ALIGNMENT.md).
+
 ## Dynamic Code
 
 No remote code loading, `eval`, preinstall scripts, or postinstall scripts are used.

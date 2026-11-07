@@ -2,6 +2,12 @@
 
 TRACaBot is an OpenClaw + Telegram + OriginTrail DKG v10 intelligent anti-scam bot. It monitors Telegram communities, detects scam patterns, records local working memory, and writes evidence-backed fraud intelligence to DKG v10 Shared Memory so every TRACaBot instance can query reusable scam context and apply it in its own community. Think of it as a Telegram anti-scam agent that updates with knowledge from all participating communities instead of forcing every group to defend itself alone.
 
+## OpenDKG Collaboration Status
+
+TRACaBot is prepared for collaboration under a proposed OpenDKG umbrella but is **not yet accepted**. It remains an independent, MIT-licensed project owned and maintained in this repository. Participation does not transfer repository or organization ownership, change the license, create a shared graph or funding commitment, or grant umbrella roles any TRACaBot curator, admin, token, or enforcement authority.
+
+The proposed ownership boundaries, privacy separation, contribution and funding mapping, readiness checklist, and decisions that only the project maintainers and partner founders can make are in [docs/OPENDKG_ALIGNMENT.md](./docs/OPENDKG_ALIGNMENT.md). Private contact details are never published.
+
 ## Silent Background Protection
 
 Manual `/start`, `/scan`, and `/report` are optional. On a genuine join, TRACaBot runs a deterministic background lookup against the stable platform-scoped Telegram ID, using the privacy-preserving HMAC identity token pipeline. No LLM or API key is required. The default outcome is silent observe/log: the bot records the check privately and posts nothing to the group.
