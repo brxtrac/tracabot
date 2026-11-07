@@ -8,6 +8,8 @@ TRACaBot is an OpenClaw + Telegram + OriginTrail DKG v10 intelligent anti-scam b
 
 TRACaBot is prepared for collaboration under a proposed OpenDKG umbrella but is **not yet accepted**. It remains an independent, MIT-licensed project owned and maintained in this repository. Participation does not transfer repository or organization ownership, change the license, create a shared graph or funding commitment, or grant umbrella roles any TRACaBot curator, admin, token, or enforcement authority.
 
+TRACaBot remains MIT-licensed. The repository-specific exception record required before any OpenDKG publication is in [docs/OPENDKG_ALIGNMENT.md](./docs/OPENDKG_ALIGNMENT.md#repository-specific-license-exception-2026-11-07); it does not change OpenDKG's Apache-2.0 default or claim founder unanimity.
+
 The proposed ownership boundaries, privacy separation, contribution and funding mapping, readiness checklist, and decisions that only the project maintainers and partner founders can make are in [docs/OPENDKG_ALIGNMENT.md](./docs/OPENDKG_ALIGNMENT.md). Private contact details are never published.
 
 ## Silent Background Protection

@@ -54,11 +54,33 @@ GITHUB_TOKEN=$(gh auth token) node scripts/record-review-evidence.js \
 
 The command verifies that the authenticated actor has `admin` or `maintain`
 permission, the artifact targets the exact current open non-draft PR head, and
-the PR belongs to the same repository. It posts the artifact as a PR comment and
-creates an `ai-review/evidence` commit status tied to that SHA. A new commit
-invalidates the old status; record a new artifact for the new head. The artifact
-is public, so remove private notes, credentials, raw identifiers, and other
-non-public material before publishing.
+the PR belongs to the same repository. GitHub reports a maintain role as
+`permission: "write"` with `role_name: "maintain"`; the publisher accepts that
+role while rejecting ordinary `write` access and ambiguous custom roles. It
+posts the artifact as a PR comment and creates an `ai-review/evidence` commit
+status tied to that SHA. A new commit invalidates the old status; record a new
+artifact for the new head. The artifact is public, so remove private notes,
+credentials, raw identifiers, and other non-public material before publishing.
+
+## License
+
+TRACaBot is released under the MIT License in [`LICENSE`](./LICENSE). The
+license text and copyright notice are unchanged. This repository retains MIT as
+a repository-specific written exception to OpenDKG's Apache-2.0 default; it does
+not change that default or relicense existing contributions. See
+[`docs/OPENDKG_ALIGNMENT.md`](./docs/OPENDKG_ALIGNMENT.md#repository-specific-license-exception-2026-11-07).
+
+By intentionally submitting a contribution, you agree that it is licensed under
+the repository's MIT terms to the extent you hold the rights, and you confirm
+that you have the authority to grant that license. You retain copyright; this is
+not a copyright assignment.
+
+OpenDKG's existing contribution process still applies. Contributors must follow
+the [OpenDKG Contributor Agreement v1.0](https://github.com/OpenDKG/.github/blob/d56279b4f3c25dd8f9e68699d61be23a0c7a6b07/CONTRIBUTOR_AGREEMENT.md)
+at the revision pinned by OpenDKG's public adoption record, and use the
+Developer Certificate of Origin `Signed-off-by` trailer where required. Those
+organization requirements are separate from, and do not replace, the
+repository's MIT license. Do not submit code you cannot license under MIT.
 
 ## Security and privacy
 

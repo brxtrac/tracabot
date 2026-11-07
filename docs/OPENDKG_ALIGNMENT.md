@@ -17,6 +17,47 @@ funding platforms, domains, legal entities, and shared infrastructure are later
 decisions. This repository does not encode founder identities, contact details,
 voting rules, financial commitments, or a governance charter.
 
+## Repository-specific license exception (2026-11-07)
+
+This is the pre-publication license disclosure for the planned new
+`OpenDKG/tracabot` repository. It does not claim that the repository exists yet.
+
+- **Authorization basis:** `@brxtrac`, an OpenDKG founder and organization
+  administrator, supplied the integration instruction to add this existing
+  project as a new OpenDKG repository while retaining its MIT license. The
+  authorization is limited to this existing MIT project and its history. It is
+  not a claim of unanimous founder approval, a new legal agreement, or authority
+  to relicense third-party material.
+- **New repository, not a transfer:** [`brxtrac/tracabot`](https://github.com/brxtrac/tracabot)
+  remains in place. The planned `OpenDKG/tracabot` is a new repository containing
+  the reviewed source history. No ownership of the original repository,
+  copyright, trademark, domain, funding, or umbrella enforcement authority
+  changes.
+- **Source basis:** repository history through commit
+  `5f52d05bfd2fb6bcb5d62afaecc4f7f981716dfa` plus the reviewed commit that
+  contains this record. The exact final reviewed source commit is recorded in
+  the SHA-bound review artifact rather than this file, avoiding a self-reference.
+- **License unchanged:** `LICENSE` is byte-for-byte unchanged: MIT License,
+  Copyright (c) 2026 brxtrac. SHA-256
+  `458be8733c589d10fec02112413bf16076fdfeae7832b39f22889d1b6ed13710`;
+  git blob `a41c85445cf78336b5f583e20f343185be3badfc`.
+- **Repository-specific exception:** MIT is retained as a written exception to
+  the OpenDKG Apache-2.0 default under OpenDKG Governance v1.0 section 3 at
+  revision `859140d285c04f4babb9c526d9e9e37e5a60fe4c`. This record does not change
+  the OpenDKG default license, does not relicense existing contributions, and
+  does not claim that the two-of-three rule for changing accepted license
+  defaults was applied. Section 3 explicitly permits a repository-specific
+  written exception and requires disclosure before accepting contributions plus
+  contributor approval for that repository's license; this record and
+  `CONTRIBUTING.md` provide that disclosure, and incoming contributions are
+  accepted under MIT.
+- **Contributions:** see [`CONTRIBUTING.md`](./CONTRIBUTING.md). OpenDKG's
+  existing Contributor Agreement and DCO requirements still apply where the
+  organization requires them; this repository's MIT terms do not replace them.
+
+No private contacts, funding addresses, or claims of founder unanimity are
+recorded here.
+
 ## Ownership and authority boundaries
 
 - Repository, organization, domain, release, and trademark ownership stay with
@@ -94,6 +135,8 @@ Creating one requires a separate human decision and a security/privacy review.
 Repository baseline:
 
 - [x] MIT `LICENSE` retained; no license change proposed.
+- [x] Repository-specific MIT exception recorded publicly with source basis and
+  license digest (2026-11-07); OpenDKG default remains Apache-2.0.
 - [x] `README.md` states the current independent-project status and links here.
 - [x] `SECURITY.md` documents private reporting and data boundaries.
 - [x] `CONTRIBUTING.md` documents review, testing, and privacy expectations.
