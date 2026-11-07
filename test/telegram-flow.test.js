@@ -1559,6 +1559,35 @@ test('record awaits pending-review notification and reuses stable effect on repl
   assert.equal(calls.filter((call) => call.method === 'sendMessage').length, 1);
 });
 
+test('direct DKG writes respect explicit sharing consent and privacy opt-out', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: true });
+  const chat = { id: -100, type: 'supergroup' };
+  const from = { id: 77, username: 'suspect' };
+  await bot.record('fraud_finding', { chat, from, message_id: 90 }, {
+    confidence: 95,
+    local_confidence: 80,
+    evidence: ['private denial'],
+    consent_to_share: false
+  }, {});
+  await bot.record('fraud_finding', { chat, from, message_id: 91 }, {
+    confidence: 95,
+    local_confidence: 80,
+    evidence: ['privacy opt-out'],
+    privacy_opt_out: true
+  }, {});
+  assert.equal(dkgWrites.length, 0);
+
+  await bot.record('fraud_finding', { chat, from, message_id: 92 }, {
+    confidence: 95,
+    local_confidence: 80,
+    evidence: ['intentional native sharing'],
+    consent_to_share: true
+  }, {});
+  assert.equal(dkgWrites.length, 1);
+  assert.equal(dkgWrites[0].payload.consent_to_share, true);
+});
+
+
 test('failed pending-review notification does not consume its cooldown', async () => {
   const { bot } = makeBot({ canBan: true });
   const event = {
