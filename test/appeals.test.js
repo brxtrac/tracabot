@@ -76,11 +76,11 @@ function makeBot({ config = {}, chatAdmins = [{ id: 1, username: 'admin' }], unb
   return { bot, calls, writes };
 }
 
-function seedBan(bot, { id = 'ban-1', userId = 4242, chatId = -100, roots = [`root-${id}`] } = {}) {
+function seedBan(bot, { id = 'ban-1', userId = 4242, chatId = -100, roots = [`root-${id}`], timestamp = new Date().toISOString() } = {}) {
   bot.store.append({
     id,
     event_type: 'ban_executed',
-    timestamp: new Date().toISOString(),
+    timestamp,
     chat: { id: chatId, type: 'supergroup', title: 'Demo Group' },
     user: { id: userId, username: 'accused' },
     payload: {
@@ -370,6 +370,51 @@ test('timeout and 5xx unban failures remain retryable with new idempotent attemp
     assert.equal(unbanCalls, 4, errorMode);
     assert.equal(bot.store.all().some((event) => event.event_type === 'appeal_unban_completed'), true);
   }
+});
+
+test('stale appeal unban retry is rejected after a newer independent ban', async () => {
+  const { bot, calls } = makeBot();
+  seedBan(bot, {
+    id: 'ban-superseded-appeal',
+    userId: 4646,
+    timestamp: '2026-11-07T10:00:00.000Z'
+  });
+  await bot.handleCommand(privateMessage(4646, '/appeal', 1));
+  const ref = String(calls.at(-1).payload.text).match(/case-[a-f0-9]{10}/)[0];
+  await bot.handleCommand(privateMessage(4646, `/appeal ${ref} please check the newer evidence again`, 2));
+  const appeal = bot.store.all().find((event) => event.event_type === 'appeal_submitted');
+  const originalCall = bot.call;
+  let unbanCalls = 0;
+  bot.call = async (method, payload) => {
+    if (method === 'getChatMember' && String(payload.user_id) === '4646') return { status: 'kicked', user: { id: 4646 } };
+    if (method === 'unbanChatMember') {
+      unbanCalls += 1;
+      calls.push({ method, payload });
+      throw new Error('telegram 503 unavailable');
+    }
+    return originalCall(method, payload);
+  };
+  const resolved = await bot.resolveAppeal({
+    appealRef: appeal.payload.appeal_ref,
+    admin: { id: 1 },
+    decision: 'overturn',
+    sourceChat: { id: 1, type: 'private' }
+  });
+  assert.equal(resolved.ok, true);
+  assert.equal(resolved.unban.ok, false);
+  assert.equal(unbanCalls, 3);
+
+  seedBan(bot, {
+    id: 'ban-newer-appeal',
+    userId: 4646,
+    timestamp: '2026-11-07T11:00:00.000Z'
+  });
+  const before = unbanCalls;
+  const retry = await bot.retryAppealUnban(appeal.payload.appeal_ref, { id: 1 }, { id: 1, type: 'private' });
+  assert.equal(retry.ok, false);
+  assert.equal(retry.error, 'ban_superseded');
+  assert.equal(retry.newer_ban_event_id, 'ban-newer-appeal');
+  assert.equal(unbanCalls, before);
 });
 
 test('retry reconciles an already-unbanned member without a duplicate unban call', async () => {

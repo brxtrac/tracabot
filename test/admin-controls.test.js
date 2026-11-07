@@ -83,11 +83,11 @@ function privateMessage(userId = 1, text = '/controls', messageId = 1) {
   return { chat: { id: userId, type: 'private' }, from: { id: userId, username: `user${userId}` }, message_id: messageId, text };
 }
 
-function seedAutoBan(bot, { id = 'auto-ban-1', userId = 4242, chatId = -100, roots = [`root-${id}`] } = {}) {
+function seedAutoBan(bot, { id = 'auto-ban-1', userId = 4242, chatId = -100, roots = [`root-${id}`], timestamp = new Date().toISOString() } = {}) {
   bot.store.append({
     id,
     event_type: 'ban_executed',
-    timestamp: new Date().toISOString(),
+    timestamp,
     chat: { id: chatId, type: 'supergroup', title: 'Demo Group' },
     user: { id: userId, username: 'accused' },
     payload: {
@@ -375,6 +375,54 @@ test('auto-ban override failure is retryable without an appeal and same-evidence
   assert.equal(calls.some((call) => call.method === 'banChatMember'), false);
   assert.equal(calls.some((call) => call.method === 'unbanChatMember' && String(call.payload.chat_id) === '-200'), false);
 });
+
+test('stale auto-ban retry is rejected after a newer independent ban', async () => {
+  const { bot, calls } = makeBot();
+  seedLocalReview(bot, 4242, 'finding-superseded');
+  seedAutoBan(bot, {
+    id: 'auto-superseded',
+    userId: 4242,
+    roots: ['review-finding-superseded'],
+    timestamp: '2026-11-07T10:00:00.000Z'
+  });
+  const original = bot.call;
+  let failUnban = true;
+  bot.call = async (method, payload) => {
+    if (method === 'getChatMember' && String(payload.chat_id) === '-100' && String(payload.user_id) === '4242') {
+      return { status: 'kicked', user: { id: 4242 } };
+    }
+    if (method === 'unbanChatMember') {
+      calls.push({ method, payload });
+      if (failUnban) throw new Error('telegram 503 unavailable');
+      return { ok: true };
+    }
+    return original(method, payload);
+  };
+  const ban = bot.store.all().find((event) => event.id === 'auto-superseded');
+  const override = await bot.overrideAutomaticBan({ ban, admin: { id: 1 }, sourceChat: { id: 1, type: 'private' } });
+  assert.equal(override.ok, true);
+  assert.equal(bot.autoBanOverrideRecord('auto-superseded').payload.status, 'unban_pending');
+
+  seedAutoBan(bot, {
+    id: 'auto-newer',
+    userId: 4242,
+    roots: ['newer-root'],
+    timestamp: '2026-11-07T11:00:00.000Z'
+  });
+  failUnban = false;
+  const before = calls.filter((call) => call.method === 'unbanChatMember').length;
+  const retry = await bot.retryAutomaticBanOverride({
+    ban,
+    admin: { id: 1 },
+    sourceChat: { id: 1, type: 'private' },
+    requestId: 'stale-retry'
+  });
+  assert.equal(retry.ok, false);
+  assert.equal(retry.error, 'ban_superseded');
+  assert.equal(retry.newer_ban_event_id, 'auto-newer');
+  assert.equal(calls.filter((call) => call.method === 'unbanChatMember').length, before);
+});
+
 
 test('resume stays bounded by configured chat allowlist and missing bot rights', async () => {
   const bounded = makeBot({ config: { joinAutoRemoveChats: ['-200'] } });

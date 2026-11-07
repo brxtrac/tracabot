@@ -73,6 +73,7 @@ export function validateReviewEvidence({
   artifact,
   headSha,
   permission,
+  roleName,
   prState = 'open',
   draft = false
 }) {
@@ -82,8 +83,11 @@ export function validateReviewEvidence({
   if (parsed.metadata.reviewed_sha !== currentHead) {
     invalid(`review artifact targets ${parsed.metadata.reviewed_sha}, current head is ${currentHead}`);
   }
-  if (!REVIEWER_PERMISSIONS.has(permission)) {
-    invalid(`reviewer permission ${permission || 'none'} is not admin or maintain`);
+  const apiPermission = String(permission || '');
+  const apiRole = String(roleName || '');
+  const maintainer = REVIEWER_PERMISSIONS.has(apiPermission) || REVIEWER_PERMISSIONS.has(apiRole);
+  if (!maintainer) {
+    invalid(`reviewer permission ${apiPermission || 'none'} and role ${apiRole || 'none'} are not admin or maintain`);
   }
   if (prState !== 'open') invalid(`pull request is ${prState}`);
   if (draft) invalid('pull request is a draft');
@@ -179,6 +183,7 @@ export async function recordReviewEvidence({
     artifact: artifactText,
     headSha: pull.head.sha,
     permission: permissionResponse && permissionResponse.permission,
+    roleName: permissionResponse && permissionResponse.role_name,
     prState: pull.state,
     draft: Boolean(pull.draft)
   });

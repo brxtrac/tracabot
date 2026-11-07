@@ -4305,6 +4305,28 @@ export class TelegramShieldBot {
     return String(target.id || '') === String(userId) || key === `id:${userId}`;
   }
 
+  eventTimeMs(event = {}) {
+    const parsed = Date.parse(event.payload?.occurred_at || event.timestamp || '');
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  newerIndependentBanFor({ ban = {}, userId = '', chatId = '' } = {}) {
+    const targetId = String(userId || ban.payload?.target?.id || ban.user?.id || '');
+    const caseChatId = String(chatId || ban.chat?.id || ban.payload?.target_chat_id || '');
+    const caseTime = this.eventTimeMs(ban);
+    if (!targetId || !caseChatId || !caseTime) return null;
+    return this.store.all().find((event) => {
+      if (event.event_type !== 'ban_executed') return false;
+      if (String(event.id || '') === String(ban.id || '')) return false;
+      if (event.payload?.provenance === 'automatic_evidence_policy') return false;
+      if (ban.id && String(event.payload?.source_event_id || '') === String(ban.id)) return false;
+      if (!this.banEventTargets(event, targetId)) return false;
+      const eventChatId = event.payload?.target_chat_id || event.chat?.id || '';
+      if (!sameChat(eventChatId, caseChatId)) return false;
+      return this.eventTimeMs(event) > caseTime;
+    }) || null;
+  }
+
   appealResolutionFor(banId = '') {
     return [...this.store.all()].reverse().find((event) => event.event_type === 'appeal_resolved'
       && String(event.payload?.ban_event_id || '') === String(banId || '')) || null;
@@ -4708,6 +4730,10 @@ export class TelegramShieldBot {
     if (!correction) return { ok: false, error: 'override_not_found' };
     const target = ban.payload?.target || ban.user || {};
     if (!target.id) return { ok: false, error: 'missing_target' };
+    const newerBan = this.newerIndependentBanFor({ ban, userId: target.id, chatId });
+    if (newerBan) {
+      return { ok: false, error: 'ban_superseded', newer_ban_event_id: newerBan.id, ban };
+    }
     const resolutionChat = { id: sourceChat.id || `auto:${ban.id}`, type: sourceChat.type || 'private', title: sourceChat.title || 'auto-ban override retry' };
     const adminMessage = { chat: resolutionChat, from: admin, message_id: sourceChat.message_id };
     const unban = await this.unbanForAppeal(chatId, target.id, `auto-ban-override:${ban.id}`, adminMessage, { reconcileFirst: true });
@@ -5027,6 +5053,23 @@ export class TelegramShieldBot {
     if (!resolution || resolution.payload?.decision !== 'overturn') return { ok: false, error: 'appeal_not_overturned' };
     const banChatId = String(resolution.payload?.target_chat_id || appeal.payload?.target_chat_id || '');
     if (!await this.isAppealAdminForChat(admin.id, banChatId)) return { ok: false, error: 'not_chat_admin' };
+    const caseBan = this.findEvent(appeal.payload?.ban_event_id) || {
+      id: appeal.payload?.ban_event_id || '',
+      timestamp: appeal.timestamp || '',
+      chat: { id: banChatId },
+      payload: {
+        target: { id: appeal.payload?.appealant_id },
+        target_chat_id: banChatId
+      }
+    };
+    const newerBan = this.newerIndependentBanFor({
+      ban: caseBan,
+      userId: appeal.payload?.appealant_id,
+      chatId: banChatId
+    });
+    if (newerBan) {
+      return { ok: false, error: 'ban_superseded', newer_ban_event_id: newerBan.id, ban: caseBan };
+    }
     const adminMessage = { chat: sourceChat, from: admin, message_id: sourceChat.message_id };
     const unban = await this.unbanForAppeal(banChatId, appeal.payload?.appealant_id, appealRef, adminMessage, { reconcileFirst: true });
     await this.record('appeal_unban_retry_result', adminMessage, {
@@ -5169,7 +5212,11 @@ export class TelegramShieldBot {
       const result = await this.retryAppealUnban(ref, actorFromMessage(message), message.chat || {});
       await this.sendCleanCommandReply(message, result.ok
         ? '✅ Telegram unban retry completed.'
-        : (result.error === 'not_chat_admin' ? 'Only an actual admin of the affected group can retry this unban.' : 'Unban retry did not succeed; failure remains visible to admins.'));
+        : (result.error === 'not_chat_admin'
+          ? 'Only an actual admin of the affected group can retry this unban.'
+          : result.error === 'ban_superseded'
+            ? 'A newer ban for this user in this group supersedes this retry. Review the newer case instead.'
+            : 'Unban retry did not succeed; failure remains visible to admins.'));
       return;
     }
     if (isCommand(text, 'appeal_uphold', botUsername) || isCommand(text, 'appeal_overturn', botUsername)) {
@@ -5970,7 +6017,9 @@ export class TelegramShieldBot {
             ? 'Only a current admin of the affected group can retry this unban.'
             : result.error === 'override_not_found'
               ? 'Record the local override before retrying the unban.'
-              : 'Automatic join ban unban retry could not run.';
+              : result.error === 'ban_superseded'
+                ? 'A newer ban for this user in this group supersedes this retry. Review the newer case instead.'
+                : 'Automatic join ban unban retry could not run.';
           await this.answerCallback(query.id, messageText, true);
           return true;
         }

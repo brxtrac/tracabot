@@ -152,6 +152,11 @@ function shareableAdminEnforcement(event = {}) {
   return Boolean(eventTargetKey(event));
 }
 
+function sharingDenied(event = {}) {
+  const p = payload(event);
+  return p.consent_to_share === false || p.privacy_opt_out === true;
+}
+
 function modelOnly(event = {}) {
   const p = payload(event);
   const indicators = indicatorSets(event);
@@ -257,6 +262,7 @@ export function evaluateEvidence(event = {}, { history = [], policy = {} } = {})
   if (p.test_mode === true || p.source === 'test-command-loop') reasons.push('test_event');
   if (isRetracted) reasons.push('retracted');
   if (onlyModel) reasons.push('model_only_suspicion');
+  if (sharingDenied(event)) reasons.push('sharing_consent_denied');
   if (['review_upheld', 'review_overturned'].includes(event.event_type) && !eventTargetKey(event)) reasons.push('missing_reviewed_target');
   if (!shareableEnforcement) {
     if (enforcementEvent) {

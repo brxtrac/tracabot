@@ -71,7 +71,7 @@ function baseRoutes(overrides = {}) {
   return {
     'GET /repos/brxtrac/tracabot/pulls/2': () => jsonResponse(200, pullRequest()),
     'GET /user': () => jsonResponse(200, { login: 'brxtrac' }),
-    'GET /repos/brxtrac/tracabot/collaborators/brxtrac/permission': () => jsonResponse(200, { permission: 'admin' }),
+    'GET /repos/brxtrac/tracabot/collaborators/brxtrac/permission': () => jsonResponse(200, { permission: 'admin', role_name: 'admin' }),
     'GET /repos/brxtrac/tracabot/issues/2/comments': () => jsonResponse(200, []),
     'POST /repos/brxtrac/tracabot/issues/2/comments': ({ body }) => jsonResponse(201, {
       html_url: 'https://github.com/brxtrac/tracabot/pull/2#issuecomment-1',
@@ -118,29 +118,47 @@ test('validateReviewEvidence requires the exact current head and a maintainer', 
   const approved = validateReviewEvidence({
     artifact: artifact(),
     headSha: HEAD_SHA,
-    permission: 'admin'
+    permission: 'admin',
+    roleName: 'admin'
   });
   assert.equal(approved.state, 'success');
   assert.match(approved.description, /artifact sha256:/);
   assert.equal(
-    validateReviewEvidence({ artifact: artifact(), headSha: HEAD_SHA, permission: 'maintain' }).state,
+    validateReviewEvidence({ artifact: artifact(), headSha: HEAD_SHA, permission: 'maintain', roleName: 'maintain' }).state,
+    'success'
+  );
+  assert.equal(
+    validateReviewEvidence({ artifact: artifact(), headSha: HEAD_SHA, permission: 'write', roleName: 'maintain' }).state,
+    'success',
+    'GitHub reports maintain as permission=write with role_name=maintain'
+  );
+  assert.equal(
+    validateReviewEvidence({ artifact: artifact(), headSha: HEAD_SHA, permission: 'write', roleName: 'admin' }).state,
     'success'
   );
 
   assert.throws(
-    () => validateReviewEvidence({ artifact: artifact(), headSha: OTHER_SHA, permission: 'admin' }),
+    () => validateReviewEvidence({ artifact: artifact(), headSha: OTHER_SHA, permission: 'admin', roleName: 'admin' }),
     /current head/
   );
   assert.throws(
-    () => validateReviewEvidence({ artifact: artifact(), headSha: HEAD_SHA, permission: 'write' }),
+    () => validateReviewEvidence({ artifact: artifact(), headSha: HEAD_SHA, permission: 'write', roleName: 'write' }),
     /permission/
   );
   assert.throws(
-    () => validateReviewEvidence({ artifact: artifact(), headSha: HEAD_SHA, permission: 'admin', prState: 'closed' }),
+    () => validateReviewEvidence({ artifact: artifact(), headSha: HEAD_SHA, permission: 'write', roleName: 'custom-role' }),
+    /permission/
+  );
+  assert.throws(
+    () => validateReviewEvidence({ artifact: artifact(), headSha: HEAD_SHA, permission: 'read', roleName: 'custom-role' }),
+    /permission/
+  );
+  assert.throws(
+    () => validateReviewEvidence({ artifact: artifact(), headSha: HEAD_SHA, permission: 'admin', roleName: 'admin', prState: 'closed' }),
     /closed/
   );
   assert.throws(
-    () => validateReviewEvidence({ artifact: artifact(), headSha: HEAD_SHA, permission: 'admin', draft: true }),
+    () => validateReviewEvidence({ artifact: artifact(), headSha: HEAD_SHA, permission: 'admin', roleName: 'admin', draft: true }),
     /draft/
   );
 });
@@ -149,7 +167,8 @@ test('validateReviewEvidence does not turn a non-approval into success', () => {
   const result = validateReviewEvidence({
     artifact: artifact({ verdict: 'changes-requested' }),
     headSha: HEAD_SHA,
-    permission: 'admin'
+    permission: 'admin',
+    roleName: 'admin'
   });
   assert.equal(result.state, 'failure');
   assert.match(result.description, /changes-requested/);
@@ -200,6 +219,25 @@ test('recordReviewEvidence publishes a comment and SHA-bound status', async () =
   const statusCall = calls.find((call) => call.key === `POST /repos/brxtrac/tracabot/statuses/${HEAD_SHA}`);
   assert.equal(statusCall.body.context, REVIEW_EVIDENCE_CONTEXT);
   assert.equal(statusCall.body.target_url, result.comment_url);
+});
+
+test('recordReviewEvidence accepts GitHub maintain role when permission is write', async () => {
+  const { fetchImpl } = mockGitHub(baseRoutes({
+    'GET /repos/brxtrac/tracabot/collaborators/brxtrac/permission': () => jsonResponse(200, {
+      permission: 'write',
+      role_name: 'maintain'
+    })
+  }));
+  const result = await recordReviewEvidence({
+    fetchImpl,
+    token: 'test-token',
+    repo: 'brxtrac/tracabot',
+    prNumber: 2,
+    artifactText: artifact(),
+    publish: false
+  });
+  assert.equal(result.state, 'success');
+  assert.equal(result.published, false);
 });
 
 test('recordReviewEvidence reuses an existing evidence comment', async () => {

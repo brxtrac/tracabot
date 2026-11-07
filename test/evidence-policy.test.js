@@ -134,6 +134,37 @@ test('high-confidence admin enforcement cannot bypass explicit community opt-out
   assert.ok(result.promotion.reasons.includes('sharing_consent_missing'));
 });
 
+test('explicit consent or privacy opt-out blocks every promotable event kind', () => {
+  const denied = event({
+    local_only: true,
+    payload: { consent_to_share: false }
+  });
+  const deniedResult = evaluateEvidence(denied, { policy: POLICY });
+  assert.equal(deniedResult.promotion.eligible, false);
+  assert.ok(deniedResult.promotion.reasons.includes('sharing_consent_denied'));
+
+  const optedOut = event({
+    payload: { privacy_opt_out: true }
+  });
+  const optedOutResult = evaluateEvidence(optedOut, { policy: POLICY });
+  assert.equal(optedOutResult.promotion.eligible, false);
+  assert.ok(optedOutResult.promotion.reasons.includes('sharing_consent_denied'));
+
+  const native = event({
+    event_type: 'ban_executed',
+    payload: {
+      consent_to_share: false,
+      admin_verified: true,
+      enforcement_verified: true,
+      source: 'native_chat_member_admin_ban',
+      target_key: 'id:8388593201'
+    }
+  });
+  const nativeResult = evaluateEvidence(native, { policy: POLICY });
+  assert.equal(nativeResult.promotion.eligible, false);
+  assert.ok(nativeResult.promotion.reasons.includes('sharing_consent_denied'));
+});
+
 test('high-confidence admin enforcement cannot bypass missing consent', () => {
   const ban = event({
     event_type: 'ban_executed',

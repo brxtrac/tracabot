@@ -362,6 +362,60 @@ test('admin enforcement without provenance is not auto-promoted', async () => {
   eventStore.db.close();
 });
 
+test('explicit consent denial blocks promotion for private fraud and other event shapes', async () => {
+  const eventStore = store();
+  eventStore.append(evidenceEvent({
+    id: 'private-fraud-denied',
+    local_only: true,
+    payload: { consent_to_share: false }
+  }));
+  eventStore.append(evidenceEvent({
+    id: 'review-denied',
+    event_type: 'review_upheld',
+    payload: {
+      consent_to_share: false,
+      target_event_id: 'private-fraud-denied',
+      reviewed_target: { id: '8388593201', username: 'fake_support' },
+      reviewed_target_key: 'id:8388593201',
+      admin_verified: true,
+      review_decision: 'upheld'
+    }
+  }));
+  eventStore.append(evidenceEvent({
+    id: 'submission-denied',
+    event_type: 'evidence_submission',
+    payload: { consent_to_share: false }
+  }));
+  const writes = [];
+  const dkg = { async writeEvent(event) { writes.push(event); return { ual: 'did:dkg:.../_shared_memory' }; } };
+  const result = await promoteEligibleEvidence({ store: eventStore, dkg, config: CONFIG });
+  assert.equal(result.promoted.length, 0);
+  assert.equal(writes.length, 0);
+  for (const eventId of ['private-fraud-denied', 'review-denied', 'submission-denied']) {
+    const skipped = result.skipped.find((item) => item.eventId === eventId);
+    assert.ok(skipped, eventId);
+    assert.ok(skipped.reasons.includes('sharing_consent_denied'), eventId);
+  }
+  eventStore.db.close();
+});
+
+test('local staging with explicit sharing consent still promotes intentionally shared fraud', async () => {
+  const eventStore = store();
+  eventStore.append(evidenceEvent({
+    id: 'private-fraud-shared',
+    local_only: true,
+    payload: { consent_to_share: true }
+  }));
+  const writes = [];
+  const dkg = { async writeEvent(event) { writes.push(event); return { ual: 'did:dkg:.../_shared_memory' }; } };
+  const result = await promoteEligibleEvidence({ store: eventStore, dkg, config: CONFIG });
+  assert.equal(result.promoted.length, 1);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].payload.source_event_id, 'private-fraud-shared');
+  eventStore.db.close();
+});
+
+
 test('promotion stays disabled when DKG writes are disabled', async () => {
   const eventStore = store();
   eventStore.append(evidenceEvent({ id: 'finding-disabled' }));
