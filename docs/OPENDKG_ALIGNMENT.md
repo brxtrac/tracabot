@@ -1,16 +1,19 @@
 # OpenDKG collaboration alignment
 
-Status: **proposal and readiness only**. TRACaBot is not yet an accepted OpenDKG
-project. Nothing in this document transfers ownership, creates a shared graph,
-commits funds, or changes TRACaBot's license or operating authority.
+Status: **published as a new independent project repository** at
+`OpenDKG/tracabot` on 2026-11-07. The original repository and history remain at
+`brxtrac/tracabot`. Nothing in this document transfers ownership, creates a
+shared graph, commits funds, or changes TRACaBot's license or operating
+authority. Broader governance, funding, and shared-graph decisions remain open.
 
 ## Current position
 
-TRACaBot remains an independent, MIT-licensed project maintained in
-`brxtrac/tracabot`. The proposed OpenDKG umbrella is a collaboration layer for
-independent projects, not a merger of source repositories. TRACaBot intends to
-participate if the founders and maintainers agree on the terms below; acceptance
-is pending.
+TRACaBot is an independent, MIT-licensed project. Its original repository
+remains at `brxtrac/tracabot`; the reviewed merged history is published as a
+new repository at `OpenDKG/tracabot`. The OpenDKG umbrella is a collaboration
+layer for independent projects, not a merger of source repositories. This
+publication records the scoped integration decision; broader governance,
+funding, shared-graph, and legal decisions remain open.
 
 The initial joint-rules discussion is intentionally narrow. Broader governance,
 funding platforms, domains, legal entities, and shared infrastructure are later
@@ -19,8 +22,9 @@ voting rules, financial commitments, or a governance charter.
 
 ## Repository-specific license exception (2026-11-07)
 
-This is the pre-publication license disclosure for the planned new
-`OpenDKG/tracabot` repository. It does not claim that the repository exists yet.
+This is the license disclosure for the new `OpenDKG/tracabot` repository,
+created 2026-11-07. It does not claim founder unanimity or a broader licensing
+decision.
 
 - **Authorization basis:** `@brxtrac`, an OpenDKG founder and organization
   administrator, supplied the integration instruction to add this existing
@@ -29,14 +33,15 @@ This is the pre-publication license disclosure for the planned new
   not a claim of unanimous founder approval, a new legal agreement, or authority
   to relicense third-party material.
 - **New repository, not a transfer:** [`brxtrac/tracabot`](https://github.com/brxtrac/tracabot)
-  remains in place. The planned `OpenDKG/tracabot` is a new repository containing
-  the reviewed source history. No ownership of the original repository,
-  copyright, trademark, domain, funding, or umbrella enforcement authority
-  changes.
+  remains in place. `OpenDKG/tracabot` is a new repository containing the
+  reviewed source history. No ownership of the original repository, copyright,
+  trademark, domain, funding, or umbrella enforcement authority changes.
 - **Source basis:** repository history through commit
   `5f52d05bfd2fb6bcb5d62afaecc4f7f981716dfa` plus the reviewed commit that
-  contains this record. The exact final reviewed source commit is recorded in
-  the SHA-bound review artifact rather than this file, avoiding a self-reference.
+  contains the pre-publication record. Initial publication imported merged
+  `main` at `30cad6a6bcc262ef89eac608cbd3631318a642ff`. The exact final reviewed
+  source commit is recorded in the SHA-bound review artifact rather than this
+  file, avoiding a self-reference.
 - **License unchanged:** `LICENSE` is byte-for-byte unchanged: MIT License,
   Copyright (c) 2026 brxtrac. SHA-256
   `458be8733c589d10fec02112413bf16076fdfeae7832b39f22889d1b6ed13710`;
@@ -147,10 +152,15 @@ Repository baseline:
 - [x] Private appeal and creator-curator authority boundaries are documented.
 - [x] Issue and pull-request templates ask for tests, privacy, and write-scope
   disclosure.
+- [x] New repository `OpenDKG/tracabot` published 2026-11-07 from merged `main`;
+  `brxtrac/tracabot` and its history remain.
+- [x] Branch protection on the new repository requires `test` and
+  `ai-review/evidence`; default Actions workflow permissions remain read-only.
 
 Still requiring a human decision:
 
-- [ ] Accept, decline, or narrow TRACaBot's participation in the umbrella.
+- [ ] Define full umbrella acceptance, governance, and membership terms beyond
+  this repository publication.
 - [ ] Adopt a shared governance charter, membership rule, and decision process.
 - [ ] Name public maintainers and a security contact for the umbrella.
 - [ ] Adopt a code of conduct and enforcement process.
@@ -168,7 +178,8 @@ Still requiring a human decision:
 
 This document does not claim:
 
-- that TRACaBot has been accepted into OpenDKG;
+- that all OpenDKG founders unanimously approved this specific repository
+  publication or its repository-specific license exception;
 - that any shared graph, funding account, donation address, governance body, or
   joint domain exists;
 - that OpenDKG has reviewed or endorsed TRACaBot's evidence or enforcement;

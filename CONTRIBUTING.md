@@ -2,9 +2,12 @@
 
 TRACaBot is an independent, MIT-licensed project maintained for the OriginTrail
 DKG v10 integration bounty with a minimum six-month support window after
-registry acceptance. Collaboration under a proposed OpenDKG umbrella does not
-transfer repository ownership or TRACaBot curator, admin, or enforcement
-authority. See [docs/OPENDKG_ALIGNMENT.md](./docs/OPENDKG_ALIGNMENT.md).
+registry acceptance. It is published in the new repository
+[OpenDKG/tracabot](https://github.com/OpenDKG/tracabot), with its original
+maintainer repository retained at [brxtrac/tracabot](https://github.com/brxtrac/tracabot).
+Publication does not transfer repository ownership or TRACaBot curator, admin,
+or enforcement authority. See
+[docs/OPENDKG_ALIGNMENT.md](./docs/OPENDKG_ALIGNMENT.md).
 
 ## Workflow
 
