@@ -212,19 +212,18 @@ export function evaluateKnownCampaignAutoBan({
 
 export function evaluateConfirmedCampaignBan({ exactActorRoots = [], campaignRoots = [], currentIndicators = [], overturned = false } = {}) {
   if (overturned) return { eligible: false, reason: 'admin_overturned' };
-  const valid = (root) => root?.eventType === 'ban_executed' && root.adminVerified === true && root.eventId;
+  // Only exact stable-identity confirmed scam evidence can authorize removal.
+  // Admin-enforcement records and campaign/indicator association are not proof.
+  const valid = (root) => root?.eventId
+    && root.exactActorMatch !== false
+    && (root.localApproval === true || root.publisherApprovalVerified === true)
+    && (root.eventType === 'review_upheld'
+      || (root.eventType === 'fraud_finding' && root.adminVerified === true)
+      || root.claimLevel === 'confirmed_scam');
   const exact = exactActorRoots.find(valid);
-  if (exact) return { eligible: true, reason: 'previous_admin_ban_same_actor', roots: [exact.eventId] };
-  const independent = new Map();
-  for (const root of campaignRoots.filter(valid)) {
-    if (root.communityId && !independent.has(root.communityId)) independent.set(root.communityId, root);
-  }
-  if (independent.size < 2) return { eligible: false, reason: 'insufficient_independent_admin_bans' };
-  const indicators = new Set(currentIndicators.map((item) => String(item).toLowerCase()));
-  if (![...independent.values()].some((root) => (root.indicators || []).some((item) => indicators.has(String(item).toLowerCase())))) {
-    return { eligible: false, reason: 'missing_shared_campaign_indicator' };
-  }
-  return { eligible: true, reason: 'confirmed_campaign', roots: [...independent.values()].map((root) => root.eventId) };
+  if (exact) return { eligible: true, reason: 'previous_confirmed_scam_same_actor', roots: [exact.eventId] };
+  if (campaignRoots.length) return { eligible: false, reason: 'campaign_association_not_allowed' };
+  return { eligible: false, reason: 'insufficient_confirmed_actor_evidence' };
 }
 
 export function formatRiskAssessment({ target, risk }) {

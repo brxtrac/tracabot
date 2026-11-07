@@ -72,10 +72,26 @@ export class LlmClient {
 
   async complete({ system, user }) {
     const provider = this.provider();
-    if (provider === 'off') return { ok: false, provider: 'off', text: '' };
+    if (provider === 'off') return { ok: false, provider: 'off', text: '', error: 'disabled' };
     if (this.httpBaseUrl()) return this.completeHttp({ system, user });
     if (['auto', 'openclaw', 'openclaw-auto'].includes(provider)) return this.completeOpenClaw({ system, user });
-    return { ok: false, provider, text: '' };
+    return { ok: false, provider, text: '', error: 'not_configured' };
+  }
+
+  status() {
+    const provider = this.provider();
+    const baseUrl = this.httpBaseUrl();
+    const discovered = ['auto', 'openclaw', 'openclaw-auto'].includes(provider) ? discoverOpenClawLlm(this.config) : null;
+    return {
+      provider,
+      enabled: provider !== 'off' && Boolean(baseUrl || discovered),
+      transport: baseUrl ? 'openai-compatible-http' : discovered ? 'openclaw-discovery' : 'none',
+      model: this.config.llmModel || discovered?.model || (baseUrl ? this.modelForProvider() : ''),
+      apiKeyConfigured: Boolean(this.config.llmApiKey || discovered?.token),
+      timeoutMs: Number(this.config.llmTimeoutMs) || 30000,
+      maxTokens: Number(this.config.llmMaxTokens) || 220,
+      authority: 'explanations-and-classification-only'
+    };
   }
 
   async completeHttp({ system, user }) {
@@ -87,8 +103,8 @@ export class LlmClient {
         model,
         messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
         temperature: 0.2,
-        max_tokens: 220
-      }, this.config.llmApiKey, this.config.telegramTimeoutMs || 30000);
+        max_tokens: Number(this.config.llmMaxTokens) || 220
+      }, this.config.llmApiKey, Number(this.config.llmTimeoutMs) || 30000);
       return { ok: true, provider: provider === 'auto' ? 'http-chat' : provider, endpoint: '/v1/chat/completions', model, text: textFromChatResponse(response), raw: response };
     } catch (error) {
       return { ok: false, provider: provider === 'auto' ? 'http-chat' : provider, error: error instanceof Error ? error.message : String(error), text: '' };
@@ -97,8 +113,10 @@ export class LlmClient {
 
   async completeOpenClaw({ system, user }) {
     const discovered = discoverOpenClawLlm(this.config);
-    if (!discovered) return { ok: false, provider: 'openclaw-auto', text: '' };
+    if (!discovered) return { ok: false, provider: 'openclaw-auto', text: '', error: 'not_configured' };
     const base = discovered.baseUrl.replace(/\/$/, '');
+    const maxTokens = Number(this.config.llmMaxTokens) || 220;
+    const timeoutMs = Number(this.config.llmTimeoutMs) || 30000;
     if (discovered.provider === 'openclaw-model-provider') {
       try {
         const model = String(discovered.model || 'default').replace(/^[^/]+\//, '');
@@ -106,8 +124,8 @@ export class LlmClient {
           model,
           messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
           temperature: 0.2,
-          max_tokens: 220
-        }, discovered.token, this.config.telegramTimeoutMs || 30000);
+          max_tokens: maxTokens
+        }, discovered.token, timeoutMs);
         return { ok: true, provider: discovered.provider, endpoint: '/chat/completions', text: textFromChatResponse(response), raw: response };
       } catch (error) {
         return { ok: false, provider: discovered.provider, error: error instanceof Error ? error.message : String(error), text: '' };
@@ -117,11 +135,11 @@ export class LlmClient {
       model: discovered.model || 'default',
       messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
       temperature: 0.2,
-      max_tokens: 220
+      max_tokens: maxTokens
     };
     for (const path of OPENCLAW_CHAT_PATHS) {
       try {
-        const response = await postJson(`${base}${path}`, body, discovered.token, this.config.telegramTimeoutMs || 30000);
+        const response = await postJson(`${base}${path}`, body, discovered.token, timeoutMs);
         const text = textFromChatResponse(response);
         if (text) return { ok: true, provider: 'openclaw-auto', endpoint: path, text, raw: response };
       } catch {
