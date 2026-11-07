@@ -46,6 +46,16 @@ async function runCurator(prompt, { runner = spawn, createSession, finishSession
     let output = '';
     let bytes = 0;
     let error = '';
+    let cleaned = false;
+    let settled = false;
+    let cleanupFailure;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      try { finish(sessionID); } catch (failure) {
+        cleanupFailure = failure;
+      }
+    };
     const timer = setTimeout(() => child.kill('SIGKILL'), 90000);
     child.stdout.on('data', (chunk) => {
       bytes += chunk.length;
@@ -53,11 +63,20 @@ async function runCurator(prompt, { runner = spawn, createSession, finishSession
       output += chunk;
     });
     child.stderr.on('data', (chunk) => { error = (error + chunk).slice(-1000); });
-    child.on('error', (failure) => { clearTimeout(timer); reject(failure); });
+    child.on('error', (failure) => {
+      clearTimeout(timer);
+      cleanup();
+      if (settled) return;
+      settled = true;
+      reject(failure);
+    });
     child.on('close', (code) => {
       clearTimeout(timer);
-      finishSession(sessionID);
+      cleanup();
+      if (settled) return;
+      settled = true;
       if (code !== 0 || bytes > MAX_RESPONSE_BYTES) { reject(new Error(`OpenCode curator failed (${code}): ${error.slice(-200)}`)); return; }
+      if (cleanupFailure) { reject(cleanupFailure); return; }
       try {
         const events = output.split('\n').filter(Boolean).map((line) => JSON.parse(line));
         if (events.some((event) => event.type === 'error')) throw new Error('OpenCode curator reported an error');

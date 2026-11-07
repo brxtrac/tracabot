@@ -146,6 +146,19 @@ test('protection evidence fails closed on missing identity, missing key, and gra
   assert.deepEqual(outage.evidence, []);
 });
 
+test('text-derived campaign keys are hashed before shared graph writes', async () => {
+  const dkg = new DkgClient({ contextGraph: 'tracabot', dkgPseudonymKey: 'test-key-at-least-32-bytes-long-enough', dkgPublishVerified: false });
+  const adapter = makeAdapterClient();
+  dkg.client = async () => adapter;
+  const raw = 'text:synthetic_reporter_contact private_evidence_secret';
+  const result = await dkg.writeEvent({ id: 'private-campaign', event_type: 'fraud_campaign',
+    payload: { campaign_key: raw, confidence: 91 } });
+  const key = result.triples.find((triple) => triple.predicate.endsWith('#campaignKey'));
+  assert.match(key.object, /^"campaign_sha256:[a-f0-9]{64}"$/);
+  assert.doesNotMatch(JSON.stringify(adapter.calls), /synthetic_reporter_contact|private_evidence_secret/);
+  assert.ok(adapter.calls.some((call) => call[0] === 'createKnowledgeAsset'));
+});
+
 test('public campaign query returns only sanitized shared-memory fields', async () => {
   const dkg = new DkgClient({ contextGraph: 'tracabot' });
   const rows = [

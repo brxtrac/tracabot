@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createHmac } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { canonicalizeMessageText, detectGamblingPromotion } from './message-patterns.js';
-import { publicIdFor } from './evidence-policy.js';
+import { publicCampaignKey, publicIdFor } from './evidence-policy.js';
 
 const NS = 'https://tracabot.org/ontology#';
 const DCTERMS_CREATED = 'http://purl.org/dc/terms/created';
@@ -283,6 +283,8 @@ function eventTriples(event, pseudonymKey = '') {
   const verifiedMemoryCandidate = Boolean(event.payload?.verified_memory_authority || event.payload?.trac_backed_global_authority);
   const decisionScope = verifiedMemoryCandidate ? 'global_verified_memory_candidate' : event.payload?.decision_scope || '';
   const trustBasis = verifiedMemoryCandidate ? 'bot_owner_verified_memory_candidate' : event.payload?.trust_basis || '';
+  // Keep local campaign dedup keys unchanged; never share text-derived source words.
+  const campaignKey = String(event.payload?.campaign_key || '');
   const triples = [
     { subject, predicate: 'rdf:type', object: `${NS}${event.event_type}` },
     { subject, predicate: `${NS}eventId`, object: literal(event.id) },
@@ -349,7 +351,7 @@ function eventTriples(event, pseudonymKey = '') {
     { subject, predicate: `${NS}urgentAdminAlert`, object: literal(event.payload?.urgent_admin_alert ? 'true' : '') },
     { subject, predicate: `${NS}restrictedUntil`, object: literal(event.payload?.restricted_until || '') },
     { subject, predicate: `${NS}actionDurationSeconds`, object: literal(event.payload?.action_duration_seconds || '') },
-    { subject, predicate: `${NS}campaignKey`, object: literal(event.payload?.campaign_key || '') },
+    { subject, predicate: `${NS}campaignKey`, object: literal(campaignKey.startsWith('text:') ? publicCampaignKey(campaignKey) : campaignKey) },
     { subject, predicate: `${NS}reportedAlias`, object: literal(event.payload?.reported_alias || event.payload?.reportedAlias || '') },
     { subject, predicate: `${NS}claimedRole`, object: literal(event.payload?.claimed_role || event.payload?.claimedRole || '') },
     { subject, predicate: `${NS}claimedOrganization`, object: literal(event.payload?.claimed_organization || event.payload?.claimedOrganization || '') },
@@ -1199,7 +1201,7 @@ export class DkgClient {
           confidence,
           scamType: cleanValue(binding.scamType) || 'campaign',
           createdAt: cleanValue(binding.created),
-          campaignKey: cleanValue(binding.campaignKey),
+          campaignKey: publicCampaignKey(cleanValue(binding.campaignKey)),
           eventCount: numeric(binding.campaignEventCount || '0'),
           communityCount: numeric(binding.campaignCommunityCount || '0'),
           indicators: { domains: [], wallets: [], patterns: [] },

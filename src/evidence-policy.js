@@ -315,6 +315,12 @@ export function evaluateEvidence(event = {}, { history = [], policy = {} } = {})
   };
 }
 
+export function publicCampaignKey(value = '') {
+  const key = String(value || '');
+  if (!key || /^campaign_sha256:[a-f0-9]{64}$/.test(key)) return key;
+  return `campaign_sha256:${createHash('sha256').update('tracabot:public-campaign:v1\0').update(key).digest('hex')}`;
+}
+
 export function publicIdFor(event = {}) {
   return `evt_${createHash('sha256').update(text(event.id || evidenceFingerprint(event))).digest('hex').slice(0, 16)}`;
 }

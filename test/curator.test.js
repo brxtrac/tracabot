@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +10,65 @@ import { evaluateConfirmedCampaignBan } from '../src/risk-engine.js';
 const text = 'Urgent: verify your wallet at https://fraud.example/claim to avoid account suspension';
 const base = { quality: 85, confidence: 90, text, expires: '2099-01-01T00:00:00Z' };
 const approval = { action: 'promote', category: 'fraud', reason: 'Message pressures target to connect wallet at suspicious verification site.', evidence: 'verify your wallet at https://fraud.example/claim' };
+
+function successfulChild() {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+  process.nextTick(() => {
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'text', part: { text: JSON.stringify(approval) } }) + '\n'));
+    child.emit('close', 0);
+  });
+  return child;
+}
+
+test('default curator cleanup runs without an injected finishSession', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tracabot-cleanup-'));
+  const path = process.env.PATH;
+  const log = join(dir, 'cleanup.log');
+  writeFileSync(join(dir, 'opencode'), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\n`, { mode: 0o755 });
+  process.env.PATH = `${dir}:${path}`;
+  try {
+    const answer = await reviewDraft(base, { createSession: () => 'ses_test', runner: successfulChild });
+    assert.equal(answer.action, 'promote');
+    const calls = readFileSync(log, 'utf8');
+    assert.match(calls, /api post \/api\/session\/ses_test\/interrupt/);
+    assert.match(calls, /api patch \/api\/session\/ses_test/);
+  } finally { process.env.PATH = path; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('cleanup exceptions reject reviews and release review reservations', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tracabot-cleanup-'));
+  let cleanups = 0;
+  const reviewer = (draft) => reviewDraft(draft, {
+    createSession: () => 'ses_test', runner: successfulChild,
+    finishSession: () => { cleanups++; throw new Error('cleanup unavailable'); }
+  });
+  try {
+    await assert.rejects(reviewer(base), /cleanup unavailable/);
+    const options = { dkg: { async pendingConversationArtifacts() { return [{ id: 'one', ...base }]; } },
+      ledgerPath: join(dir, 'reviews.sqlite'), reviewer };
+    const first = await curateWorkingMemory(options);
+    assert.equal(first[0].action, 'error');
+    assert.match(first[0].error, /cleanup unavailable/);
+    const second = await curateWorkingMemory(options);
+    assert.equal(second[0].action, 'retry_deferred');
+    assert.equal(cleanups, 2);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('child error followed by close rejects once and cleans up once', async () => {
+  let cleanups = 0;
+  await assert.rejects(reviewDraft(base, {
+    createSession: () => 'ses_test', finishSession: () => { cleanups++; },
+    runner: () => {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+      process.nextTick(() => { child.emit('error', new Error('spawn unavailable')); child.emit('close', -1); });
+      return child;
+    }
+  }), /spawn unavailable/);
+  assert.equal(cleanups, 1);
+});
 
 test('curator only promotes screened evidence after reasoned LLM approval; reuses cached review', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'tracabot-curator-'));

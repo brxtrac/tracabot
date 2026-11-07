@@ -3,8 +3,51 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { connect } from 'node:net';
 import { EventStore } from '../src/store.js';
 import { createPublicServer } from '../src/public-server.js';
+import { DkgClient } from '../src/dkg-client.js';
+import { publicCampaignKey } from '../src/evidence-policy.js';
+
+test('malformed Host returns a bounded 400 and the server remains healthy', async () => {
+  const { server } = makeServer();
+  const base = await listen(server);
+  try {
+    const response = await new Promise((resolve, reject) => {
+      const socket = connect(server.address().port, '127.0.0.1');
+      let data = '';
+      socket.on('connect', () => socket.end('GET /api/public/status HTTP/1.1\r\nHost: [\r\nConnection: close\r\n\r\n'));
+      socket.on('data', (chunk) => { data += chunk; });
+      socket.on('end', () => resolve(data));
+      socket.on('error', reject);
+    });
+    assert.match(response, /^HTTP\/1\.1 400/);
+    assert.ok(response.length < 1000);
+    assert.equal((await fetch(`${base}/api/public/policy`)).status, 200);
+  } finally { await close(server); }
+});
+
+test('remote DKG campaign API hashes legacy text keys without exposing reporter or private evidence', async () => {
+  const { store, config } = makeServer({ publicReadDkg: true });
+  const dkg = new DkgClient({ contextGraph: 'tracabot' });
+  const key = 'text:synthetic_reporter_contact private_evidence_secret';
+  dkg.queryBindings = async () => [{
+    g: 'did:dkg:context-graph:tracabot/_shared_memory',
+    s: 'https://tracabot.org/ontology#event/legacy-campaign',
+    confidence: '91', campaignKey: key, campaignEventCount: '2', campaignCommunityCount: '2'
+  }];
+  const server = createPublicServer({ store, config, dkg, autoPromote: false });
+  const base = await listen(server);
+  try {
+    const response = await fetch(`${base}/api/public/campaigns`);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.records.length, 1);
+    assert.equal(body.records[0].campaignKey, publicCampaignKey(key));
+    assert.equal(publicCampaignKey(publicCampaignKey(key)), publicCampaignKey(key));
+    assert.doesNotMatch(JSON.stringify(body), /synthetic_reporter_contact|private_evidence_secret/);
+  } finally { await close(server); }
+});
 
 function makeServer(overrides = {}) {
   const store = new EventStore(join(mkdtempSync(join(tmpdir(), 'tracabot-public-')), 'events.sqlite'));

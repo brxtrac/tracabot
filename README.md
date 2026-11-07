@@ -1,5 +1,7 @@
 # TRACaBot
 
+The optional OpenCode scheduled curator is host-specific: it pins `9router/cx/gpt-6-sol#medium` independently of `TRACABOT_LLM` and requires the configured OpenCode agent/provider. It is not the join-protection engine; generic LLM configuration does not make that curator portable.
+
 TRACaBot is an OpenClaw + Telegram + OriginTrail DKG v10 intelligent anti-scam bot. It monitors Telegram communities, detects scam patterns, records local working memory, and writes evidence-backed fraud intelligence to DKG v10 Shared Memory so every TRACaBot instance can query reusable scam context and apply it in its own community. Think of it as a Telegram anti-scam agent that updates with knowledge from all participating communities instead of forcing every group to defend itself alone.
 
 ## OpenDKG Collaboration Status

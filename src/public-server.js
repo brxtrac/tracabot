@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import {
   CLAIM_LEVELS,
   EVIDENCE_POLICY_VERSION,
+  publicCampaignKey,
   publicIdFor,
   sanitizePublicEvidence,
   sanitizePublicEvidenceList
@@ -431,7 +432,13 @@ export function createPublicServer({
   const creatorWriteLimiter = rateLimiter(config.creatorCuratorWriteRateLimitPerHour || 30);
 
   const server = createServer(async (req, res) => {
-    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    let url;
+    try {
+      if (req.headers.host) new URL(`http://${req.headers.host}`);
+      url = new URL(req.url || '/', 'http://localhost');
+    } catch {
+      return text(res, 400, 'malformed request');
+    }
     const pathname = url.pathname;
     try {
       if (req.method === 'GET' || req.method === 'HEAD') {
@@ -475,7 +482,7 @@ export function createPublicServer({
                 for (const record of remote) {
                   if (record?.publicId && !seen.has(record.publicId)) {
                     seen.add(record.publicId);
-                    records.push(record);
+                    records.push({ ...record, campaignKey: publicCampaignKey(record.campaignKey) });
                   }
                 }
               }
