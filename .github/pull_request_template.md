@@ -30,5 +30,7 @@ publication, funding commitment, or OpenDKG acceptance.
 ## Review status
 
 - [ ] Maintainer review completed before merge
+- [ ] Review evidence artifact targets the exact current PR head and is recorded
+      with `scripts/record-review-evidence.js` (`ai-review/evidence`)
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md) and [SECURITY.md](../SECURITY.md).

@@ -19,6 +19,47 @@ authority. See [docs/OPENDKG_ALIGNMENT.md](./docs/OPENDKG_ALIGNMENT.md).
 5. A maintainer reviews the change before merge. Unreviewed changes are not
    accepted as project decisions or evidence.
 
+## Review evidence
+
+`main` requires the `ai-review/evidence` status in addition to tests. It is
+recorded by a maintainer from an actual independent review, not by PR content
+and not as a GitHub pull-request approval or app identity claim.
+
+Save the review artifact with the exact reviewed commit SHA:
+
+````markdown
+<!-- tracabot-review-evidence:v1 -->
+
+```json
+{
+  "reviewed_sha": "<40-character commit SHA>",
+  "verdict": "approved",
+  "reviewer": "<reviewer identity>",
+  "method": "<what was reviewed>",
+  "reviewed_at": "<ISO-8601 timestamp>"
+}
+```
+
+<review findings and limitations>
+````
+
+Dry-run first, then publish only after completing the review:
+
+```bash
+GITHUB_TOKEN=$(gh auth token) node scripts/record-review-evidence.js \
+  --repo brxtrac/tracabot --pr <number> --artifact <path>
+GITHUB_TOKEN=$(gh auth token) node scripts/record-review-evidence.js \
+  --repo brxtrac/tracabot --pr <number> --artifact <path> --publish
+```
+
+The command verifies that the authenticated actor has `admin` or `maintain`
+permission, the artifact targets the exact current open non-draft PR head, and
+the PR belongs to the same repository. It posts the artifact as a PR comment and
+creates an `ai-review/evidence` commit status tied to that SHA. A new commit
+invalidates the old status; record a new artifact for the new head. The artifact
+is public, so remove private notes, credentials, raw identifiers, and other
+non-public material before publishing.
+
 ## Security and privacy
 
 - Never commit `.env`, bot or DKG tokens, private keys, local databases, raw
