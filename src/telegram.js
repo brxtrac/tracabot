@@ -5,7 +5,6 @@ import {
   DEFAULT_KNOWN_CAMPAIGN_PATTERNS,
   displayName,
   evaluateKnownCampaignAutoBan,
-  evaluateConfirmedCampaignBan,
   formatBanReply,
   formatDkgReference,
   formatReportReply,
@@ -24,6 +23,11 @@ import { redactedOpenClawStatus } from './openclaw-config.js';
 import { TracabotSkillService } from './skill-service.js';
 import { evaluateEvidence, EVIDENCE_POLICY_VERSION } from './evidence-policy.js';
 import { promoteEligibleEvidence } from './evidence-promoter.js';
+import { analyzeBanContext, BAN_CONTEXT_LIMITS, emptyBanContext } from './ban-context.js';
+import { evaluateJoinProtection, PROTECTION_POLICY_VERSION, protectionSummary } from './protection-policy.js';
+import { fetchCreatorAttestation } from './creator-attestation.js';
+import { flushFederationQueue } from './federation-client.js';
+import { resolveReviewTarget } from './review-target.js';
 
 export const CAMPAIGN_POLICIES = Object.freeze([
   Object.freeze({
@@ -38,8 +42,11 @@ export const TELEGRAM_COMMANDS = [
   { command: 'start', description: 'Open Tracabot protection menu' },
   { command: 'scan', description: 'Check a user, wallet, or replied message for scam risk' },
   { command: 'report', description: 'Report suspicious users, messages, links, wallets, or forwarded DMs' },
-  { command: 'ban', description: 'Ban a replied user and publish ban evidence (admin)' },
-  { command: 'mute', description: 'Admin: mute a replied or mentioned user for a duration' }
+  { command: 'ban', description: 'Admin: optional ban command; normal admin bans are logged automatically' },
+  { command: 'mute', description: 'Admin: mute a replied or mentioned user for a duration' },
+  { command: 'appeal', description: 'Private: appeal your own ban and review your local cases' },
+  { command: 'appeals', description: 'Admin: review pending ban appeals for chats you moderate' },
+  { command: 'controls', description: 'Private: current-admin protection controls and auto-ban overrides' }
 ];
 
 const MAX_TEXT_CHARS = 4096;
@@ -53,6 +60,7 @@ const AGENT_ACTIONS = new Set([
   'overturn'
 ]);
 const OBSERVED_CONTEXT_TTL_MS = 24 * 60 * 60 * 1000;
+const MEMBERSHIP_EPISODE_DEDUPE_MS = 2 * 60 * 1000;
 const RECENT_JOIN_RENAME_WINDOW_MS = 30 * 60 * 1000;
 const ADMIN_CACHE_TTL_MS = 10 * 60 * 1000;
 const SOLVED_JOIN_CHALLENGE_TTL_MS = 5 * 60 * 1000;
@@ -585,6 +593,7 @@ function hasEvidenceForDkg(eventType = '', payload = {}) {
 function isCampaignRootEvent(event = {}) {
   if (event.event_type === 'fraud_campaign') return false;
   const payload = event.payload || {};
+  if (payload.campaign_root_eligible === false) return false;
   if (!hasEvidenceForDkg(event.event_type, payload) || !payload.evidence?.length) return false;
   if (event.event_type === 'ban_executed' || event.event_type === 'review_upheld') return true;
   if (event.event_type === 'report_submitted') return payload.report_decision === 'accepted' && Number(payload.local_confidence || 0) >= 60;
@@ -661,7 +670,31 @@ export class TelegramShieldBot {
     const ids = this.observedUserMessages.get(key) || [];
     ids.push(message.message_id);
     this.observedUserMessages.set(key, [...new Set(ids)].slice(-100));
-    this.store.rememberMessage?.(message.chat.id, message.from.id, message.message_id);
+    const captureText = this.config.banContext !== false;
+    const maxChars = this.config.banContextMaxTextChars || BAN_CONTEXT_LIMITS.maxTextChars;
+    const hasMedia = Boolean(message.photo || message.document || message.video || message.animation
+      || message.audio || message.voice || message.sticker || message.video_note);
+    this.store.rememberMessage?.(message.chat.id, message.from.id, message.message_id, {
+      text: captureText ? boundedText([message.text, ...entityUrls(message)].filter(Boolean).join('\n'), maxChars) : '',
+      caption: captureText ? boundedText(message.caption, maxChars) : '',
+      hasMedia,
+      date: message.date
+    });
+  }
+
+  buildBanContext(chatId, userId, actionAtMs) {
+    if (this.config.banContext === false) return emptyBanContext({ reason: 'context_disabled' });
+    const maxMessages = this.config.banContextMaxMessages || BAN_CONTEXT_LIMITS.maxMessages;
+    const maxAgeMs = (this.config.banContextMaxAgeMinutes || BAN_CONTEXT_LIMITS.maxAgeMs / 60000) * 60 * 1000;
+    const actionAtSeconds = Math.floor(actionAtMs / 1000);
+    const messages = this.store.recentMessages?.(chatId, userId, {
+      before: actionAtSeconds,
+      since: actionAtSeconds - Math.floor(maxAgeMs / 1000),
+      limit: maxMessages
+    }) || [];
+    return analyzeBanContext(messages, {
+      limits: { ...BAN_CONTEXT_LIMITS, maxMessages, maxAgeMs, maxTextChars: this.config.banContextMaxTextChars || BAN_CONTEXT_LIMITS.maxTextChars }
+    });
   }
 
   async deleteKnownUserMessages(chatId, userId, extraMessageIds = [], effectPrefix = '') {
@@ -687,7 +720,7 @@ export class TelegramShieldBot {
     return { attempted: ids.length, deleted, failed };
   }
 
-  async enforceConfirmedScam(chatId, target = {}, sourceMessageIds = [], effectPrefix = '') {
+  async enforceConfirmedScam(chatId, target = {}, sourceMessageIds = [], effectPrefix = '', { joinProtection = false } = {}) {
     if (!target?.id) return { banned: false, reason: 'missing_target_id', attempted: 0, deleted: 0, failed: 0 };
     if (target.is_bot === true || String(target.id) === String(await this.getBotId().catch(() => ''))) {
       return { banned: false, reason: 'protected_bot', attempted: 0, deleted: 0, failed: 0 };
@@ -703,6 +736,9 @@ export class TelegramShieldBot {
     }
     if (!await this.hasBanRights(chatId)) {
       return { banned: false, reason: 'missing_ban_rights', attempted: 0, deleted: 0, failed: 0 };
+    }
+    if (joinProtection && this.joinAutoRemovalPaused(chatId)) {
+      return { banned: false, reason: 'join_auto_removal_paused', attempted: 0, deleted: 0, failed: 0 };
     }
     if (effectPrefix) {
       await this.callEffect('banChatMember', { chat_id: chatId, user_id: target.id }, `${effectPrefix}:ban`);
@@ -865,7 +901,7 @@ export class TelegramShieldBot {
       const reply = await this.generalConversationReply({ ...message, text: message.text || 'Open the Tracabot protection menu.' }).catch(() => '');
       if (reply && reply.length > 5) return reply;
     }
-    return 'I’m here to help protect the group. Choose an action below, or use /scan, /report, /ban, or /mute as a reply when you need a direct action.';
+    return 'I’m here to help protect the group. Add TRACaBot as a group admin and keep it running: bans made with normal Telegram admin controls are logged automatically. Use /scan or /report for checks, and /ban or /mute only when you need the bot to act.';
   }
 
   async sendMenu(message = {}, extra = {}) {
@@ -1451,12 +1487,32 @@ export class TelegramShieldBot {
       '',
       'TRACaBot helps communities spot scams, learn from every attack, and turn shared memory into stronger protection across agents and communities.',
       '',
+      'Native admin logging',
+      '',
+      'Add TRACaBot to the group as an admin and keep it running. When any admin bans a member with normal Telegram controls, TRACaBot records the live ban, the admin actor when Telegram provides it, the target, and the time. No /ban command is required.',
+      'Telegram does not give bots access to Recent Actions, admin logs, or bans that happened before installation. Unstated ban reasons are labeled “reason not provided”. A recorded ban is enforcement evidence, not proof of a scam.',
+      'When available, TRACaBot also attaches up to 8 recently observed messages from the same user in the same chat (default 60 minutes). They are labeled “recent pre-ban context; causal link unverified” and are never treated as the ban reason or proof of guilt.',
+      '',
+      'Silent join protection',
+      '',
+      'No command is required. On a genuine join, TRACaBot checks the exact stable Telegram ID against confirmed shared evidence. Core protection is deterministic and works with no LLM configured. Default is silent observe/log; automatic removal is a separate admin opt-in and requires fresh, unretracted confirmed fraud/scam evidence from a trusted layer. Display names, aliases, admin bans, behavior flags, model confidence, and campaign association cannot authorize removal.',
+      '',
+      'Ban appeals',
+      '',
+      'Banned users can start a private chat with TRACaBot and send /appeal. The bot looks up only that Telegram account’s own locally stored ban cases, then asks an admin of the affected group to uphold or overturn. Telegram does not allow bots to send the first private message, so the user must start the chat. A local overturn records a correction and asks Telegram to unban; it never edits the creator-curator global record.',
+      '',
       'Commands',
       '',
-      '/start - open the TRACaBot Agent menu.',
+      '/start - open the TRACaBot Agent menu. In private chat it includes Protection controls, Status, Recent automatic bans, and Appeals for groups where you are a current admin.',
       '/scan - check a user, wallet, link, or replied message for scam risk. Best used as a reply to the exact message or user.',
-      '/report - send suspicious users, messages, wallets, links, or forwarded DMs to admin review.',
-      '/ban - admin only; ban a replied user and record enforcement evidence.',
+      '/appeal - private only; list your own ban cases or submit one with /appeal <case> <reason>.',
+      '/appeals - private admin review; only current admins of the affected group see pending appeals.',
+      '/controls - private only; current-admin keyboard to pause future join removals, resume, and review/override recent automatic join bans.',
+      '',
+      'Compatibility commands (not required for protection)',
+      '',
+      '/report - legacy manual queue entry; automatic detection and join protection do not need it.',
+      '/ban - optional admin command; normal Telegram admin bans are logged automatically without it.',
       '/mute - admin only; mute a replied or mentioned user. Examples: /mute 5 minutes, /mute 1 day.'
     ].join('\n');
   }
@@ -1471,17 +1527,26 @@ export class TelegramShieldBot {
     ]);
     const openclaw = redactedOpenClawStatus(this.config);
     const caps = dkgRuntime.capabilities || {};
+    const llm = this.llm?.status?.() || { enabled: false, provider: this.config.llmProvider || 'auto', model: this.config.llmModel || '' };
     return [
       '🩺 Tracabot status',
       '',
       'Telegram',
       `• Delete messages: ${canDelete ? '✅ yes' : '❌ no'}`,
       `• Restrict / ban: ${canBan ? '✅ yes' : '❌ no'}`,
+      `• Native admin ban log: ${canBan ? '✅ on' : '⚠️ needs bot admin rights'}`,
+      `• Automatic evidence sharing: ${this.config.autoPromoteEvidence === false || this.config.dkgWrites === false ? '⚪ local only' : '✅ on'}`,
       '',
       'Protection',
       `• Warn at ${this.config.warnThreshold}%`,
       `• Restrict at ${this.config.restrictThreshold}%`,
       `• Ban at ${this.config.banThreshold}%`,
+      `• Silent join lookup: ✅ deterministic${this.config.dkgPseudonymKey ? '' : ' (⚠️ HMAC identity key not configured)'}`,
+      `• Join auto-remove: ${this.config.joinAutoRemove === true ? `✅ opt-in (${(this.config.joinAutoRemoveChats || []).length ? `${this.config.joinAutoRemoveChats.length} chat(s)` : 'all chats'}, ${this.config.joinEvidenceMaxAgeDays || 180}d, local review only by default)` : '⚪ off (observe/log only)'}`,
+      `• Trusted evidence layers: ${(this.config.joinTrustedLayers || ['local']).join(', ')} (shared/verified graph is flag-only without authenticated approval)`,
+      `• Creator-curator: ${this.config.creatorCuratorUrl ? '✅ configured; signed status read required' : '⚪ not configured'}`,
+      `• Ban appeals: ✅ private /appeal; group-admin scoped resolution`,
+      `• Creator submissions: ${this.config.submitSharedEvidence === true ? '✅ opt-in' : '⚪ off'}`,
       `• Join challenge: ${this.chatJoinChallengeEnabled(chatId) ? `✅ on (${this.config.joinChallengeTtlSeconds || 60}s, ${this.config.joinChallengeMaxAttempts || 3} tries)` : '⚪ off'}`,
       `• Natural language: ${this.chatConversationalEnabled(chatId) ? '✅ on' : '⚪ off'}`,
       '',
@@ -1492,7 +1557,8 @@ export class TelegramShieldBot {
       `• Working memory: ${caps.workingMemoryAssertions ? '✅' : '⚪'}  Shared memory: ${caps.sharedWorkingMemory ? '✅' : '⚪'}  Verified publish: ${caps.verifiedMemoryPublish ? '✅' : '⚪'}`,
       '',
       'Agent',
-      `• LLM: ${this.llm ? '✅ available' : '⚪ disabled'} (${this.config.llmProvider || 'auto'})`,
+      `• LLM: ${llm.enabled ? `✅ ${llm.transport}` : '⚪ disabled/not configured'} (${llm.provider || 'auto'}${llm.model ? ` / ${llm.model}` : ''})`,
+      `• LLM authority: explanations/classification only; enforcement is deterministic`,
       `• Learning drafts: ${this.config.wmArtifacts === false ? '⚪ off' : '✅ on'}`,
       `• Cross-group alerts: ${this.config.proactiveAlertCrossGroup !== false ? '✅ on' : '⚪ off'}`
     ].join('\n');
@@ -1556,6 +1622,7 @@ export class TelegramShieldBot {
     decoratedPayload.community_name = decoratedPayload.community_name || this.config.communityName || '';
     decoratedPayload.community_type = decoratedPayload.community_type || this.config.communityType || 'telegram_group';
     decoratedPayload.policy_id = decoratedPayload.policy_id || this.chatPolicyProfile(message.chat?.id);
+    decoratedPayload.instance_id = decoratedPayload.instance_id || this.config.instanceId || '';
     if (['risk_review_needed', 'risk_action_suppressed', 'report_review_needed', 'ban_requested_no_reply', 'ban_requested_no_rights', 'proactive_cross_group_warning'].includes(eventType)) {
       decoratedPayload.target_chat_id = decoratedPayload.target_chat_id || message.chat?.id || '';
       decoratedPayload.target_chat_title = decoratedPayload.target_chat_title || chatLabel(message.chat || {});
@@ -2142,29 +2209,32 @@ export class TelegramShieldBot {
     ].join('\n');
   }
 
-  formatWhy(eventId = '') {
+  formatWhy(eventId = '', chatId = '') {
     const event = this.findEvent(eventId);
-    if (!event) return `No local tracabot event found for ${eventId}. Open Stats > Sources for recent DKG receipts.`;
+    if (!event || (chatId && !sameChat(eventChatKey(event), chatId))) {
+      return `No local tracabot event found for ${eventId} in this chat. Open Stats > Sources for recent DKG receipts.`;
+    }
     const risk = event.payload || {};
-    const evidence = risk.evidence?.length ? risk.evidence.slice(0, 8).map((item) => `- ${item}`).join('\n') : '- No evidence recorded.';
-    const dkgRefs = risk.dkg_evidence?.length ? risk.dkg_evidence.slice(0, 4).map((item) => `- ${item.ual || 'DKG'}${item.eventId ? ` event ${item.eventId}` : ''}`).join('\n') : '- No DKG source refs on this event.';
+    const safe = (value = '') => this.redactArtifactText(String(value)).replace(/https?:\/\/\S+/gi, '[url]');
+    const evidence = risk.evidence?.length ? risk.evidence.slice(0, 8).map((item) => `- ${safe(item)}`).join('\n') : '- No evidence recorded.';
+    const dkgRefs = risk.dkg_evidence?.length ? risk.dkg_evidence.slice(0, 4).map((item) => `- ${safe(item.ual || 'DKG')}${item.eventId ? ` event ${safe(item.eventId)}` : ''}`).join('\n') : '- No DKG source refs on this event.';
     const action = event.event_type;
     const ref = formatDkgReference(event) || event.id;
     const dkg = event.dkg || {};
     const dkgLines = [
       event.local_only ? '- Stored locally only.' : '',
-      event.dkg_error ? `- DKG write error: ${event.dkg_error}` : '',
-      dkg.ual ? `- Shared Memory graph: ${dkg.ual}` : '',
-      dkg.shareOperation ? `- Share operation: ${dkg.shareOperation}` : '',
-      dkg.subject ? `- Subject: ${dkg.subject}` : '',
-      dkg.publish ? `- Context Graph publish: ${dkg.publish.status || 'requested'}` : '',
-      dkg.publish_error ? `- Context Graph publish error: ${dkg.publish_error}` : '',
+      (event.dkg_error || risk.dkg_error) ? '- DKG write error: present (details redacted).' : '',
+      dkg.ual ? `- Shared Memory graph: ${safe(dkg.ual)}` : '',
+      dkg.shareOperation ? `- Share operation: ${safe(dkg.shareOperation)}` : '',
+      dkg.subject ? `- Subject: ${safe(dkg.subject)}` : '',
+      dkg.publish ? `- Context Graph publish: ${safe(dkg.publish.status || 'requested')}` : '',
+      dkg.publish_error ? '- Context Graph publish error: present (details redacted).' : '',
       risk.publication_status ? `- Publication status: ${risk.publication_status}` : '',
       risk.lifecycle_stage ? `- Lifecycle stage: ${risk.lifecycle_stage}` : '',
       risk.review_decision ? `- Review decision: ${risk.review_decision}` : '',
       risk.report_decision ? `- Report decision: ${risk.report_decision}` : '',
-      risk.campaign_key ? `- Campaign key: ${risk.campaign_key}` : '',
-      risk.evidence_root_ids?.length ? `- Evidence roots: ${risk.evidence_root_ids.slice(0, 6).join(', ')}` : ''
+      risk.campaign_key ? `- Campaign key: ${safe(risk.campaign_key)}` : '',
+      risk.evidence_root_ids?.length ? `- Evidence roots: ${risk.evidence_root_ids.slice(0, 6).map(safe).join(', ')}` : ''
     ].filter(Boolean);
     return [
       `Why ${event.id}: ${action}`,
@@ -2191,7 +2261,7 @@ export class TelegramShieldBot {
         '',
         'No recent bans, mutes, or confirmed scam reviews recorded.',
         '',
-        'Use Reviews for pending items or /ban and /mute as replies when action is needed.'
+        'Add TRACaBot as a group admin: normal admin bans are logged automatically. /ban and /mute remain optional bot-driven actions.'
       ].join('\n');
     }
 
@@ -2201,9 +2271,17 @@ export class TelegramShieldBot {
       const target = ev.user || ev.payload?.target || {};
       const name = userMention(target) || target.id || 'unknown';
       const actionType = ev.event_type === 'ban_executed' ? 'BAN' : ev.event_type === 'restrict_executed' ? 'RESTRICT' : 'UPHELD REVIEW';
-      const reason = (ev.payload?.reason || ev.payload?.evidence?.[0] || 'admin action').slice(0, 120);
+      const nativeAdmin = ev.payload?.enforcement_observed_from === 'telegram_chat_member';
+      const actor = ev.payload?.performed_by?.username ? `@${String(ev.payload.performed_by.username).replace(/^@/, '')}` : '';
+      const reason = ev.payload?.reason_provided === false
+        ? 'reason not provided'
+        : (ev.payload?.reason || ev.payload?.evidence?.[0] || 'admin action').slice(0, 120);
+      const contextCategory = ev.payload?.ban_context?.category || ev.payload?.context_category || '';
+      const contextNote = nativeAdmin && contextCategory && contextCategory !== 'unknown'
+        ? `context ${contextCategory} (unverified)`
+        : '';
 
-      const summary = reason;
+      const summary = [nativeAdmin ? 'native admin' : '', actor, reason, contextNote].filter(Boolean).join(' · ');
 
       const time = ageLabel(ev.timestamp);
       lines.push(`• ${actionType} ${name}`);
@@ -2216,7 +2294,7 @@ export class TelegramShieldBot {
 
   statsKeyboard(requesterId) {
     return [
-      [button('📎 Sources', callbackData('stats-sources', requesterId)), button('🧬 Campaigns', callbackData('campaigns', requesterId)), button('👮 Enforcement', callbackData('banlist', requesterId))],
+      [button('📎 Sources', callbackData('stats-sources', requesterId)), button('🧬 Campaigns', callbackData('campaigns', requesterId)), button('👮 Admin log', callbackData('banlist', requesterId))],
       ...this.mainNavKeyboard(requesterId)
     ];
   }
@@ -2261,13 +2339,20 @@ export class TelegramShieldBot {
     return rows;
   }
 
-  dashboardKeyboard(requesterId) {
-    return [
+  dashboardKeyboard(requesterId, { includeControls = false } = {}) {
+    const rows = [
       [button('📊 Stats', callbackData('stats', requesterId)), button('🛡️ Reviews', callbackData('review-list', requesterId))],
       [button('❔ Help', callbackData('help', requesterId)), button('🧾 Explain event', callbackData('why', requesterId))],
-      [button('👮 Enforcement', callbackData('banlist', requesterId)), button('⚙️ Settings', callbackData('settings', requesterId))],
-      [button('✖️ Close', callbackData('close', requesterId))]
+      [button('👮 Admin log', callbackData('banlist', requesterId)), button('⚙️ Settings', callbackData('settings', requesterId))]
     ];
+    if (includeControls) {
+      rows.unshift(
+        [button('🛡️ Protection controls', callbackData('controls', requesterId)), button('🩺 Status', callbackData('controls-status', requesterId))],
+        [button('🚨 Recent automatic bans', callbackData('controls-recent', requesterId)), button('📣 Appeals', callbackData('appeals', requesterId))]
+      );
+    }
+    rows.push([button('✖️ Close', callbackData('close', requesterId))]);
+    return rows;
   }
 
   settingsText(chatId) {
@@ -2670,7 +2755,7 @@ export class TelegramShieldBot {
       : [...unique.keys()].sort();
     const reviewBatchCutoff = extraPayload.review_batch_cutoff || new Date().toISOString();
     const artifactWrites = await Promise.all([...unique.values()].map(async (reviewedEvent) => {
-      const reviewedTarget = reviewedEvent?.user || reviewedEvent?.payload?.target || target || {};
+      const reviewedTarget = reviewedEvent?.payload?.reviewed_target || reviewedEvent?.user || reviewedEvent?.payload?.target || target || {};
       const targetChatId = eventChatKey(reviewedEvent);
       const actualReviewChatId = chatKey(reviewChatId || message.chat?.id || '');
       const sameChannelReview = !targetChatId || !actualReviewChatId || sameChat(targetChatId, actualReviewChatId);
@@ -2690,6 +2775,8 @@ export class TelegramShieldBot {
         review_jurisdiction: sameChannelReview ? 'local_channel' : 'context_only',
         review_weight: sameChannelReview ? 1 : 0.5,
         decision_threshold: sameChannelReview ? 1 : 2,
+        local_approval: sameChannelReview && decision !== 'reject',
+        approval_source: 'telegram_admin_review',
         ...this.reviewTrustPayload(reviewer),
         ...extraPayload,
         review_batch_event_ids: reviewBatchEventIds,
@@ -2724,6 +2811,12 @@ export class TelegramShieldBot {
     const payload = {
       ...risk,
       reason,
+      reason_provided: extra.reasonProvided === true,
+      consent_to_share: this.config.autoPromoteEvidence !== false && this.config.dkgWrites !== false,
+      enforcement_action: 'ban',
+      enforcement_observed_from: extra.observedFrom || (extra.source === 'manual /ban command' ? 'telegram_bot_command' : 'automated_enforcement'),
+      performed_by: extra.performedBy || null,
+      source: extra.source || 'admin_ban_action',
       replied_message_id: extra.repliedMessageId || '',
       replied_message_deleted: Boolean(extra.repliedMessageDeleted),
       replied_message_delete_error: extra.repliedMessageDeleteError || '',
@@ -2740,7 +2833,7 @@ export class TelegramShieldBot {
     });
     Promise.resolve()
       .then(async () => {
-        if (!this.config.testMode && hasEvidenceForDkg('ban_executed', payload)) {
+        if (this.config.autoPromoteEvidence !== false && this.config.dkgWrites !== false && !this.config.testMode && hasEvidenceForDkg('ban_executed', payload)) {
           const dkgStarted = Date.now();
           try {
             await this.dkg.writeEvent(event);
@@ -3313,12 +3406,16 @@ export class TelegramShieldBot {
     }
 
     if (action === 'explain_event' || action === 'why') {
+      if (!trusted && !await this.isTrustedModerator(message)) {
+        await this.sendInteractiveReply(chatId, '⚠️ Event explanations are restricted to configured admins or Telegram chat admins.', this.mainNavKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
+        return { handled: true, denied: true };
+      }
       const eventId = parameters.event_id || parameters.eventId || '';
       const svc = getSkillService();
       if (svc && eventId) {
-        svc.explainEvent({ eventId });
+        svc.explainEvent({ eventId, chatId });
       }
-      await this.sendInteractiveReply(chatId, this.formatWhy(eventId), this.mainNavKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
+      await this.sendInteractiveReply(chatId, this.formatWhy(eventId, chatId), this.mainNavKeyboard(message.from?.id || message.from?.username || ''), replyOptions);
       return { handled: true };
     }
 
@@ -3632,7 +3729,8 @@ export class TelegramShieldBot {
     const id = target?.id ? String(target.id) : '';
     const patterns = this.knownCampaignPatterns();
     const campaignFingerprint = matchKnownCampaignFingerprint(target, patterns);
-    const events = this.store.all().filter((event) => event.event_type === 'ban_executed');
+    const events = this.store.all().filter((event) => event.event_type === 'ban_executed'
+      && event.payload?.campaign_root_eligible !== false);
     const matched = [];
     for (const event of events) {
       const user = event.user || event.payload?.target || {};
@@ -3790,7 +3888,10 @@ export class TelegramShieldBot {
     risk.local_ban_roots = localBanRoots.length;
     risk.dkg_ban_roots = dkgBanRootIds.size;
     risk.dkg_campaign_roots = campaignHistory.events || [];
-    risk.dkg_exact_actor_roots = adminHistory.hasPriorFalsePositive ? [] : (adminHistory.events || []).filter((event) => event.eventType === 'ban_executed' && event.adminVerified && event.exactActorMatch === true);
+    risk.dkg_exact_actor_roots = adminHistory.hasPriorFalsePositive ? [] : (adminHistory.events || []).filter((event) => event.exactActorMatch === true
+      && event.trustLayer !== 'shared-working-memory'
+      && (event.eventType === 'review_upheld' || (event.eventType === 'fraud_finding' && event.adminVerified === true)));
+    risk.dkg_confirmed_actor_roots = risk.dkg_exact_actor_roots;
     risk.campaign_key = risk.campaign_key || (campaignFingerprint ? `alias:${campaignFingerprint.pattern}` : '');
     if (!falsePositiveReview) return risk;
     return {
@@ -3871,12 +3972,12 @@ export class TelegramShieldBot {
       enabled: this.config.knownCampaignAutoBan !== false,
       banThreshold: policy.banThreshold
     });
-    const confirmed = evaluateConfirmedCampaignBan({
-      exactActorRoots: risk.dkg_exact_actor_roots || [],
-      campaignRoots: risk.dkg_campaign_roots || [],
-      currentIndicators: [...(risk.domains || []), ...(risk.wallets || [])],
-      overturned: risk.recommended_action === 'ignore'
-    });
+    const localDecision = this.localProtectionDecision(target, chatId);
+    const confirmed = {
+      eligible: localDecision.action === 'remove',
+      reason: localDecision.reason,
+      roots: localDecision.roots || []
+    };
     const campaignPolicy = this.activeCampaignPolicy(chatId, target);
     if (this.config.knownCampaignAutoBan === false || !campaignPolicy) confirmed.eligible = false;
     if (confirmed.eligible && risk.recommended_action !== 'ignore') {
@@ -4084,21 +4185,17 @@ export class TelegramShieldBot {
   async maybeAutoBanConfirmedActor(message, target, risk) {
     if (this.config.knownCampaignAutoBan === false || !target?.id || target.is_bot === true || risk.recommended_action === 'ignore'
       || !this.activeCampaignPolicy(message.chat?.id, target)) return false;
-    const decision = evaluateConfirmedCampaignBan({
-      exactActorRoots: risk.dkg_exact_actor_roots || [],
-      campaignRoots: risk.dkg_campaign_roots || [],
-      currentIndicators: [...(risk.domains || []), ...(risk.wallets || [])]
-    });
-    if (!decision.eligible) return false;
-    const effectKey = `confirmed-actor:${message.chat.id}:${target.id}:${message.message_id || 'join'}`;
+    const decision = this.localProtectionDecision(target, message.chat?.id);
+    if (decision.action !== 'remove') return false;
+    const effectKey = `confirmed-actor:${message.chat.id}:${target.id}:${message.message_id || 'message'}`;
     const result = await this.enforceConfirmedScam(message.chat.id, target, [message.message_id].filter(Boolean), effectKey);
     if (!result.banned) return false;
     await this.record('ban_executed', { ...message, from: target }, {
       ...risk, target, target_key: targetKey(target), admin_verified: false,
       source: 'confirmed_campaign_auto_ban', auto_ban_reason: decision.reason,
       evidence_root_ids: decision.roots, confidence: 100,
-      evidence: [...(risk.evidence || []), `Auto-ban based on confirmed admin ban roots: ${decision.roots.join(', ')}`]
-    }, { writeDkg: true, idempotencyKey: `${effectKey}:evidence` });
+      evidence: [...(risk.evidence || []), `Auto-ban based on active same-chat local admin review roots: ${decision.roots.join(', ')}`]
+    }, { writeDkg: this.config.autoPromoteEvidence !== false && this.config.dkgWrites !== false, idempotencyKey: `${effectKey}:evidence` });
     return true;
   }
 
@@ -4194,6 +4291,841 @@ export class TelegramShieldBot {
     await this.sendCleanCommandReply(message, `🔇 Muted ${userMention(replyUser)} for ${humanDuration(seconds)}. Event: ${event.id}.`, { parse_mode: 'HTML' });
   }
 
+  appealCaseRef(ban = {}) {
+    return `case-${createHash('sha256').update(`ban:${ban.id || ''}`).digest('hex').slice(0, 10)}`;
+  }
+
+  appealRef(receiptId = '') {
+    return `ap-${createHash('sha256').update(String(receiptId)).digest('hex').slice(0, 10)}`;
+  }
+
+  banEventTargets(ban = {}, userId = '') {
+    const target = ban.payload?.target || ban.user || {};
+    const key = String(ban.payload?.target_key || '');
+    return String(target.id || '') === String(userId) || key === `id:${userId}`;
+  }
+
+  appealResolutionFor(banId = '') {
+    return [...this.store.all()].reverse().find((event) => event.event_type === 'appeal_resolved'
+      && String(event.payload?.ban_event_id || '') === String(banId || '')) || null;
+  }
+
+  appealCasesForUser(userId = '') {
+    const id = String(userId || '');
+    if (!id) return [];
+    const resolutions = new Map();
+    for (const event of this.store.all()) {
+      if (event.event_type === 'appeal_resolved' && event.payload?.ban_event_id) {
+        resolutions.set(String(event.payload.ban_event_id), event);
+      }
+    }
+    return this.store.all()
+      .filter((event) => event.event_type === 'ban_executed'
+        && event.payload?.provenance !== 'automatic_evidence_policy'
+        && this.banEventTargets(event, id))
+      .sort((a, b) => Date.parse(b.timestamp || '') - Date.parse(a.timestamp || ''))
+      .slice(0, 10)
+      .map((ban) => {
+        const resolution = resolutions.get(String(ban.id)) || null;
+        return {
+          ban,
+          caseRef: this.appealCaseRef(ban),
+          createdAt: ban.timestamp || '',
+          status: resolution ? String(resolution.payload?.status || resolution.payload?.decision || 'resolved') : 'banned'
+        };
+      });
+  }
+
+  pendingAppeals(chatId = '') {
+    const events = this.store.all();
+    const resolved = new Set(events
+      .filter((event) => event.event_type === 'appeal_resolved' && event.payload?.appeal_ref)
+      .map((event) => String(event.payload.appeal_ref)));
+    return events
+      .filter((event) => event.event_type === 'appeal_submitted' && event.payload?.appeal_ref && !resolved.has(String(event.payload.appeal_ref)))
+      .filter((event) => !chatId || sameChat(event.payload?.target_chat_id, chatId))
+      .sort((a, b) => Date.parse(a.timestamp || '') - Date.parse(b.timestamp || ''))
+      .slice(0, 20);
+  }
+
+  appealById(appealRef = '') {
+    return this.store.all().find((event) => event.event_type === 'appeal_submitted'
+      && String(event.payload?.appeal_ref || '') === String(appealRef || '')) || null;
+  }
+
+  isAppealAdminForChat(userId = '', chatId = '') {
+    if (!userId || !chatId) return Promise.resolve(false);
+    // Only a current Telegram administrator of the affected group can resolve
+    // an appeal. Configured bot owners do not inherit group jurisdiction.
+    return this.isTelegramChatAdmin(chatId, userId, { requireLiveLookup: true, throwOnFailure: true })
+      .catch(() => false);
+  }
+
+  joinAutoRemovalPaused(chatId = '') {
+    const id = String(chatId || '');
+    if (!id) return false;
+    const row = [...this.store.all()].reverse().find((event) => event.event_type === 'join_auto_removal_setting_changed'
+      && sameChat(event.chat?.id || event.payload?.target_chat_id, id));
+    return row?.payload?.paused === true;
+  }
+
+  async setJoinAutoRemovalPaused(chat = {}, paused = false, actor = {}, source = 'controls') {
+    const chatId = String(chat.id || chat.chat_id || '');
+    if (!chatId) throw new Error('missing chat for join auto-removal setting');
+    const next = paused === true;
+    if (this.joinAutoRemovalPaused(chatId) === next) return { paused: next, changed: false };
+    const event = await this.record('join_auto_removal_setting_changed', {
+      chat: { id: chatId, type: chat.type || 'supergroup', title: chat.title || '' },
+      from: actor,
+      message_id: chat.message_id
+    }, {
+      paused: next,
+      moderator: actor,
+      source,
+      target_chat_id: chatId,
+      evidence: [next
+        ? 'Current group admin paused future automatic join removals; evidence capture and sharing remain active.'
+        : 'Current group admin resumed future automatic join removals; configured policy still controls enforcement.']
+    }, { writeDkg: false, idempotencyKey: `join-auto-removal-setting:${chatId}:${next}:${actor.id || actor.username || ''}:${this.currentUpdateId || Date.now()}` });
+    return { paused: next, changed: true, event };
+  }
+
+  controlGroupCandidates() {
+    const candidates = new Map();
+    const remember = (id, title = '', lastAt = 0) => {
+      const key = String(id || '');
+      if (!/^-\d{1,24}$/.test(key)) return;
+      const existing = candidates.get(key) || { id: key, title: '', lastAt: 0 };
+      candidates.set(key, {
+        id: key,
+        title: existing.title || String(title || '').slice(0, 80),
+        lastAt: Math.max(existing.lastAt, Number(lastAt) || 0)
+      });
+    };
+    for (const event of this.store.all()) {
+      const id = event.chat?.id || event.payload?.target_chat_id;
+      remember(id, event.chat?.title || event.payload?.target_chat_title || '', Date.parse(event.timestamp || '') || 0);
+    }
+    for (const chat of this.seenChats.values()) remember(chat.id, chat.title || '', Date.now());
+    return [...candidates.values()].sort((a, b) => b.lastAt - a.lastAt).slice(0, 20);
+  }
+
+  async controlGroupsForAdmin(userId = '') {
+    const groups = [];
+    for (const candidate of this.controlGroupCandidates()) {
+      if (await this.isAppealAdminForChat(userId, candidate.id)) groups.push(candidate);
+    }
+    return groups;
+  }
+
+  isAutomaticJoinBan(event = {}) {
+    return event.event_type === 'ban_executed'
+      && (event.payload?.source === 'silent_join_protection'
+        || event.payload?.enforcement_observed_from === 'tracabot_join_protection');
+  }
+
+  autoBanOverturned(banId = '') {
+    return this.store.all().some((event) => (event.event_type === 'review_overturned'
+      && String(event.payload?.target_event_id || '') === String(banId || ''))
+      || (event.event_type === 'auto_ban_override'
+        && String(event.payload?.ban_event_id || '') === String(banId || '')
+        && ['unban_completed', 'overturned', 'unban_pending', 'overturned_unban_pending'].includes(String(event.payload?.status || ''))));
+  }
+
+  autoBanOverrideRecord(banId = '') {
+    return [...this.store.all()].reverse().find((event) => event.event_type === 'auto_ban_override'
+      && String(event.payload?.ban_event_id || '') === String(banId || '')) || null;
+  }
+
+  autoBanNeedsRetry(banId = '') {
+    const status = String(this.autoBanOverrideRecord(banId)?.payload?.status || '');
+    return status === 'unban_pending' || status === 'overturned_unban_pending';
+  }
+
+  recentAutoBansForChat(chatId = '', limit = 3) {
+    return [...this.store.all()]
+      .filter((event) => this.isAutomaticJoinBan(event) && sameChat(event.chat?.id, chatId) && (!this.autoBanOverturned(event.id) || this.autoBanNeedsRetry(event.id)))
+      .sort((a, b) => Date.parse(b.timestamp || '') - Date.parse(a.timestamp || ''))
+      .slice(0, limit);
+  }
+
+  controlFooterRows(userId = '', current = '') {
+    const nav = [
+      ['🛡️ Protection controls', 'controls', 'controls'],
+      ['🩺 Status', 'controls-status', 'status'],
+      ['🚨 Recent automatic bans', 'controls-recent', 'recent'],
+      ['📣 Appeals', 'appeals', 'appeals']
+    ].filter((item) => item[2] !== current);
+    const rows = [];
+    for (let index = 0; index < nav.length; index += 2) {
+      rows.push(nav.slice(index, index + 2).map(([label, action]) => button(label, callbackData(action, userId))));
+    }
+    const refreshAction = current === 'status' ? 'controls-status'
+      : current === 'recent' ? 'controls-recent'
+        : current === 'appeals' ? 'appeals' : 'controls-refresh';
+    rows.push([button('🔄 Refresh', callbackData(refreshAction, userId)), button('✖️ Close', callbackData('close', userId))]);
+    return rows;
+  }
+
+  async controlsView(userId = '') {
+    const groups = await this.controlGroupsForAdmin(userId);
+    const rows = [];
+    const lines = [
+      '🛡️ Protection controls',
+      '',
+      'Only current Telegram admins of the affected group can pause removals or review auto-bans. Bot owners do not bypass group administration.',
+      'Pausing stops future automatic join removals only. Evidence capture and sharing continue. Resume cannot enable a policy configured off.',
+      ''
+    ];
+    if (!groups.length) {
+      lines.push('No groups were found where you are a current Telegram admin.');
+      rows.push(...this.controlFooterRows(userId, 'controls'));
+      return { text: lines.join('\n'), rows, groups };
+    }
+    const recent = [];
+    for (const group of groups) {
+      const paused = this.joinAutoRemovalPaused(group.id);
+      const policyEnabled = this.config.joinAutoRemove === true;
+      const allowedChats = this.config.joinAutoRemoveChats || [];
+      const chatAllowed = !allowedChats.length || allowedChats.map(String).includes(group.id);
+      const state = paused ? '⏸️ Paused by admin' : (policyEnabled && chatAllowed ? '▶️ Running' : '⚪ Configured off');
+      lines.push(`• ${group.title || group.id} — ${state}`);
+      rows.push([button(`${paused ? '▶️ Resume' : '⏸️ Pause'} future join removals · ${(group.title || group.id).slice(0, 24)}`, callbackData('controls-join-toggle', userId, group.id, paused ? 'off' : 'on'))]);
+      for (const ban of this.recentAutoBansForChat(group.id, 3)) recent.push({ ban, group });
+    }
+    recent.sort((a, b) => Date.parse(b.ban.timestamp || '') - Date.parse(a.ban.timestamp || ''));
+    if (recent.length) {
+      lines.push('', 'Recent automatic join bans');
+      for (const { ban, group } of recent.slice(0, 8)) {
+        const target = ban.payload?.target || ban.user || {};
+        lines.push(`• ${displayName(target) || target.id || 'target'} · ${ageLabel(ban.timestamp)} · ${group.title || group.id}`);
+        rows.push([button(`Review auto-ban · ${(displayName(target) || target.id || 'target').slice(0, 24)}`, callbackData('controls-ban-open', userId, shortId(ban.id)))]);
+      }
+    } else {
+      lines.push('', 'No recent automatic join bans need review.');
+    }
+    rows.push(...this.controlFooterRows(userId, 'controls'));
+    return { text: lines.join('\n'), rows, groups };
+  }
+
+  async protectionStatusView(userId = '') {
+    const groups = await this.controlGroupsForAdmin(userId);
+    const lines = [
+      '🩺 Protection status',
+      '',
+      'Live current-admin scope only. Bot owners without group admin status see nothing here.',
+      ''
+    ];
+    if (!groups.length) {
+      lines.push('No groups were found where you are a current Telegram admin.');
+      return { text: lines.join('\n'), rows: this.controlFooterRows(userId, 'status'), groups };
+    }
+    const trustedLayers = (this.config.joinTrustedLayers || ['local']).join(', ');
+    for (const group of groups) {
+      const paused = this.joinAutoRemovalPaused(group.id);
+      const policyEnabled = this.config.joinAutoRemove === true;
+      const allowedChats = this.config.joinAutoRemoveChats || [];
+      const chatAllowed = !allowedChats.length || allowedChats.map(String).includes(group.id);
+      const [canBan, canDelete] = await Promise.all([
+        this.hasBanRights(group.id).catch(() => false),
+        this.hasDeleteRights(group.id).catch(() => false)
+      ]);
+      const state = paused ? '⏸️ Paused by admin' : (policyEnabled && chatAllowed ? '▶️ Running' : '⚪ Configured off');
+      lines.push(`• ${group.title || group.id} — ${state}`);
+      lines.push(`  Auto-remove config: ${policyEnabled ? (chatAllowed ? 'on for this group' : 'off for this group') : 'off'}; trusted layers: ${trustedLayers}`);
+      lines.push(`  Bot rights: ban ${canBan ? '✅' : '❌'}, delete ${canDelete ? '✅' : '❌'}; pause is separate from unban`);
+    }
+    return { text: lines.join('\n'), rows: this.controlFooterRows(userId, 'status'), groups };
+  }
+
+  async recentAutoBansView(userId = '') {
+    const groups = await this.controlGroupsForAdmin(userId);
+    const recent = [];
+    for (const group of groups) {
+      for (const ban of this.recentAutoBansForChat(group.id, 5)) recent.push({ ban, group });
+    }
+    recent.sort((a, b) => Date.parse(b.ban.timestamp || '') - Date.parse(a.ban.timestamp || ''));
+    const lines = [
+      '🚨 Recent automatic join bans',
+      '',
+      'Only bans from groups where you are a current Telegram admin are shown.',
+      ''
+    ];
+    const rows = [];
+    if (!recent.length) {
+      lines.push('No recent automatic join bans need review.');
+    } else {
+      for (const { ban, group } of recent.slice(0, 10)) {
+        const target = ban.payload?.target || ban.user || {};
+        lines.push(`• ${displayName(target) || target.id || 'target'} · ${ageLabel(ban.timestamp)} · ${group.title || group.id}`);
+        rows.push([button(`Review auto-ban · ${(displayName(target) || target.id || 'target').slice(0, 24)}`, callbackData('controls-ban-open', userId, shortId(ban.id)))]);
+      }
+      lines.push('', 'Select one to review. Override / allow return is an admin action and does not need a member appeal.');
+    }
+    rows.push(...this.controlFooterRows(userId, 'recent'));
+    return { text: lines.join('\n'), rows, groups };
+  }
+
+  async handleControlsCommand(message = {}) {
+    const isPrivate = message.chat?.type === 'private' || Number(message.chat?.id || 0) > 0;
+    if (!isPrivate) {
+      await this.sendCleanCommandReply(message, 'Protection controls are private. Open a private chat with this bot and send /controls.');
+      return;
+    }
+    const view = await this.controlsView(message.from?.id || message.from?.username || '');
+    await this.sendInteractiveReply(message.chat.id, view.text, view.rows, { reply_to_message_id: message.message_id });
+  }
+
+  async showAutoBanControl(shortEventId = '', admin = {}, sourceChat = {}) {
+    const ban = this.findEvent(shortEventId);
+    if (!ban || !this.isAutomaticJoinBan(ban)) return { ok: false, error: 'auto_ban_not_found' };
+    const chatId = String(ban.chat?.id || ban.payload?.target_chat_id || '');
+    if (!await this.isAppealAdminForChat(admin.id, chatId)) return { ok: false, error: 'not_chat_admin' };
+    const target = ban.payload?.target || ban.user || {};
+    const latestOverride = this.autoBanOverrideRecord(ban.id);
+    const correction = this.store.all().find((event) => event.event_type === 'review_overturned'
+      && String(event.payload?.target_event_id || '') === String(ban.id));
+    const overridden = Boolean(correction || latestOverride);
+    const unbanPending = latestOverride?.payload?.status === 'unban_pending' || latestOverride?.payload?.status === 'overturned_unban_pending';
+    const status = unbanPending ? 'local override recorded; Telegram unban pending'
+      : overridden ? 'local override already recorded' : 'active automatic removal';
+    const text = [
+      '🛡️ Automatic join ban',
+      '',
+      `Target: ${displayName(target) || target.id || 'unknown'}`,
+      `Group: ${ban.chat?.title || chatId}`,
+      `When: ${ageLabel(ban.timestamp)}`,
+      `Status: ${status}`,
+      '',
+      'Override records a group-scoped local correction and requests an idempotent Telegram unban. It does not revoke a creator-curator global record.',
+      'If you pause future removals, that is separate from whether this user was actually unbanned.'
+    ].join('\n');
+    const rows = unbanPending
+      ? [
+        [button('🔁 Retry unban', callbackData('controls-ban-retry', admin.id || 'admin', shortId(ban.id)))],
+        [button('↩️ Back', callbackData('controls-recent', admin.id || 'admin')), button('✖️ Close', callbackData('close', admin.id || 'admin'))]
+      ]
+      : overridden
+        ? [[button('🔄 Refresh controls', callbackData('controls-refresh', admin.id || 'admin')), button('✖️ Close', callbackData('close', admin.id || 'admin'))]]
+        : [
+          [button('Override / allow return', callbackData('controls-ban-confirm', admin.id || 'admin', shortId(ban.id)))],
+          [button('↩️ Back', callbackData('controls-refresh', admin.id || 'admin')), button('✖️ Close', callbackData('close', admin.id || 'admin'))]
+        ];
+    return { ok: true, text, rows, ban, target, chatId, overridden, unbanPending };
+  }
+
+  async overrideAutomaticBan({ ban = null, admin = {}, sourceChat = {}, reason = '' } = {}) {
+    if (!ban || !this.isAutomaticJoinBan(ban)) return { ok: false, error: 'auto_ban_not_found' };
+    const chatId = String(ban.chat?.id || ban.payload?.target_chat_id || '');
+    if (!chatId) return { ok: false, error: 'ban_chat_unavailable' };
+    if (!await this.isAppealAdminForChat(admin.id, chatId)) return { ok: false, error: 'not_chat_admin' };
+    const existing = this.store.all().find((event) => event.event_type === 'review_overturned'
+      && String(event.payload?.target_event_id || '') === String(ban.id))
+      || this.autoBanOverrideRecord(ban.id)
+      || this.store.all().find((event) => event.event_type === 'auto_ban_override' && event.payload?.ban_event_id === ban.id);
+    if (existing) {
+      const latestOverride = this.autoBanOverrideRecord(ban.id);
+      return {
+        ok: true,
+        already: true,
+        correction: existing,
+        ban,
+        unbanPending: latestOverride?.payload?.status === 'unban_pending'
+          || latestOverride?.payload?.status === 'overturned_unban_pending'
+      };
+    }
+    const target = ban.payload?.target || ban.user || {};
+    if (!target.id) return { ok: false, error: 'missing_target' };
+    const source = 'telegram_admin_auto_ban_override';
+    const resolutionChat = { id: sourceChat.id || `auto:${ban.id}`, type: sourceChat.type || 'private', title: sourceChat.title || 'auto-ban override' };
+    const adminMessage = { chat: resolutionChat, from: admin, message_id: sourceChat.message_id };
+    const resolutionReason = boundedText(reason || 'current group admin overrode an automatic join removal', 500);
+    const correction = await this.record('review_overturned', {
+      chat: ban.chat || { id: chatId, type: 'supergroup' },
+      from: admin,
+      date: Math.floor(Date.now() / 1000)
+    }, {
+      target_event_id: ban.id,
+      evidence_root_ids: this.localProtectionLineage(ban),
+      review_decision: 'reject',
+      reviewed_target: target,
+      reviewed_target_key: `id:${target.id}`,
+      target_chat_id: chatId,
+      target_chat_title: ban.chat?.title || '',
+      target_chat_type: ban.chat?.type || 'supergroup',
+      review_chat_id: resolutionChat.id,
+      review_scope: 'same_channel',
+      review_jurisdiction: 'local_channel',
+      review_weight: 1,
+      local_approval: false,
+      correction_source: source,
+      local_override: true,
+      creator_global_record_unchanged: true,
+      reason: resolutionReason,
+      reviewer: admin,
+      moderator: admin,
+      admin_verified: true,
+      retracted: true,
+      evidence: [`Current group admin overrode automatic join ban ${ban.id}: ${resolutionReason}`]
+    }, { writeDkg: false, idempotencyKey: `auto-ban-override:${ban.id}` });
+    await this.record('creator_reconsideration_requested', adminMessage, {
+      target,
+      target_key: `id:${target.id}`,
+      ban_event_id: ban.id,
+      status: 'pending_creator_review',
+      local_only: true,
+      consent_to_share: false,
+      evidence: ['Automatic join ban local override queued for creator-curator reconsideration; no global record was revoked locally.']
+    }, { writeDkg: false, idempotencyKey: `auto-ban-reconsider:${ban.id}` });
+    const unban = await this.unbanForAppeal(chatId, target.id, `auto-ban-override:${ban.id}`, adminMessage, { reconcileFirst: true });
+    const resolution = await this.record('auto_ban_override', adminMessage, {
+      ban_event_id: ban.id,
+      target,
+      target_key: `id:${target.id}`,
+      target_chat_id: chatId,
+      decision: 'overturn',
+      status: unban.ok ? 'unban_completed' : 'unban_pending',
+      unban_ok: unban.ok === true,
+      unban_attempts: unban.attempts || 0,
+      unban_error: unban.error ? String(unban.error).slice(0, 240) : '',
+      correction_event_id: correction.id,
+      moderator: admin,
+      creator_global_record_unchanged: true,
+      evidence: [unban.ok
+        ? 'Local correction recorded and Telegram unban completed. Unban only permits return; it cannot add a user.'
+        : 'Local correction recorded but Telegram unban did not complete; admins still see failure state.']
+    }, { writeDkg: false, idempotencyKey: `auto-ban-override-result:${ban.id}` });
+    return { ok: true, already: false, correction, resolution, unban, ban, target, chatId };
+  }
+
+  async retryAutomaticBanOverride({ ban = null, admin = {}, sourceChat = {}, requestId = '' } = {}) {
+    if (!ban || !this.isAutomaticJoinBan(ban)) return { ok: false, error: 'auto_ban_not_found' };
+    const chatId = String(ban.chat?.id || ban.payload?.target_chat_id || '');
+    if (!chatId) return { ok: false, error: 'ban_chat_unavailable' };
+    if (!await this.isAppealAdminForChat(admin.id, chatId)) return { ok: false, error: 'not_chat_admin' };
+    const correction = this.store.all().find((event) => event.event_type === 'review_overturned'
+      && String(event.payload?.target_event_id || '') === String(ban.id));
+    if (!correction) return { ok: false, error: 'override_not_found' };
+    const target = ban.payload?.target || ban.user || {};
+    if (!target.id) return { ok: false, error: 'missing_target' };
+    const resolutionChat = { id: sourceChat.id || `auto:${ban.id}`, type: sourceChat.type || 'private', title: sourceChat.title || 'auto-ban override retry' };
+    const adminMessage = { chat: resolutionChat, from: admin, message_id: sourceChat.message_id };
+    const unban = await this.unbanForAppeal(chatId, target.id, `auto-ban-override:${ban.id}`, adminMessage, { reconcileFirst: true });
+    const priorRetries = this.store.all().filter((event) => event.event_type === 'auto_ban_override'
+      && String(event.payload?.ban_event_id || '') === String(ban.id)).length;
+    const retryKey = requestId
+      ? `auto-ban-override-retry:${ban.id}:${requestId}`
+      : `auto-ban-override-retry:${ban.id}:${priorRetries}:${unban.ok ? 'ok' : 'pending'}`;
+    const resolution = await this.record('auto_ban_override', adminMessage, {
+      ban_event_id: ban.id,
+      target,
+      target_key: `id:${target.id}`,
+      target_chat_id: chatId,
+      decision: 'overturn',
+      status: unban.ok ? 'unban_completed' : 'unban_pending',
+      unban_ok: unban.ok === true,
+      unban_attempts: unban.attempts || 0,
+      unban_error: unban.error ? String(unban.error).slice(0, 240) : '',
+      correction_event_id: correction.id,
+      moderator: admin,
+      retry: true,
+      creator_global_record_unchanged: true,
+      evidence: [unban.ok
+        ? 'Safe unban retry completed after a local auto-ban correction; unban only permits return.'
+        : 'Safe unban retry did not complete; the local correction remains and the failure is still visible to admins.']
+    }, { writeDkg: false, idempotencyKey: retryKey });
+    return { ok: true, already: false, correction, resolution, unban, ban, target, chatId };
+  }
+
+  appealStatusLine(item = {}) {
+    const age = ageLabel(item.createdAt);
+    return `• ${item.caseRef} · ${age} · ${item.status}`;
+  }
+
+  async handleAppealCommand(message) {
+    const userId = String(message.from?.id || '');
+    const isPrivate = message.chat?.type === 'private' || Number(message.chat?.id || 0) > 0;
+    if (!userId) return;
+    if (!isPrivate) {
+      const username = this.ownBotUsername() || await this.botUsername().catch(() => '');
+      const link = username ? `https://t.me/${username}` : '';
+      await this.sendCleanCommandReply(message, [
+        'Appeals are handled in a private chat so other members do not see your case.',
+        link ? `Open ${link} and send /appeal there.` : 'Open a private chat with this bot and send /appeal there.',
+        'Telegram only lets the bot message you privately after you start it. Your ban case is stored locally from the group action, so you can start the private chat later.'
+      ].join('\n'), { disable_web_page_preview: true });
+      return;
+    }
+    const arg = this.commandText(message, 'appeal');
+    const cases = this.appealCasesForUser(userId);
+    if (!cases.length) {
+      await this.sendCleanCommandReply(message, [
+        'No locally stored ban case is linked to this Telegram account.',
+        'If you were banned, start this private chat and send /appeal after the group action is recorded. The bot cannot message you first, but it can look up your own case when you arrive here.',
+        'Include the case code and a short reason: /appeal case-abc123 I believe this was a mistake.'
+      ].join('\n'));
+      return;
+    }
+    const [selector = '', ...reasonParts] = arg.split(/\s+/).filter(Boolean);
+    const reason = reasonParts.join(' ').replace(/\s+/g, ' ').trim();
+    if (!selector) {
+      await this.sendCleanCommandReply(message, [
+        'Your local ban case(s):',
+        ...cases.map(this.appealStatusLine.bind(this)),
+        '',
+        'To appeal one case, send: /appeal <case code> <short reason>',
+        'Example: /appeal ' + cases[0].caseRef + ' I believe this was a false positive.',
+        'Only you and authorized admins for the affected group can see the case details.'
+      ].join('\n'));
+      return;
+    }
+    const numeric = /^\d{1,2}$/.test(selector) ? Number(selector) - 1 : -1;
+    const selected = numeric >= 0 ? cases[numeric] : cases.find((item) => item.caseRef === selector || String(item.ban.id).startsWith(selector));
+    if (!selected) {
+      await this.sendCleanCommandReply(message, 'That case code does not match a ban stored for this Telegram account. Send /appeal to list your own cases.');
+      return;
+    }
+    if (selected.status === 'overturned' || selected.status === 'overturned_unban_pending') {
+      await this.sendCleanCommandReply(message, `Case ${selected.caseRef} was already overturned. A local unban was requested; if you still cannot return, ask a group admin because Telegram may have restricted the account separately.`);
+      return;
+    }
+    if (selected.status === 'upheld') {
+      await this.sendCleanCommandReply(message, `Case ${selected.caseRef} was finally upheld by the group admin. Re-appealing the same local ban is not accepted. Ask the group admin to reopen it with new evidence.`);
+      return;
+    }
+    if (reason.length < 10 || reason.length > (this.config.appealMaxReasonChars || 500)) {
+      await this.sendCleanCommandReply(message, `Add a short reason (10-${this.config.appealMaxReasonChars || 500} characters) after the case code.`);
+      return;
+    }
+    const now = Date.now();
+    const dedupMs = (this.config.appealDedupHours || 24) * 60 * 60 * 1000;
+    const open = this.store.all().some((event) => event.event_type === 'appeal_submitted'
+      && event.payload?.appealant_id === userId
+      && String(event.payload?.ban_event_id || '') === String(selected.ban.id)
+      && now - Date.parse(event.timestamp || '') < dedupMs
+      && !this.appealResolutionFor(selected.ban.id));
+    if (open) {
+      await this.sendCleanCommandReply(message, `An appeal for ${selected.caseRef} is already pending. Admins will review it; duplicate submissions are not stored.`);
+      return;
+    }
+    const perHour = this.store.all().filter((event) => event.event_type === 'appeal_submitted'
+      && event.payload?.appealant_id === userId
+      && now - Date.parse(event.timestamp || '') < 60 * 60 * 1000).length;
+    if (perHour >= (this.config.appealMaxPerHour || 3)) {
+      await this.sendCleanCommandReply(message, 'Too many appeals in the last hour. Try again later.');
+      return;
+    }
+    const receiptId = `appeal-${randomUUID()}`;
+    const appealRef = this.appealRef(receiptId);
+    const banChat = selected.ban.chat || {};
+    const event = await this.record('appeal_submitted', {
+      chat: { id: message.chat.id, type: 'private' },
+      from: message.from,
+      message_id: message.message_id
+    }, {
+      appeal_receipt_id: receiptId,
+      appeal_ref: appealRef,
+      ban_event_id: selected.ban.id,
+      case_ref: selected.caseRef,
+      appealant_id: userId,
+      target: { id: userId },
+      target_key: `id:${userId}`,
+      target_chat_id: String(banChat.id || selected.ban.payload?.target_chat_id || ''),
+      target_chat_type: String(banChat.type || selected.ban.payload?.target_chat_type || ''),
+      reason: boundedText(reason, this.config.appealMaxReasonChars || 500),
+      provenance: 'telegram_private_appeal',
+      status: 'pending',
+      consent_to_share: false,
+      local_only: true,
+      evidence: [`Private appeal submitted for own local ban case ${selected.caseRef}; no group broadcast.`]
+    }, { writeDkg: false, idempotencyKey: `appeal-submit:${selected.ban.id}:${message.message_id || this.currentUpdateId || receiptId}` });
+    await this.notifyAppealAdmins(event);
+    await this.sendCleanCommandReply(message, [
+      `Appeal received for ${selected.caseRef}. Receipt: ${appealRef}.`,
+      'Admins for the affected group can review it. If they overturn the ban, the bot asks Telegram to lift it. Telegram permission or API failures are retried and shown to admins.',
+      'A local admin override does not change a creator-curator global record; a curator reconsideration request is queued locally.'
+    ].join('\n'));
+  }
+
+  async notifyAppealAdmins(appeal = {}) {
+    const chatId = String(appeal.payload?.target_chat_id || '');
+    if (!chatId) return;
+    const recipients = new Set();
+    try {
+      const members = await this.call('getChatAdministrators', { chat_id: chatId });
+      for (const member of members || []) {
+        if (member?.user?.id && member.user.is_bot !== true) recipients.add(String(member.user.id));
+      }
+    } catch {
+      // Fail closed: no unrelated owner or cached recipient gets appeal details.
+      return;
+    }
+    const text = [
+      '📣 New private ban appeal',
+      `Case: ${appeal.payload?.case_ref || 'unknown'} · Ref: ${appeal.payload?.appeal_ref || 'unknown'}`,
+      `Reason: ${String(appeal.payload?.reason || '').slice(0, 400)}`,
+      'Only admins for the affected group can resolve this. The creator-curator global record is unchanged by a local decision.'
+    ].join('\n');
+    const keyboard = inlineKeyboard([[
+      button('✅ Uphold ban', callbackData('appeal-uphold', 'admin', appeal.payload?.appeal_ref || '')),
+      button('↩️ Overturn', callbackData('appeal-overturn', 'admin', appeal.payload?.appeal_ref || ''))
+    ]]);
+    for (const recipient of recipients) {
+      // Telegram blocks bot-initiated DMs until the admin starts the bot. A
+      // failed notice is expected and never changes the appeal state.
+      this.send(recipient, text, { reply_markup: keyboard }).catch(() => null);
+    }
+  }
+
+  async appealsView(userId = '') {
+    const appeals = this.pendingAppeals('');
+    const visible = [];
+    for (const appeal of appeals) {
+      if (await this.isAppealAdminForChat(userId, appeal.payload?.target_chat_id)) visible.push(appeal);
+    }
+    if (!visible.length) {
+      return {
+        text: 'No pending appeals are available to you. Appeals appear after a banned user starts a private chat and submits /appeal.',
+        rows: this.controlFooterRows(userId, 'appeals'),
+        appeals: []
+      };
+    }
+    const lines = ['📣 Pending private ban appeals', ''];
+    const rows = [];
+    for (const appeal of visible.slice(0, 8)) {
+      lines.push(`• ${appeal.payload?.case_ref || 'case'} · ${ageLabel(appeal.timestamp)} · ${String(appeal.payload?.reason || '').slice(0, 180)}`);
+      rows.push([
+        button('✅ Uphold', callbackData('appeal-uphold', 'admin', appeal.payload?.appeal_ref || '')),
+        button('↩️ Overturn', callbackData('appeal-overturn', 'admin', appeal.payload?.appeal_ref || ''))
+      ]);
+    }
+    lines.push('', 'Uphold keeps the local ban. Overturn records a local correction and asks Telegram to lift the ban. A local decision never rewrites the creator-curator global record.');
+    rows.push(...this.controlFooterRows(userId, 'appeals'));
+    return { text: lines.join('\n'), rows, appeals: visible };
+  }
+
+  async handleAppealsCommand(message) {
+    const fromId = String(message.from?.id || '');
+    const isPrivate = message.chat?.type === 'private' || Number(message.chat?.id || 0) > 0;
+    const chatId = String(message.chat?.id || '');
+    if (!isPrivate) {
+      if (!await this.isTelegramChatAdmin(chatId, fromId, { requireLiveLookup: true, throwOnFailure: true }).catch(() => false)) {
+        await this.sendCleanCommandReply(message, 'Appeal review is restricted to actual admins of this group.');
+        return;
+      }
+      await this.sendCleanCommandReply(message, 'Private appeal details are not posted in the group. Open a private chat with this bot and send /appeals to review pending cases for groups you moderate.');
+      return;
+    }
+    const view = await this.appealsView(fromId);
+    await this.sendInteractiveReply(message.chat.id, view.text, view.rows, { reply_to_message_id: message.message_id });
+  }
+
+  async resolveAppeal({ appealRef = '', admin = {}, decision = 'uphold', reason = '', sourceChat = {} } = {}) {
+    const appeal = this.appealById(appealRef);
+    if (!appeal) return { ok: false, error: 'appeal_not_found' };
+    if (this.appealResolutionFor(appeal.payload?.ban_event_id)) return { ok: false, error: 'appeal_already_resolved' };
+    const ban = this.store.all().find((event) => event.id === appeal.payload?.ban_event_id);
+    if (!ban) return { ok: false, error: 'ban_not_found' };
+    const banChatId = String(ban.chat?.id || appeal.payload?.target_chat_id || '');
+    if (!banChatId) return { ok: false, error: 'ban_chat_unavailable' };
+    if (!await this.isAppealAdminForChat(admin.id, banChatId)) return { ok: false, error: 'not_chat_admin' };
+    const resolution = decision === 'overturn' ? 'overturn' : 'uphold';
+    const resolutionReason = boundedText(reason || (resolution === 'overturn' ? 'group admin overturned the ban from a private appeal' : 'group admin upheld the ban from a private appeal'), 500);
+    const resolutionChat = { id: sourceChat.id || `appeal:${appealRef}`, type: sourceChat.type || 'private', title: sourceChat.title || 'appeal review' };
+    const adminMessage = { chat: resolutionChat, from: admin, message_id: sourceChat.message_id };
+    let unban = null;
+    if (resolution === 'overturn') {
+      const correction = await this.record('review_overturned', {
+        chat: ban.chat || { id: banChatId, type: appeal.payload?.target_chat_type || 'supergroup' },
+        from: admin,
+        date: Math.floor(Date.now() / 1000)
+      }, {
+        target_event_id: ban.id,
+        evidence_root_ids: this.localProtectionLineage(ban),
+        review_decision: 'reject',
+        reviewed_target: ban.payload?.target || ban.user || { id: appeal.payload?.appealant_id },
+        reviewed_target_key: `id:${appeal.payload?.appealant_id || ''}`,
+        target_chat_id: banChatId,
+        target_chat_title: ban.chat?.title || '',
+        target_chat_type: ban.chat?.type || 'supergroup',
+        review_chat_id: resolutionChat.id,
+        review_scope: 'same_channel',
+        review_jurisdiction: 'local_channel',
+        review_weight: 1,
+        local_approval: false,
+        correction_source: 'telegram_private_appeal_overturn',
+        appeal_ref: appealRef,
+        appeal_receipt_id: appeal.payload?.appeal_receipt_id || '',
+        local_override: true,
+        creator_global_record_unchanged: true,
+        reason: resolutionReason,
+        reviewer: admin,
+        admin_verified: true,
+        retracted: true,
+        evidence: [`Group admin overturned local ban ${ban.id} from private appeal ${appealRef}: ${resolutionReason}`]
+      }, { writeDkg: false, idempotencyKey: `appeal-overturn:${appealRef}` });
+      await this.record('creator_reconsideration_requested', adminMessage, {
+        target: { id: appeal.payload?.appealant_id },
+        target_key: `id:${appeal.payload?.appealant_id || ''}`,
+        ban_event_id: ban.id,
+        appeal_ref: appealRef,
+        status: 'pending_creator_review',
+        local_only: true,
+        consent_to_share: false,
+        evidence: ['Local appeal correction is queued for creator-curator reconsideration; no global record was revoked locally.']
+      }, { writeDkg: false, idempotencyKey: `appeal-reconsider:${appealRef}` });
+      unban = await this.unbanForAppeal(banChatId, appeal.payload?.appealant_id, appealRef, adminMessage);
+      await this.record('appeal_resolved', adminMessage, {
+        appeal_ref: appealRef,
+        appeal_receipt_id: appeal.payload?.appeal_receipt_id || '',
+        ban_event_id: ban.id,
+        case_ref: appeal.payload?.case_ref || '',
+        target: { id: appeal.payload?.appealant_id },
+        target_key: `id:${appeal.payload?.appealant_id || ''}`,
+        target_chat_id: banChatId,
+        decision: 'overturn',
+        status: unban?.ok ? 'overturned' : 'overturned_unban_pending',
+        correction_event_id: correction.id,
+        unban_ok: unban?.ok === true,
+        unban_attempts: unban?.attempts || 0,
+        unban_error: unban?.error ? String(unban.error).slice(0, 240) : '',
+        creator_global_record_unchanged: true,
+        moderator: admin,
+        reason: resolutionReason,
+        evidence: [`Appeal ${appealRef} overturned locally; creator global record untouched.`]
+      }, { writeDkg: false, idempotencyKey: `appeal-resolved:${appealRef}` });
+    } else {
+      await this.record('appeal_resolved', adminMessage, {
+        appeal_ref: appealRef,
+        appeal_receipt_id: appeal.payload?.appeal_receipt_id || '',
+        ban_event_id: ban.id,
+        case_ref: appeal.payload?.case_ref || '',
+        target: { id: appeal.payload?.appealant_id },
+        target_key: `id:${appeal.payload?.appealant_id || ''}`,
+        target_chat_id: banChatId,
+        decision: 'uphold',
+        status: 'upheld',
+        creator_global_record_unchanged: true,
+        moderator: admin,
+        reason: resolutionReason,
+        evidence: [`Appeal ${appealRef} upheld locally; creator global record untouched.`]
+      }, { writeDkg: false, idempotencyKey: `appeal-resolved:${appealRef}` });
+    }
+    const userText = resolution === 'overturn'
+      ? (unban?.ok
+        ? 'Your appeal was upheld. A local admin overturned the ban and Telegram was asked to lift it. You can try to return to the group. Telegram permissions can still block re-entry.'
+        : `Your appeal was upheld. A local admin overturned the ban, but Telegram unban did not succeed after ${unban?.attempts || 0} attempt(s). The failure is visible to admins; ask them to retry.`)
+      : 'Your appeal was reviewed. The local ban was upheld.';
+    this.send(appeal.payload?.appealant_id, userText).catch(() => null);
+    return { ok: true, decision: resolution, unban, appeal, ban };
+  }
+
+  async retryAppealUnban(appealRef = '', admin = {}, sourceChat = {}) {
+    const appeal = this.appealById(appealRef);
+    if (!appeal) return { ok: false, error: 'appeal_not_found' };
+    const resolution = this.appealResolutionFor(appeal.payload?.ban_event_id);
+    if (!resolution || resolution.payload?.decision !== 'overturn') return { ok: false, error: 'appeal_not_overturned' };
+    const banChatId = String(resolution.payload?.target_chat_id || appeal.payload?.target_chat_id || '');
+    if (!await this.isAppealAdminForChat(admin.id, banChatId)) return { ok: false, error: 'not_chat_admin' };
+    const adminMessage = { chat: sourceChat, from: admin, message_id: sourceChat.message_id };
+    const unban = await this.unbanForAppeal(banChatId, appeal.payload?.appealant_id, appealRef, adminMessage, { reconcileFirst: true });
+    await this.record('appeal_unban_retry_result', adminMessage, {
+      appeal_ref: appealRef,
+      target: { id: appeal.payload?.appealant_id },
+      target_chat_id: banChatId,
+      ok: unban.ok,
+      attempts: unban.attempts,
+      error: unban.error ? String(unban.error).slice(0, 240) : '',
+      evidence: ['Admin requested a manual retry of the idempotent Telegram unban.']
+    }, { writeDkg: false, idempotencyKey: `appeal-unban-retry-result:${appealRef}:${Date.now()}` });
+    return { ok: unban.ok, unban, error: unban.ok ? '' : 'unban_failed' };
+  }
+
+  async unbanForAppeal(chatId = '', userId = '', appealRef = '', adminMessage = {}, { reconcileFirst = false } = {}) {
+    if (!chatId || !userId) return { ok: false, attempts: 0, error: 'missing_target' };
+    if (!await this.hasBanRights(chatId)) {
+      await this.record('appeal_unban_failed', adminMessage, {
+        appeal_ref: appealRef,
+        target: { id: userId },
+        target_chat_id: chatId,
+        attempt: 0,
+        error: 'missing_ban_rights',
+        evidence: ['Appeal overturn recorded; Telegram unban could not run because the bot lacks ban rights.']
+      }, { writeDkg: false, idempotencyKey: `appeal-unban-missing-rights:${appealRef}` });
+      return { ok: false, attempts: 0, error: 'missing_ban_rights' };
+    }
+    const reconcile = async () => {
+      try {
+        const member = await this.call('getChatMember', { chat_id: chatId, user_id: Number(userId) || userId });
+        // Telegram reports a still-banned user as "kicked". Any other state
+        // means the idempotent unban already took effect or is unnecessary.
+        return member && member.status !== 'kicked' ? { ok: true } : { ok: false };
+      } catch {
+        return { ok: false, unknown: true };
+      }
+    };
+    if (reconcileFirst) {
+      const current = await reconcile();
+      if (current.ok) {
+        await this.record('appeal_unban_completed', adminMessage, {
+          appeal_ref: appealRef,
+          target: { id: userId },
+          target_chat_id: chatId,
+          attempts: 0,
+          reconciled: true,
+          evidence: ['Telegram member state already permitted return; no duplicate unban call was made.']
+        }, { writeDkg: false, idempotencyKey: `appeal-unban-reconciled:${appealRef}` });
+        return { ok: true, attempts: 0, reconciled: true };
+      }
+    }
+    let lastError = '';
+    const runId = randomUUID();
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      if (attempt > 1) {
+        const current = await reconcile();
+        if (current.ok) {
+          await this.record('appeal_unban_completed', adminMessage, {
+            appeal_ref: appealRef,
+            target: { id: userId },
+            target_chat_id: chatId,
+            attempts: attempt - 1,
+            reconciled: true,
+            evidence: ['A retry reconciled the current Telegram member state; no duplicate unban call was made.']
+          }, { writeDkg: false, idempotencyKey: `appeal-unban-reconciled:${appealRef}` });
+          return { ok: true, attempts: attempt - 1, reconciled: true };
+        }
+      }
+      try {
+        // A distinct key per attempt is required after an uncertain timeout:
+        // the previous effect may still be unresolved, but unban is idempotent
+        // and only permits return. It cannot add a user.
+        await this.callEffect('unbanChatMember', { chat_id: chatId, user_id: Number(userId) || userId, only_if_banned: true }, `appeal-unban:${appealRef}:${runId}:${attempt}`);
+        await this.record('appeal_unban_completed', adminMessage, {
+          appeal_ref: appealRef,
+          target: { id: userId },
+          target_chat_id: chatId,
+          attempts: attempt,
+          run_id: runId,
+          evidence: ['Telegram unban succeeded. Unban can only permit return; it cannot add a user back.']
+        }, { writeDkg: false, idempotencyKey: `appeal-unban-completed:${appealRef}:${runId}:${attempt}` });
+        return { ok: true, attempts: attempt };
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+        await this.record('appeal_unban_failed', adminMessage, {
+          appeal_ref: appealRef,
+          target: { id: userId },
+          target_chat_id: chatId,
+          attempt,
+          run_id: runId,
+          outcome_unknown: error?.telegramOutcomeUnknown === true,
+          error: String(lastError).slice(0, 240),
+          evidence: [`Telegram unban attempt ${attempt} failed; visible to admins and safe to retry.`]
+        }, { writeDkg: false, idempotencyKey: `appeal-unban-failed:${appealRef}:${runId}:${attempt}` });
+      }
+    }
+    return { ok: false, attempts: 3, error: lastError || 'unban_failed' };
+  }
+
   async handleCommand(message) {
     const text = message.text || '';
     const chatId = message.chat.id;
@@ -4201,7 +5133,10 @@ export class TelegramShieldBot {
     if (isCommand(text, 'start', botUsername)) {
       const isPrivateChat = message.chat?.type === 'private' || Number(chatId) > 0;
       const replyContext = isPrivateChat ? { reply_to_message_id: message.message_id } : {};
-      await this.sendInteractiveReply(chatId, this.formatHelp(), this.dashboardKeyboard(message.from?.id || message.from?.username || ''), replyContext);
+      const helpText = isPrivateChat
+        ? [this.formatHelp(), '', 'Banned from a group that uses TRACaBot? Send /appeal here to list your own locally stored ban cases. Telegram only lets the bot message you after you start this private chat; the bot cannot send the first DM.', 'Group admins: use Protection controls, Status, Recent automatic bans, or Appeals below. Only current admins of the affected group see its details; bot owners do not bypass group administration.'].join('\n')
+        : this.formatHelp();
+      await this.sendInteractiveReply(chatId, helpText, this.dashboardKeyboard(message.from?.id || message.from?.username || '', { includeControls: isPrivateChat }), replyContext);
       this.cleanupMenuTrigger(message);
       return;
     }
@@ -4211,6 +5146,53 @@ export class TelegramShieldBot {
         return;
       }
       await this.sendCleanCommandReply(message, await this.formatOwnerHealth());
+      return;
+    }
+    if (isCommand(text, 'appeal', botUsername)) {
+      await this.handleAppealCommand(message);
+      return;
+    }
+    if (isCommand(text, 'controls', botUsername)) {
+      await this.handleControlsCommand(message);
+      return;
+    }
+    if (isCommand(text, 'appeals', botUsername)) {
+      await this.handleAppealsCommand(message);
+      return;
+    }
+    if (isCommand(text, 'appeal_retry', botUsername)) {
+      const ref = text.replace(commandRegex('appeal_retry', botUsername), '').trim().split(/\s+/)[0] || '';
+      if (!ref) {
+        await this.sendCleanCommandReply(message, 'Usage: /appeal_retry <appeal ref>');
+        return;
+      }
+      const result = await this.retryAppealUnban(ref, actorFromMessage(message), message.chat || {});
+      await this.sendCleanCommandReply(message, result.ok
+        ? '✅ Telegram unban retry completed.'
+        : (result.error === 'not_chat_admin' ? 'Only an actual admin of the affected group can retry this unban.' : 'Unban retry did not succeed; failure remains visible to admins.'));
+      return;
+    }
+    if (isCommand(text, 'appeal_uphold', botUsername) || isCommand(text, 'appeal_overturn', botUsername)) {
+      const decision = isCommand(text, 'appeal_overturn', botUsername) ? 'overturn' : 'uphold';
+      const args = text.replace(commandRegex(decision === 'overturn' ? 'appeal_overturn' : 'appeal_uphold', botUsername), '').trim();
+      const [ref = '', ...reasonParts] = args.split(/\s+/).filter(Boolean);
+      if (!ref) {
+        await this.sendCleanCommandReply(message, `Usage: /appeal_${decision} <appeal ref> [reason]`);
+        return;
+      }
+      const result = await this.resolveAppeal({ appealRef: ref, admin: actorFromMessage(message), decision, reason: reasonParts.join(' '), sourceChat: message.chat || {} });
+      const messages = {
+        appeal_not_found: 'Appeal not found.',
+        appeal_already_resolved: 'That appeal is already resolved.',
+        ban_not_found: 'The local ban record is unavailable.',
+        ban_chat_unavailable: 'The affected group is unavailable.',
+        not_chat_admin: 'Only an actual admin of the affected group can resolve this appeal.'
+      };
+      await this.sendCleanCommandReply(message, result.ok
+        ? (decision === 'overturn'
+          ? (result.unban?.ok ? '✅ Appeal overturned and Telegram unban completed.' : `⚠️ Appeal overturned locally, but Telegram unban failed after ${result.unban?.attempts || 0} attempt(s). Admins can retry.`)
+          : '✅ Appeal reviewed and the local ban upheld.')
+        : (messages[result.error] || 'Appeal could not be resolved.'));
       return;
     }
     if (isCommand(text, 'scan', botUsername)) {
@@ -4331,7 +5313,9 @@ export class TelegramShieldBot {
         deletedMessageCount: deletedMessages.deleted,
         deleteAttemptCount: deletedMessages.attempted,
         sangmataEvidence: replyUser.sangmata?.evidence || '',
-        source: 'manual /ban command'
+        source: 'manual /ban command',
+        performedBy: { id: message.from?.id, username: message.from?.username || '', is_bot: message.from?.is_bot === true },
+        reasonProvided: reason !== 'admin requested ban'
       });
       await this.sendCleanCommandReply(message, `${formatBanReply(replyUser, '')}${deletionNote}`);
     }
@@ -4870,6 +5854,28 @@ export class TelegramShieldBot {
       });
       return true;
     }
+    if (parsed.action === 'appeal-uphold' || parsed.action === 'appeal-overturn') {
+      const appealRef = parsed.parts[1] || '';
+      const decision = parsed.action === 'appeal-overturn' ? 'overturn' : 'uphold';
+      const result = await this.resolveAppeal({ appealRef, admin: from, decision, sourceChat: message.chat || {} });
+      const messages = {
+        appeal_not_found: 'Appeal not found.',
+        appeal_already_resolved: 'That appeal is already resolved.',
+        ban_not_found: 'The local ban record is unavailable.',
+        ban_chat_unavailable: 'The affected group is unavailable.',
+        not_chat_admin: 'Only an actual admin of the affected group can resolve this appeal.'
+      };
+      const text = result.ok
+        ? (decision === 'overturn'
+          ? (result.unban?.ok
+            ? '✅ Appeal overturned. Telegram unban completed; the user may return if no other restriction applies. Creator global record unchanged.'
+            : `⚠️ Appeal overturned locally, but Telegram unban failed after ${result.unban?.attempts || 0} attempt(s). Failure is recorded for admins. Creator global record unchanged.`)
+          : '✅ Appeal reviewed. Local ban upheld. Creator global record unchanged.')
+        : (messages[result.error] || 'Appeal could not be resolved.');
+      await this.editInteractiveMessage(chatId, message.message_id, text, [[button('✖️ Close', callbackData('close', requester || 'admin'))]]).catch(() => null);
+      await this.answerCallback(query.id, result.ok ? 'Appeal resolved' : text, !result.ok);
+      return true;
+    }
     const adminWideAction = parsed.action.startsWith('review-') || parsed.action.startsWith('warn-');
     if (requester && String(from.id || from.username || '') !== String(requester) && !(trusted && adminWideAction)) {
       await this.answerCallback(query.id, 'Open your own panel to use these buttons.');
@@ -4879,11 +5885,111 @@ export class TelegramShieldBot {
       await this.answerCallback(query.id, 'Admin only');
       return true;
     }
+    const controlAction = ['controls', 'controls-refresh', 'controls-status', 'controls-recent', 'controls-join-toggle', 'controls-ban-open', 'controls-ban-confirm', 'controls-ban-retry', 'appeals'].includes(parsed.action);
+    if (controlAction) {
+      const isPrivate = message.chat?.type === 'private' || Number(chatId) > 0;
+      if (!isPrivate) {
+        await this.answerCallback(query.id, 'Use /controls in a private chat.');
+        return true;
+      }
+      const render = async () => {
+        const view = await this.controlsView(from.id || from.username || '');
+        await this.editInteractiveMessage(chatId, message.message_id, view.text, view.rows);
+      };
+      if (parsed.action === 'controls' || parsed.action === 'controls-refresh') {
+        await this.answerCallback(query.id);
+        await render();
+        return true;
+      }
+      if (parsed.action === 'controls-status' || parsed.action === 'controls-recent' || parsed.action === 'appeals') {
+        const view = parsed.action === 'controls-status'
+          ? await this.protectionStatusView(from.id || from.username || '')
+          : parsed.action === 'controls-recent'
+            ? await this.recentAutoBansView(from.id || from.username || '')
+            : await this.appealsView(from.id || from.username || '');
+        await this.answerCallback(query.id);
+        await this.editInteractiveMessage(chatId, message.message_id, view.text, view.rows);
+        return true;
+      }
+      if (parsed.action === 'controls-join-toggle') {
+        const targetChatId = parsed.parts[1] || '';
+        const nextPaused = parsed.parts[2] === 'on';
+        if (!await this.isAppealAdminForChat(from.id, targetChatId)) {
+          await this.answerCallback(query.id, 'Only a current admin of that group can change this.', true);
+          return true;
+        }
+        const group = this.controlGroupCandidates().find((item) => item.id === String(targetChatId)) || {};
+        await this.setJoinAutoRemovalPaused({ id: targetChatId, type: 'supergroup', title: group.title || '' }, nextPaused, from, 'private controls');
+        await this.answerCallback(query.id, nextPaused ? 'Paused future join removals. Evidence capture continues.' : 'Resumed future join removals. Configured policy still applies.');
+        await render();
+        return true;
+      }
+      if (parsed.action === 'controls-ban-open') {
+        const view = await this.showAutoBanControl(eventId, from, message.chat || {});
+        if (!view.ok) {
+          await this.answerCallback(query.id, view.error === 'not_chat_admin' ? 'Only a current admin of the affected group can review this ban.' : 'Automatic join ban not found.', true);
+          return true;
+        }
+        await this.answerCallback(query.id);
+        await this.editInteractiveMessage(chatId, message.message_id, view.text, view.rows);
+        return true;
+      }
+      if (parsed.action === 'controls-ban-confirm') {
+        const ban = this.findEvent(eventId);
+        const result = await this.overrideAutomaticBan({ ban, admin: from, sourceChat: message.chat || {} });
+        if (!result.ok) {
+          const messageText = result.error === 'not_chat_admin'
+            ? 'Only a current admin of the affected group can override this ban.'
+            : 'Automatic join ban could not be overridden.';
+          await this.answerCallback(query.id, messageText, true);
+          return true;
+        }
+        const text = result.already
+          ? (result.unbanPending
+            ? 'A local override is already recorded, but Telegram unban is still pending. Use Retry unban from the case view.'
+            : 'A local override is already recorded for this automatic join ban. Refresh controls to see current state.')
+          : (result.unban?.ok
+            ? '✅ Override recorded and Telegram unban completed. The user may return if no other restriction applies. This is separate from pausing future join removals.'
+            : `⚠️ Override recorded locally, but Telegram unban did not complete after ${result.unban?.attempts || 0} attempt(s). Future pause state is separate; admins still see the failure.`);
+        const retryAvailable = result.unbanPending === true || (result.unban && result.unban.ok === false);
+        const rows = retryAvailable
+          ? [
+            [button('🔁 Retry unban', callbackData('controls-ban-retry', from.id || from.username || 'admin', shortId(eventId)))],
+            [button('🔄 Refresh controls', callbackData('controls-refresh', from.id || from.username || 'admin')), button('✖️ Close', callbackData('close', from.id || from.username || 'admin'))]
+          ]
+          : [[button('🔄 Refresh controls', callbackData('controls-refresh', from.id || from.username || 'admin')), button('✖️ Close', callbackData('close', from.id || from.username || 'admin'))]];
+        await this.editInteractiveMessage(chatId, message.message_id, text, rows).catch(() => null);
+        await this.answerCallback(query.id, result.unban?.ok ? 'Unban completed' : (result.unbanPending ? 'Unban retry available' : 'Override recorded'));
+        return true;
+      }
+      if (parsed.action === 'controls-ban-retry') {
+        const ban = this.findEvent(eventId);
+        const result = await this.retryAutomaticBanOverride({ ban, admin: from, sourceChat: message.chat || {}, requestId: query.id });
+        if (!result.ok) {
+          const messageText = result.error === 'not_chat_admin'
+            ? 'Only a current admin of the affected group can retry this unban.'
+            : result.error === 'override_not_found'
+              ? 'Record the local override before retrying the unban.'
+              : 'Automatic join ban unban retry could not run.';
+          await this.answerCallback(query.id, messageText, true);
+          return true;
+        }
+        const text = result.unban?.ok
+          ? '✅ Telegram unban retry completed. The local correction and creator global record are unchanged.'
+          : `⚠️ Telegram unban retry did not complete after ${result.unban?.attempts || 0} attempt(s). The local correction remains and admins still see the failure.`;
+        await this.editInteractiveMessage(chatId, message.message_id, text, [
+          [button('🛡️ Protection controls', callbackData('controls', from.id || from.username || 'admin')), button('🚨 Recent automatic bans', callbackData('controls-recent', from.id || from.username || 'admin'))],
+          [button('✖️ Close', callbackData('close', from.id || from.username || 'admin'))]
+        ]).catch(() => null);
+        await this.answerCallback(query.id, result.unban?.ok ? 'Unban completed' : 'Unban still pending');
+        return true;
+      }
+    }
     const deferredReviewDecision = parsed.action === 'review-confirm' || parsed.action === 'review-reject';
     if (!deferredReviewDecision) await this.answerCallback(query.id);
 
     if (parsed.action === 'dashboard') {
-      await this.editInteractiveMessage(chatId, message.message_id, this.formatHelp(), this.dashboardKeyboard(requester));
+      await this.editInteractiveMessage(chatId, message.message_id, this.formatHelp(), this.dashboardKeyboard(requester, { includeControls: message.chat?.type === 'private' }));
       return true;
     }
 
@@ -4995,7 +6101,11 @@ export class TelegramShieldBot {
         return true;
       }
       if (parsed.action === 'why') {
-        await this.editInteractiveMessage(chatId, message.message_id, this.formatWhy(parsed.parts[1] || ''), this.statsKeyboard(requester));
+        if (!trusted) {
+          await this.answerCallback(query.id, 'Admin only');
+          return true;
+        }
+        await this.editInteractiveMessage(chatId, message.message_id, this.formatWhy(parsed.parts[1] || '', chatId), this.statsKeyboard(requester));
         return true;
       }
     }
@@ -5420,6 +6530,468 @@ export class TelegramShieldBot {
     }
   }
 
+  membershipEpisodeKey(chatId = '', userId = '') {
+    return `${chatId}:${userId}`;
+  }
+
+  membershipNotification({ messageId = '', eventDate = '', updateId = '' } = {}) {
+    const eventMs = Number(eventDate);
+    const update = Number(updateId);
+    return {
+      message_id: messageId ? String(messageId) : '',
+      event_ms: Number.isFinite(eventMs) && eventMs > 0 ? eventMs * 1000 : 0,
+      update_id: Number.isFinite(update) && update > 0 ? update : 0
+    };
+  }
+
+  membershipBoundary(open, seen, notification = {}) {
+    const boundaries = [open, ...seen, notification].filter(Boolean).map((item) => item.payload || item);
+    return {
+      event_ms: Math.max(0, ...boundaries.map((item) => Number(item.last_event_ms || item.event_ms || 0))),
+      update_id: Math.max(0, ...boundaries.map((item) => Number(item.last_update_id || item.update_id || 0))),
+      message_id: String(boundaries.map((item) => item.last_message_id || item.message_id || '').filter(Boolean).sort().at(-1) || '')
+    };
+  }
+
+  isReplayJoin(closed = null, notification = {}) {
+    if (!closed) return false;
+    const boundaryEventMs = Number(closed.payload?.boundary_event_ms || 0);
+    const notificationEventMs = Number(notification.event_ms || 0);
+    // Closure boundaries are strict. Same-second notifications remain ambiguous
+    // even if they carry a newer update/message identity; missing comparable
+    // event time also fails closed.
+    if (!boundaryEventMs || !notificationEventMs) return true;
+    return notificationEventMs <= boundaryEventMs;
+  }
+
+  openMembershipEpisode(chatId = '', userId = '', notification = {}) {
+    const key = this.membershipEpisodeKey(chatId, userId);
+    const notice = this.membershipNotification(notification);
+    let open = null;
+    let closed = null;
+    const seen = [];
+    const history = this.store.all()
+      .filter((event) => ['membership_episode_opened', 'membership_episode_closed', 'membership_episode_seen'].includes(event.event_type)
+        && event.payload?.membership_key === key)
+      .sort((a, b) => Date.parse(a.timestamp || '') - Date.parse(b.timestamp || ''));
+    for (const event of history) {
+      if (event.event_type === 'membership_episode_opened') {
+        open = event;
+        closed = null;
+      } else if (event.event_type === 'membership_episode_closed') {
+        if (open && event.payload?.episode_id === open.payload?.episode_id) {
+          closed = event;
+          open = null;
+        }
+      } else if (open && event.payload?.episode_id === open.payload?.episode_id) {
+        seen.push(event);
+      }
+    }
+    if (open && Date.now() - Date.parse(open.timestamp || '') <= MEMBERSHIP_EPISODE_DEDUPE_MS) {
+      if (notice.event_ms || notice.update_id || notice.message_id) {
+        this.store.append({
+          id: `membership-seen:${open.payload.episode_id}:${notice.event_ms || 0}:${notice.update_id || 0}:${notice.message_id || ''}`,
+          event_type: 'membership_episode_seen',
+          timestamp: new Date().toISOString(),
+          local_only: true,
+          chat: { id: chatId },
+          user: { id: userId },
+          payload: { membership_key: key, episode_id: open.payload.episode_id, ...notice }
+        });
+      }
+      return { episodeId: open.payload.episode_id, replay: false };
+    }
+    if (open) {
+      this.closeMembershipEpisode(chatId, userId);
+      closed = this.store.all().filter((event) => event.event_type === 'membership_episode_closed'
+        && event.payload?.membership_key === key).at(-1) || null;
+    }
+    if (this.isReplayJoin(closed, notice)) {
+      return { episodeId: closed?.payload?.episode_id || '', replay: true };
+    }
+    const episodeId = `episode-${randomUUID()}`;
+    this.store.append({
+      id: `membership-open:${episodeId}`,
+      event_type: 'membership_episode_opened',
+      timestamp: new Date().toISOString(),
+      local_only: true,
+      chat: { id: chatId },
+      user: { id: userId },
+      payload: {
+        membership_key: key,
+        episode_id: episodeId,
+        last_event_ms: notice.event_ms,
+        last_update_id: notice.update_id,
+        last_message_id: notice.message_id,
+        evidence: ['Membership episode opened for a genuine join; service-message and chat_member notifications share this episode.']
+      }
+    });
+    return { episodeId, replay: false };
+  }
+
+  closeMembershipEpisode(chatId = '', userId = '', notification = {}) {
+    const key = this.membershipEpisodeKey(chatId, userId);
+    const notice = this.membershipNotification(notification);
+    let open = null;
+    const seen = [];
+    const history = this.store.all()
+      .filter((event) => ['membership_episode_opened', 'membership_episode_closed', 'membership_episode_seen'].includes(event.event_type)
+        && event.payload?.membership_key === key)
+      .sort((a, b) => Date.parse(a.timestamp || '') - Date.parse(b.timestamp || ''));
+    for (const event of history) {
+      if (event.event_type === 'membership_episode_opened') {
+        open = event;
+      } else if (event.event_type === 'membership_episode_closed') {
+        if (open && event.payload?.episode_id === open.payload?.episode_id) open = null;
+      } else if (open && event.payload?.episode_id === open.payload?.episode_id) {
+        seen.push(event);
+      }
+    }
+    if (!open) return null;
+    const episodeId = open.payload.episode_id;
+    const boundary = this.membershipBoundary(open, seen, notice);
+    this.store.append({
+      id: `membership-close:${episodeId}`,
+      event_type: 'membership_episode_closed',
+      timestamp: new Date().toISOString(),
+      local_only: true,
+      chat: { id: chatId },
+      user: { id: userId },
+      payload: {
+        membership_key: key,
+        episode_id: episodeId,
+        boundary_event_ms: boundary.event_ms,
+        boundary_update_id: boundary.update_id,
+        boundary_message_id: boundary.message_id,
+        evidence: ['Membership episode closed on departure; a later genuine join gets a new episode. Older notifications are replayed, not reopened.']
+      }
+    });
+    return episodeId;
+  }
+
+  localProtectionLineage(event = {}, all = this.store.all()) {
+    const roots = new Set();
+    const seen = new Set();
+    const visit = (item, depth = 0) => {
+      if (!item || depth > 6) return;
+      const itemId = String(item.id || '');
+      if (itemId && seen.has(itemId)) return;
+      if (itemId) seen.add(itemId);
+      const resolved = itemId ? resolveReviewTarget(all, itemId) : { ok: false };
+      const finding = resolved.ok ? resolved.finding : item;
+      const candidates = new Set([String(finding.id || '')]);
+      for (const payload of [item.payload || {}, finding.payload || {}]) {
+        for (const value of [payload.target_event_id, payload.source_event_id]) {
+          if (value) candidates.add(String(value));
+        }
+        for (const value of [...(payload.evidence_root_ids || []), ...(payload.related_event_ids || [])]) {
+          if (value) candidates.add(String(value));
+        }
+      }
+      for (const candidate of candidates) {
+        if (!candidate) continue;
+        roots.add(candidate);
+        if (candidate !== itemId && candidate !== String(finding.id || '')) {
+          const next = all.find((entry) => String(entry.id || '') === candidate);
+          if (next) visit(next, depth + 1);
+        }
+      }
+    };
+    visit(event);
+    return [...roots].slice(0, 50);
+  }
+
+  localProtectionEvidence(target = {}, chatId = '') {
+    const targetId = String(target.id || '');
+    if (!targetId) return { evidence: [], complete: true };
+    const all = this.store.all();
+    const exact = (event = {}) => {
+      const subject = event.payload?.reviewed_target || event.payload?.target || {};
+      const key = String(event.payload?.reviewed_target_key || event.payload?.target_key || '');
+      return String(subject.id || '') === targetId || key === `id:${targetId}`;
+    };
+    const referenced = (event = {}) => {
+      const id = String(event.payload?.target_event_id || '');
+      return id ? all.find((item) => item.id === id) || null : null;
+    };
+    const created = (event = {}) => String(event.payload?.occurred_at || event.timestamp || '');
+    const rows = all
+      .filter((event) => exact(event))
+      .filter((event) => !chatId || sameChat(eventChatKey(event), chatId))
+      .filter((event) => ['review_upheld', 'review_overturned'].includes(event.event_type));
+    return {
+      complete: rows.length < 200,
+      evidence: rows.slice(-200).map((event) => {
+        const parent = referenced(event);
+        const resolvedParent = parent ? resolveReviewTarget(all, parent.id) : { ok: false };
+        const reviewedKey = String(event.payload?.reviewed_target_key || '');
+        const targetChat = String(event.payload?.target_chat_id || '');
+        const targetChatMatches = Boolean(targetChat) && resolvedParent.ok && sameChat(targetChat, resolvedParent.targetChatId);
+        const approved = event.event_type === 'review_upheld'
+          && event.payload?.local_approval === true
+          && resolvedParent.ok
+          && resolvedParent.subjectKey === reviewedKey
+          && targetChatMatches
+          && ['telegram_admin_review', 'authorized_skill_review'].includes(String(event.payload?.approval_source || ''));
+        const lineageRoots = this.localProtectionLineage(event, all);
+        const underlyingId = resolvedParent.ok ? String(resolvedParent.finding.id || '') : String(event.payload?.target_event_id || '');
+        return {
+          eventId: event.id,
+          eventType: event.event_type,
+          claimLevel: event.event_type === 'review_overturned' ? 'retracted' : 'confirmed_scam',
+          confidence: Number(event.payload?.confidence || 0),
+          created: created(event),
+          adminVerified: event.event_type === 'review_upheld',
+          exactActorMatch: true,
+          trustLayer: 'local',
+          source: 'local_admin_review',
+          communityId: String(event.payload?.community_id || event.chat?.id || ''),
+          targetEventId: underlyingId,
+          sourceEventId: underlyingId,
+          evidenceRootIds: lineageRoots,
+          publisherApprovalVerified: false,
+          localApproval: approved,
+          approvalSource: String(event.payload?.approval_source || ''),
+          retracted: event.event_type === 'review_overturned'
+        };
+      })
+    };
+  }
+
+  localProtectionDecision(target = {}, chatId = '') {
+    const local = this.localProtectionEvidence(target, chatId);
+    return evaluateJoinProtection({
+      target,
+      evidence: local.evidence,
+      chatId,
+      policy: {
+        autoRemove: true,
+        allowedChatIds: [],
+        maxAgeDays: this.config.joinEvidenceMaxAgeDays || 180,
+        minRoots: this.config.joinMinConfirmedRoots || 1,
+        trustedLayers: ['local'],
+        trustedSources: [],
+        evidenceComplete: local.complete
+      }
+    });
+  }
+
+  localProtectionOverride(target = {}, chatId = '') {
+    const targetId = String(target.id || '');
+    if (!targetId || !chatId) return null;
+    const all = this.store.all();
+    const exact = (event = {}) => {
+      const subject = event.payload?.reviewed_target || event.payload?.target || event.user || {};
+      return String(subject.id || '') === targetId || event.payload?.reviewed_target_key === `id:${targetId}`;
+    };
+    const rows = all
+      .filter((event) => exact(event) && sameChat(eventChatKey(event), chatId))
+      // Both private appeal overturn and native admin unban are group-scoped
+      // local corrections. They never revoke a creator global attestation.
+      .filter((event) => event.event_type === 'appeal_resolved'
+        || (event.event_type === 'review_overturned' && ['telegram_private_appeal_overturn', 'native_chat_member_unban', 'telegram_admin_auto_ban_override'].includes(String(event.payload?.correction_source || '')))
+        || event.event_type === 'review_upheld')
+      .sort((a, b) => Date.parse(a.timestamp || '') - Date.parse(b.timestamp || ''));
+    const overturns = rows.filter((event) => event.event_type === 'review_overturned'
+      || (event.event_type === 'appeal_resolved' && event.payload?.decision === 'overturn'));
+    const overturn = overturns.at(-1);
+    if (!overturn) return null;
+    const correction = rows.filter((event) => event.event_type === 'review_overturned').at(-1);
+    const bannedEvent = all.find((event) => event.id === overturn.payload?.ban_event_id);
+    const lineageSource = correction || bannedEvent || overturn;
+    const overturnRoots = new Set(this.localProtectionLineage(lineageSource, all));
+    const overturnTime = Date.parse(overturn.timestamp || '');
+    if (!Number.isFinite(overturnTime)) return overturn;
+    const local = this.localProtectionEvidence(target, chatId);
+    const approvedIds = new Set(local.evidence
+      .filter((item) => item.eventType === 'review_upheld' && item.localApproval === true)
+      .map((item) => item.eventId));
+    // Reuse the production evidence decision for freshness, retraction, expiry,
+    // and root counting instead of a divergent ad hoc filter.
+    const localDecision = this.localProtectionDecision(target, chatId);
+    const activeIds = new Set(localDecision.action === 'remove' ? (localDecision.roots || []) : []);
+    const independent = rows.some((event) => {
+      if (event.event_type !== 'review_upheld' || !approvedIds.has(event.id) || !activeIds.has(event.id)) return false;
+      const created = Date.parse(event.timestamp || '');
+      if (!Number.isFinite(created) || created <= overturnTime) return false;
+      const roots = this.localProtectionLineage(event, all);
+      // Unknown or overlapping lineage cannot clear a local correction.
+      if (!roots.length || !overturnRoots.size) return false;
+      return !roots.some((root) => overturnRoots.has(root));
+    });
+    return independent ? null : overturn;
+  }
+
+  async checkJoinProtection(chat = {}, member = {}, episodeKey = '') {
+    if (!member?.id || member.is_bot === true || String(member.id) === String(await this.getBotId().catch(() => ''))) {
+      return { action: 'allow', reason: 'protected_bot' };
+    }
+    let targetIsAdmin = false;
+    let adminLookupOk = true;
+    try {
+      targetIsAdmin = await this.isTelegramChatAdmin(chat.id, member.id, { throwOnFailure: true });
+    } catch {
+      adminLookupOk = false;
+    }
+    const targetIsOwner = this.config.botOwnerIds?.has?.(String(member.id)) === true;
+    const episode = String(episodeKey || `${chat.id}:${member.id}:${this.currentUpdateId || Date.now()}`);
+    const localOverride = this.localProtectionOverride(member, chat.id);
+    if (localOverride) {
+      const decision = {
+        policyVersion: PROTECTION_POLICY_VERSION,
+        action: 'allow',
+        reason: 'local_overturn',
+        autoRemove: this.config.joinAutoRemove === true,
+        exactIdentity: true,
+        evidenceCount: 0,
+        confirmedEvidenceCount: 0,
+        activeConfirmedEvidenceCount: 0,
+        evidenceRef: `appeal:${localOverride.id}`
+      };
+      await this.record('join_protection_check', { chat, from: member }, {
+        target: member,
+        target_key: targetKey(member),
+        decision: decision.action,
+        reason: decision.reason,
+        summary: 'A local admin overturned this ban for this chat; automatic removal is suppressed.',
+        protection_policy_version: decision.policyVersion,
+        graph_ok: true,
+        admin_lookup_ok: adminLookupOk,
+        evidence_complete: true,
+        membership_episode: episode,
+        auto_remove: this.config.joinAutoRemove === true,
+        appeal_overturn_event_id: localOverride.id,
+        evidence: [`Local admin override ${localOverride.id}; creator global record is unchanged.`]
+      }, { writeDkg: false, idempotencyKey: `join-protection:${chat.id}:${member.id}:${episode}:local-overturn:${localOverride.id}` });
+      return decision;
+    }
+    const local = this.localProtectionEvidence(member, chat.id);
+    const remote = typeof this.dkg?.queryProtectionEvidence === 'function'
+      ? await this.dkg.queryProtectionEvidence({ userId: member.id })
+      : { ok: false, error: 'protection_query_unavailable', evidence: [], complete: false };
+    let creator = { ok: true, configured: false, status: 'disabled', evidence: [], complete: true, error: '' };
+    if (this.config.creatorCuratorUrl) {
+      creator = await fetchCreatorAttestation({
+        baseUrl: this.config.creatorCuratorUrl,
+        userId: member.id,
+        publicKey: this.config.creatorCuratorPublicKey,
+        token: this.config.creatorCuratorReadToken || this.config.creatorCuratorToken,
+        issuer: this.config.creatorCuratorIssuer,
+        minConfidence: this.config.creatorCuratorMinConfidence,
+        minRoots: this.config.creatorCuratorMinRoots,
+        maxAgeDays: this.config.creatorCuratorMaxAgeDays,
+        timeoutMs: this.config.creatorCuratorTimeoutMs,
+        fetchImpl: this.creatorCuratorFetch || globalThis.fetch
+      });
+    }
+    const evidence = [...local.evidence, ...(remote.evidence || []), ...(creator.evidence || [])];
+    const evidenceComplete = local.complete !== false && remote.complete !== false && creator.complete !== false;
+    const decision = evaluateJoinProtection({
+      target: member,
+      evidence,
+      chatId: chat.id,
+      policy: {
+        autoRemove: this.config.joinAutoRemove === true,
+        allowedChatIds: this.config.joinAutoRemoveChats || [],
+        maxAgeDays: this.config.joinEvidenceMaxAgeDays || 180,
+        minRoots: this.config.joinMinConfirmedRoots || 1,
+        creatorMinConfidence: this.config.creatorCuratorMinConfidence || 90,
+        trustedLayers: this.config.joinTrustedLayers || ['local'],
+        trustedSources: this.config.joinTrustedSources || [],
+        evidenceComplete,
+        targetIsAdmin,
+        targetIsOwner
+      }
+    });
+    const graphOk = Boolean(remote.ok) && adminLookupOk && creator.ok !== false;
+    const eventType = graphOk ? 'join_protection_check' : 'join_protection_degraded';
+    const protectionReady = graphOk && evidenceComplete && decision.action === 'remove' && adminLookupOk && !targetIsAdmin && !targetIsOwner;
+    const pausedBeforeRecord = protectionReady && this.joinAutoRemovalPaused(chat.id);
+    const auditDecision = pausedBeforeRecord
+      ? { ...decision, action: 'flag', reason: 'join_auto_removal_paused' }
+      : decision;
+    await this.record(eventType, { chat, from: member }, {
+      target: member,
+      target_key: targetKey(member),
+      decision: auditDecision.action,
+      reason: auditDecision.reason,
+      summary: protectionSummary(auditDecision),
+      protection_policy_version: auditDecision.policyVersion,
+      graph_ok: Boolean(remote.ok),
+      creator_ok: creator.ok !== false,
+      creator_status: creator.status || 'disabled',
+      creator_configured: creator.configured === true,
+      admin_lookup_ok: adminLookupOk,
+      evidence_complete: evidenceComplete,
+      membership_episode: episode,
+      graph_error: remote.error ? String(remote.error).slice(0, 200) : '',
+      creator_error: creator.error ? String(creator.error).slice(0, 200) : '',
+      auto_remove: this.config.joinAutoRemove === true,
+      trusted_layers: auditDecision.trustedLayers,
+      evidence_ref: auditDecision.evidenceRef,
+      evidence_roots: (auditDecision.roots || []).slice(0, 5),
+      evidence_count: auditDecision.evidenceCount,
+      confirmed_evidence_count: auditDecision.confirmedEvidenceCount,
+      active_confirmed_evidence_count: auditDecision.activeConfirmedEvidenceCount || 0,
+      evidence: [protectionSummary(auditDecision)]
+    }, { writeDkg: false, idempotencyKey: `join-protection:${chat.id}:${member.id}:${episode}:${auditDecision.evidenceRef || auditDecision.reason}` });
+
+    if (!protectionReady) {
+      return decision;
+    }
+    if (pausedBeforeRecord) {
+      return auditDecision;
+    }
+    if (this.joinAutoRemovalPaused(chat.id)) {
+      await this.record('join_protection_suppressed', { chat, from: member }, {
+        target: member,
+        target_key: targetKey(member),
+        reason: 'join_auto_removal_paused',
+        membership_episode: episode,
+        evidence_ref: decision.evidenceRef,
+        evidence: ['A group admin paused future automatic join removals; evidence capture and sharing continue, but no destructive action ran.']
+      }, { writeDkg: false, idempotencyKey: `join-protection-paused:${chat.id}:${member.id}:${episode}:${decision.evidenceRef}` });
+      return { ...auditDecision, action: 'flag', reason: 'join_auto_removal_paused' };
+    }
+
+    let result;
+    try {
+      result = await this.enforceConfirmedScam(chat.id, member, [], `join-protection:${chat.id}:${member.id}:${episode}:${decision.evidenceRef}`, { joinProtection: true });
+    } catch (error) {
+      result = { banned: false, reason: error instanceof Error ? error.message : String(error) };
+    }
+    if (result?.banned) {
+      await this.record('ban_executed', { chat, from: member }, {
+        target: member,
+        target_key: targetKey(member),
+        confidence: 100,
+        local_confidence: 100,
+        admin_verified: false,
+        source: 'silent_join_protection',
+        enforcement_action: 'ban',
+        enforcement_observed_from: 'tracabot_join_protection',
+        consent_to_share: false,
+        reason_provided: false,
+        membership_episode: episode,
+        evidence_root_ids: decision.roots || [],
+        evidence: [
+          protectionSummary(decision),
+          'Removed silently under explicit join auto-removal policy from exact stable-identity confirmed evidence'
+        ]
+      }, { writeDkg: false, idempotencyKey: `join-protection-ban:${chat.id}:${member.id}:${episode}:${decision.evidenceRef}` });
+      return { ...decision, enforced: true };
+    }
+    await this.record('join_protection_suppressed', { chat, from: member }, {
+      target: member,
+      target_key: targetKey(member),
+      reason: String(result?.reason || 'ban_not_carried_out').slice(0, 200),
+      membership_episode: episode,
+      evidence_ref: decision.evidenceRef,
+      evidence: ['Join protection matched confirmed exact-identity evidence but no removal was carried out; protection failed closed.']
+    }, { writeDkg: false, idempotencyKey: `join-protection-suppressed:${chat.id}:${member.id}:${episode}:${decision.evidenceRef}` });
+    return { ...decision, action: 'flag', reason: result?.reason === 'join_auto_removal_paused' ? 'join_auto_removal_paused' : 'removal_not_carried_out' };
+  }
+
   async handleNewMembers(message) {
     const policy = this.chatPolicy(message.chat?.id);
     for (const member of message.new_chat_members) {
@@ -5427,9 +6999,18 @@ export class TelegramShieldBot {
       if (member.is_bot === true || (botId && String(member.id) === String(botId))) continue;
       const joinMessage = { ...message, from: member, text: `new member joined @${member.username || member.id}` };
       this.rememberUser(message.chat, member, joinMessage.text);
+      const membership = this.openMembershipEpisode(message.chat.id, member.id, {
+        messageId: message.message_id,
+        eventDate: message.date,
+        updateId: this.currentUpdateId
+      });
+      if (membership.replay) continue;
+      const membershipEpisode = membership.episodeId;
+      const protection = await this.checkJoinProtection(message.chat, member, membershipEpisode);
+      if (protection.action === 'remove' && protection.enforced) continue;
+      if (protection.reason === 'local_overturn') continue;
       const risk = await this.assess(joinMessage, member, joinMessage.text);
       if (risk.confidence >= policy.restrictThreshold) {
-        if (await this.maybeAutoBanConfirmedActor(joinMessage, member, risk)) continue;
         await this.applyRiskAction(joinMessage, risk);
       } else if (this.chatJoinChallengeEnabled(message.chat.id)) {
         await this.startJoinChallenge(message, member);
@@ -5445,12 +7026,41 @@ export class TelegramShieldBot {
     const member = chatMemberUpdate.new_chat_member?.user;
     if (!member || member.is_bot) return;
     const key = this.challengeKey(chatMemberUpdate.chat?.id, member.id);
-    const departed = ['left', 'kicked'].includes(newStatus)
-      || (newStatus === 'restricted' && chatMemberUpdate.new_chat_member?.is_member === false);
-    if (departed) {
+    if (newStatus === 'kicked' && oldStatus !== 'kicked') {
+      await this.handleNativeAdminBan(chatMemberUpdate, member, oldStatus, newStatus);
+      this.closeMembershipEpisode(chatMemberUpdate.chat?.id, member.id, { eventDate: chatMemberUpdate.date, updateId: this.currentUpdateId });
       this.joinChallenges.delete(key);
       this.clearJoinChallengeTimer(key);
       this.solvedJoinChallenges.delete(key);
+      return;
+    }
+    if (oldStatus === 'kicked' && newStatus !== 'kicked') {
+      await this.handleNativeAdminUnban(chatMemberUpdate, member);
+      this.closeMembershipEpisode(chatMemberUpdate.chat?.id, member.id, { eventDate: chatMemberUpdate.date, updateId: this.currentUpdateId });
+      this.joinChallenges.delete(key);
+      this.clearJoinChallengeTimer(key);
+      this.solvedJoinChallenges.delete(key);
+      return;
+    }
+    const departed = ['left', 'kicked'].includes(newStatus)
+      || (newStatus === 'restricted' && chatMemberUpdate.new_chat_member?.is_member === false);
+    if (departed) {
+      this.closeMembershipEpisode(chatMemberUpdate.chat?.id, member.id, { eventDate: chatMemberUpdate.date, updateId: this.currentUpdateId });
+      this.joinChallenges.delete(key);
+      this.clearJoinChallengeTimer(key);
+      this.solvedJoinChallenges.delete(key);
+      return;
+    }
+    const joined = ['left', 'kicked'].includes(oldStatus) && ['member', 'restricted'].includes(newStatus);
+    if (joined) {
+      this.joinChallenges.delete(key);
+      this.clearJoinChallengeTimer(key);
+      await this.handleNewMembers({
+        chat: chatMemberUpdate.chat,
+        from: chatMemberUpdate.from || member,
+        date: chatMemberUpdate.date,
+        new_chat_members: [member]
+      });
       return;
     }
     const fingerprint = matchKnownCampaignFingerprint(member, this.knownCampaignPatterns());
@@ -5474,16 +7084,131 @@ export class TelegramShieldBot {
       });
       return;
     }
-    const joined = ['left', 'kicked'].includes(oldStatus) && ['member', 'restricted'].includes(newStatus);
-    if (!joined) return;
-    this.joinChallenges.delete(key);
-    this.clearJoinChallengeTimer(key);
-    await this.handleNewMembers({
+  }
+
+  async nativeAdminActor(chatMemberUpdate) {
+    const actor = chatMemberUpdate.from || {};
+    if (!actor.id && !actor.username) return null;
+    if (actor.id) {
+      const botId = this.botId || await this.getBotId().catch(() => null);
+      if (botId && String(actor.id) === String(botId)) return null;
+    }
+    const ownUsername = this.ownBotUsername();
+    if (actor.username && ownUsername && String(actor.username).replace(/^@/, '').toLowerCase() === ownUsername) return null;
+    return actor;
+  }
+
+  scheduleEvidencePromotion() {
+    if (this.config.autoPromoteEvidence === false || this.config.dkgWrites === false) return null;
+    return Promise.resolve()
+      .then(() => promoteEligibleEvidence({ store: this.store, dkg: this.dkg, config: this.config }))
+      .catch((error) => console.error(`evidence promotion failed: ${error instanceof Error ? error.message : String(error)}`));
+  }
+
+  async handleNativeAdminBan(chatMemberUpdate, member, oldStatus, newStatus) {
+    const actor = await this.nativeAdminActor(chatMemberUpdate);
+    if (!actor) return null;
+    const flag = Number(chatMemberUpdate.date || 0);
+    const actionAtMs = flag > 0 ? flag * 1000 : Date.now();
+    const occurredAt = new Date(actionAtMs).toISOString();
+    const banContext = this.buildBanContext(chatMemberUpdate.chat?.id, member.id, actionAtMs);
+    const contextLine = banContext.observed_message_count > 0
+      ? `Recent observed pre-ban context: ${banContext.observed_message_count} message(s), category ${banContext.category}; causal link unverified`
+      : 'No messages from this target were observed by the bot before the ban; ban context unavailable';
+    const event = await this.record('ban_executed', {
       chat: chatMemberUpdate.chat,
-      from: chatMemberUpdate.from || member,
-      date: chatMemberUpdate.date,
-      new_chat_members: [member]
+      from: member,
+      date: chatMemberUpdate.date
+    }, {
+      target: member,
+      target_key: targetKey(member),
+      reason: 'reason not provided',
+      reason_provided: false,
+      admin_verified: true,
+      enforcement_verified: true,
+      consent_to_share: this.config.autoPromoteEvidence !== false && this.config.dkgWrites !== false,
+      enforcement_action: 'ban',
+      enforcement_observed_from: 'telegram_chat_member',
+      enforcement_source: 'telegram_chat_member',
+      source: 'native_chat_member_admin_ban',
+      enforcement_confidence: 100,
+      confidence: 0,
+      local_confidence: 0,
+      scam_type: 'admin_enforcement',
+      context_category: banContext.category,
+      context_severity: banContext.severity,
+      context_confidence: banContext.confidence,
+      ban_context: banContext,
+      performed_by: { id: actor.id, username: actor.username || '', is_bot: actor.is_bot === true },
+      performed_by_key: actorKey(actor),
+      previous_status: oldStatus,
+      new_status: newStatus,
+      occurred_at: occurredAt,
+      telegram_update_id: this.currentUpdateId,
+      campaign_root_eligible: false,
+      patterns: [],
+      domains: [],
+      wallets: [],
+      evidence: [
+        'Telegram chat_member update observed a live ban transition by a community administrator',
+        'Reason not provided through the Telegram Bot API',
+        'Live membership update only; Telegram Recent Actions and pre-install history are not available to bots',
+        contextLine
+      ]
+    }, {
+      writeDkg: false,
+      idempotencyKey: `native-admin-ban:${chatMemberUpdate.chat?.id || ''}:${member.id}:${flag || this.currentUpdateId || ''}`
     });
+    this.scheduleEvidencePromotion();
+    return event;
+  }
+
+  async handleNativeAdminUnban(chatMemberUpdate, member) {
+    const actor = await this.nativeAdminActor(chatMemberUpdate);
+    if (!actor) return null;
+    const history = this.store.all();
+    const target = member;
+    const ban = [...history].reverse().find((event) => event.event_type === 'ban_executed'
+      && event.payload?.provenance !== 'automatic_evidence_policy'
+      && sameChat(event.chat?.id, chatMemberUpdate.chat?.id)
+      && sameActorTarget(event.user || event.payload?.target || {}, target));
+    if (!ban) return null;
+    if (history.some((event) => event.event_type === 'review_overturned' && event.payload?.target_event_id === ban.id)) return null;
+    const flag = Number(chatMemberUpdate.date || 0);
+    const occurredAt = flag > 0 ? new Date(flag * 1000).toISOString() : new Date().toISOString();
+    const event = await this.record('review_overturned', {
+      chat: chatMemberUpdate.chat,
+      from: member,
+      date: chatMemberUpdate.date
+    }, {
+      target_event_id: ban.id,
+      evidence_root_ids: ban.payload?.evidence_root_ids || [],
+      review_decision: 'reject',
+      reason: 'native membership update shows the ban was lifted; no reason provided',
+      correction_source: 'native_chat_member_unban',
+      enforcement_action: 'unban',
+      enforcement_observed_from: 'telegram_chat_member',
+      reason_provided: false,
+      admin_verified: true,
+      retracted: true,
+      reviewed_target: member,
+      reviewed_target_key: targetKey(member),
+      consent_to_share: this.config.autoPromoteEvidence !== false && this.config.dkgWrites !== false,
+      performed_by: { id: actor.id, username: actor.username || '', is_bot: actor.is_bot === true },
+      performed_by_key: actorKey(actor),
+      occurred_at: occurredAt,
+      telegram_update_id: this.currentUpdateId,
+      evidence: [
+        'Telegram chat_member update observed a live unban or correction transition by a community administrator',
+        'The original enforcement record is retained; the shared claim is marked retracted'
+      ]
+    }, {
+      writeDkg: this.config.autoPromoteEvidence !== false && this.config.dkgWrites !== false,
+      idempotencyKey: `native-admin-unban:${chatMemberUpdate.chat?.id || ''}:${member.id}:${ban.id}`
+    });
+    this.closeMembershipEpisode(chatMemberUpdate.chat?.id, member.id, { eventDate: chatMemberUpdate.date, updateId: this.currentUpdateId });
+    this.scheduleEvidencePromotion();
+    return event;
   }
 
   async expireJoinChallenges() {
@@ -5514,6 +7239,9 @@ export class TelegramShieldBot {
   async proactiveScan() {
     if (Date.now() < this.nextProactiveScanAt) return;
     this.nextProactiveScanAt = Date.now() + this.config.proactiveScanMinutes * 60 * 1000;
+    flushFederationQueue({ store: this.store, config: this.config }).catch((error) => {
+      console.error(`federation submission flush failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
 
     const svc = (() => { try { return TracabotSkillService.fromEnv(); } catch { return null; } })();
 

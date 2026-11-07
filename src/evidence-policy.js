@@ -60,7 +60,18 @@ function boundedUnique(values = [], limit = 10, length = 160) {
 }
 
 function normalizedDomain(value = '') {
-  const domain = text(value).toLowerCase().replace(/^www\./, '').replace(/[^a-z0-9.-]/g, '');
+  let raw = text(value).trim().toLowerCase();
+  if (!raw) return '';
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
+    try {
+      raw = new URL(raw).hostname;
+    } catch {
+      return '';
+    }
+  } else {
+    raw = raw.split(/[\/?#]/)[0].split('@').pop().split(':')[0];
+  }
+  const domain = raw.replace(/^www\./, '').replace(/[^a-z0-9.-]/g, '');
   return domain.includes('.') && domain.length <= 253 ? domain : '';
 }
 
@@ -86,7 +97,8 @@ function hashRef(value = '') {
 
 export function eventTargetKey(event = {}) {
   const p = payload(event);
-  const target = p.target || p.reviewed_target || event.user || {};
+  const reviewEvent = ['review_upheld', 'review_overturned'].includes(event.event_type);
+  const target = p.target || p.reviewed_target || (reviewEvent ? {} : event.user) || {};
   return text(p.target_key
     || p.reviewed_target_key
     || p.watch_target_key
@@ -124,6 +136,20 @@ function communityIds(event = {}) {
     if (id) ids.add(text(id));
   }
   return [...ids];
+}
+
+function enforcementProvenance(event = {}) {
+  const p = payload(event);
+  return text(p.source || p.enforcement_source || '');
+}
+
+function shareableAdminEnforcement(event = {}) {
+  const p = payload(event);
+  if (!ADMIN_ENFORCEMENT_TYPES.has(event.event_type)) return false;
+  if (p.admin_verified !== true && p.enforcement_verified !== true) return false;
+  if (!enforcementProvenance(event)) return false;
+  if (p.consent_to_share !== true) return false;
+  return Boolean(eventTargetKey(event));
 }
 
 function modelOnly(event = {}) {
@@ -180,6 +206,8 @@ export function evidenceFingerprint(event = {}) {
   const basis = {
     eventType: event.event_type || '',
     target: eventTargetKey(event),
+    community: text(p.community_id || event.chat?.id || ''),
+    enforcementOccurrence: ADMIN_ENFORCEMENT_TYPES.has(event.event_type) ? text(p.occurred_at || event.timestamp || '') : '',
     domains: indicators.domains.slice().sort(),
     wallets: indicators.wallets.slice().sort(),
     patterns: indicators.patterns.slice().sort(),
@@ -222,18 +250,34 @@ export function evaluateEvidence(event = {}, { history = [], policy = {} } = {})
     && !roots.length
     && !(p.evidence || []).length
     && independentSignals < settings.minIndependentSignals;
+  const shareableEnforcement = shareableAdminEnforcement(event);
+  const enforcementEvent = ADMIN_ENFORCEMENT_TYPES.has(event.event_type);
   const reasons = [];
   if (!PROMOTABLE_EVENT_TYPES.has(event.event_type)) reasons.push('event_type_not_promotable');
   if (p.test_mode === true || p.source === 'test-command-loop') reasons.push('test_event');
   if (isRetracted) reasons.push('retracted');
   if (onlyModel) reasons.push('model_only_suspicion');
-  if (confidence < settings.promotionThreshold) reasons.push('below_promotion_threshold');
-  if (localConfidence < settings.localConfidenceThreshold && !reviewed(event)) reasons.push('below_local_threshold');
-  if (!independentSignals) reasons.push('no_concrete_evidence');
-  if (adminEnforcementAlone) reasons.push('admin_action_without_corroboration');
-  if (claimLevel === 'observation' || claimLevel === 'allegation') reasons.push('claim_not_yet_high_confidence');
-  if (claimLevel === 'high_confidence_flag' && !corroborated) reasons.push('not_corroborated');
-  if (!reviewed(event) && independentSignals < settings.minIndependentSignals && !corroborated) reasons.push('insufficient_independent_signals');
+  if (['review_upheld', 'review_overturned'].includes(event.event_type) && !eventTargetKey(event)) reasons.push('missing_reviewed_target');
+  if (!shareableEnforcement) {
+    if (enforcementEvent) {
+      // Admin enforcement is only auto-shared as an enforcement claim when
+      // consent, verified provenance, and a stable target are all explicit.
+      // High confidence or corroborating roots must not bypass this gate.
+      reasons.push('admin_enforcement_not_shareable');
+      if (!enforcementProvenance(event)) reasons.push('admin_enforcement_missing_provenance');
+      if (p.admin_verified !== true && p.enforcement_verified !== true) reasons.push('admin_enforcement_not_verified');
+      if (p.consent_to_share !== true) reasons.push('sharing_consent_missing');
+      if (!eventTargetKey(event)) reasons.push('admin_enforcement_missing_target');
+    } else {
+      if (confidence < settings.promotionThreshold) reasons.push('below_promotion_threshold');
+      if (localConfidence < settings.localConfidenceThreshold && !reviewed(event)) reasons.push('below_local_threshold');
+      if (!independentSignals) reasons.push('no_concrete_evidence');
+      if (adminEnforcementAlone) reasons.push('admin_action_without_corroboration');
+      if (claimLevel === 'observation' || claimLevel === 'allegation') reasons.push('claim_not_yet_high_confidence');
+      if (claimLevel === 'high_confidence_flag' && !corroborated) reasons.push('not_corroborated');
+      if (!reviewed(event) && independentSignals < settings.minIndependentSignals && !corroborated) reasons.push('insufficient_independent_signals');
+    }
+  }
 
   const promotionEligible = reasons.length === 0;
   return {
@@ -282,10 +326,52 @@ export function isPublicEvidence(event = {}) {
   return payload(event).public_visibility === 'public' && event.local_only !== true;
 }
 
-function publicSummary(evaluation) {
+function publicBanContext(p = {}) {
+  const context = p.ban_context;
+  if (!context || typeof context !== 'object') return null;
+  const indicators = context.indicators || {};
+  return {
+    category: text(context.category || 'unknown'),
+    severity: text(context.severity || 'unknown'),
+    confidence: Math.max(0, Math.min(100, Number(context.confidence || 0))),
+    confirmedScam: false,
+    causalLink: 'unverified',
+    provenance: 'recent_pre_ban_context',
+    label: 'recent pre-ban context; causal link unverified',
+    messageCount: Math.max(0, Number(context.observed_message_count || 0)),
+    textMessageCount: Math.max(0, Number(context.text_message_count || 0)),
+    mediaOnly: context.media_only === true,
+    partial: context.partial === true,
+    behaviorFlags: boundedUnique(context.behavior_flags || [], 5).map(text),
+    indicators: {
+      domains: boundedUnique(indicators.domains || [], 10).map(normalizedDomain).filter(Boolean),
+      wallets: boundedUnique(indicators.wallets || [], 10).map(normalizedWallet).filter(Boolean),
+      patterns: boundedUnique(indicators.patterns || [], 10).map(normalizedPattern).filter(Boolean)
+    }
+  };
+}
+
+function publicSummary(evaluation, p = {}) {
   const type = evaluation.indicators.patterns[0] || evaluation.eventType.replace(/_/g, ' ');
+  const enforcementClaim = p.claim_level === 'admin_enforcement'
+    || evaluation.claimLevel === 'admin_enforcement'
+    || ADMIN_ENFORCEMENT_TYPES.has(evaluation.eventType)
+    || p.enforcement_action === 'ban'
+    || p.enforcement_action === 'unban';
+  if (evaluation.claimLevel === 'retracted' && enforcementClaim) {
+    return 'Observed administrator enforcement was later lifted or corrected; the original record stays visible as history.';
+  }
+  if (evaluation.claimLevel === 'admin_enforcement') {
+    const action = p.enforcement_action === 'restriction' || evaluation.eventType === 'restrict_executed' ? 'restriction' : 'ban';
+    const context = publicBanContext(p);
+    const contextNote = context && context.category !== 'unknown'
+      ? ` Recent observed messages were categorized as ${context.category}; no causal link to the enforcement was established.`
+      : '';
+    return (p.reason_provided === true
+      ? `Observed administrator ${action}; a reason was recorded internally but is not published. Enforcement is an evidence signal, not a confirmed scam.`
+      : `Observed administrator ${action}; no reason was provided through the Telegram Bot API. Enforcement is an evidence signal, not a confirmed scam.`) + contextNote;
+  }
   if (evaluation.claimLevel === 'confirmed_scam') return `Admin review upheld a ${type} finding.`;
-  if (evaluation.claimLevel === 'admin_enforcement') return `Community admin enforcement recorded for ${type}; treated as an evidence signal, not a standalone verdict.`;
   if (evaluation.claimLevel === 'high_confidence_flag') return `Corroborated high-confidence ${type} signal from shared evidence.`;
   return `Shared ${evaluation.claimLevel} evidence for ${type}.`;
 }
@@ -300,20 +386,34 @@ export function sanitizePublicEvidence(event = {}, { history = [], policy = {}, 
   const communityRef = pseudonymKey && (p.community_id || event.chat?.id)
     ? `hmac:v1:${createHmac('sha256', pseudonymKey).update(`public-community:${p.community_id || event.chat.id}`).digest('hex')}`
     : '';
+  const enforcementClaim = p.claim_level === 'admin_enforcement'
+    || ADMIN_ENFORCEMENT_TYPES.has(event.event_type)
+    || p.enforcement_action === 'ban'
+    || p.enforcement_action === 'unban';
   return {
     publicId: publicIdFor(event),
     eventType: event.event_type,
     claimLevel: evaluation.claimLevel,
     confidence: evaluation.confidence,
     scamType: text(p.scam_type || 'unknown'),
-    createdAt: text(event.timestamp || ''),
-    summary: publicSummary(evaluation),
+    createdAt: text(p.occurred_at || event.timestamp || ''),
+    summary: publicSummary(evaluation, p),
     indicators: {
       domains: evaluation.indicators.domains,
       wallets: evaluation.indicators.wallets,
       patterns: evaluation.indicators.patterns
     },
+    enforcement: enforcementClaim ? {
+      action: p.enforcement_action || (event.event_type === 'restrict_executed' ? 'restriction' : 'ban'),
+      reason: p.reason_provided === true ? 'recorded internally; not published' : 'reason not provided',
+      reasonProvided: p.reason_provided === true,
+      actorRecorded: p.performed_by_recorded === true || Boolean(p.performed_by?.id || p.performed_by?.username),
+      source: text(p.enforcement_observed_from || ''),
+      claimState: evaluation.claimLevel
+    } : null,
+    banContext: publicBanContext(p),
     actorRef,
+    targetRef: actorRef,
     communityRef,
     evidenceCount: (p.evidence || []).length,
     evidenceRootCount: evaluation.evidenceRootIds.length,

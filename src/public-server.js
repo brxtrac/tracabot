@@ -11,6 +11,8 @@ import {
   sanitizePublicEvidenceList
 } from './evidence-policy.js';
 import { promoteEligibleEvidence } from './evidence-promoter.js';
+import { flushFederationQueue } from './federation-client.js';
+import { createCreatorAttestation, creatorStatus, revokeCreatorAttestation } from './creator-curator.js';
 
 const SITE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'site');
 const STATIC_FILES = new Map([
@@ -59,6 +61,28 @@ function authenticate(req, config = {}) {
     if (expected.length === presented.length && timingSafeEqual(expected, presented)) return entry;
   }
   return null;
+}
+
+function curatorToken(req) {
+  const match = String(req.headers.authorization || '').match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : '';
+}
+
+function matchesConfiguredToken(value = '', configured = '') {
+  if (!value || !configured) return false;
+  const presented = tokenHash(value);
+  const expected = tokenHash(configured);
+  return presented.length === expected.length && timingSafeEqual(presented, expected);
+}
+
+function curatorReadAuthorized(req, config = {}) {
+  const token = curatorToken(req);
+  return matchesConfiguredToken(token, config.creatorCuratorReadToken)
+    || matchesConfiguredToken(token, config.creatorCuratorToken);
+}
+
+function curatorWriteAuthorized(req, config = {}) {
+  return matchesConfiguredToken(curatorToken(req), config.creatorCuratorToken);
 }
 
 function rateLimiter(limit, windowMs = 60 * 60 * 1000) {
@@ -153,6 +177,7 @@ function validateSubmission(body = {}) {
     claimType,
     summary,
     sourceUrl,
+    instanceId: body.instanceId ? boundedString(String(body.instanceId), { max: 64, name: 'instanceId' }) : '',
     subject: {
       telegramUserId,
       username: subject.username ? boundedString(String(subject.username), { max: 64, name: 'subject.username' }).replace(/^@/, '') : '',
@@ -227,6 +252,7 @@ function submissionEvent({ tenant, submission, idempotencyKey }) {
       community_name: tenant.name || '',
       community_type: 'community_api',
       policy_id: 'community_submission',
+      instance_id: tenant.instanceId || submission.instanceId || '',
       source: 'authenticated_community_api',
       provenance: 'community_submission',
       publication_status: 'working_memory',
@@ -266,9 +292,85 @@ function onboarding(config = {}) {
     },
     contextGraph: {
       name: config.contextGraph || 'tracabot',
-      readLayer: 'shared-working-memory',
+      readLayer: 'shared-working-memory and verifiable-memory projections',
       requiredConsent: true,
       tenantIsolation: 'Each token is bound to one communityId; body-supplied tenant overrides are ignored.'
+    },
+    nativeAdminBans: {
+      setup: 'Add TRACaBot to the group as an administrator and keep exactly one bot process polling Telegram.',
+      source: 'Live Telegram chat_member updates for bans performed with normal admin controls.',
+      autoPromotion: config.autoPromoteEvidence === false || config.dkgWrites === false
+        ? 'Automatic graph sharing is disabled in this deployment; enforcement records still carry explicit reason status locally.'
+        : 'Eligible live bans are shared automatically as admin_enforcement claims. They are not confirmed scams and do not by themselves trigger cross-community bans.',
+      reasonFallback: 'reason not provided',
+      context: 'When the bot already observed messages from the same user and chat, up to 8 messages from the preceding 60 minutes may be attached as recent pre-ban context. The label is "recent pre-ban context; causal link unverified". Media-only or unobserved context stays unknown; raw text stays local.',
+      unavailable: [
+        'Telegram Recent Actions or the admin log',
+        'Bans that happened before TRACaBot was installed',
+        'An administrator reason that Telegram did not supply'
+      ],
+      disable: 'Set TRACABOT_AUTO_PROMOTE_EVIDENCE=false for local-only enforcement records, or TRACABOT_DKG_WRITES=false to stop graph writes entirely.'
+    },
+    silentJoinProtection: {
+      automaticCheck: 'Runs on genuine joins with the exact HMAC-scoped platform ID; no LLM or write credential required.',
+      defaultOutcome: 'observe/log locally; no group message',
+      autoRemove: config.joinAutoRemove === true ? 'opt-in enabled' : 'off',
+      autoRemoveRequirements: [
+        'exact stable-identity confirmed fraud/scam evidence',
+        'authenticated approval provenance (default same-chat local admin review; shared/verified-graph records are flag-only without adapter proof)',
+        'fresh, unretracted evidence and configured minimum roots',
+        'bot ban/restrict rights',
+        'target is not an admin, owner, or bot'
+      ],
+      neverAuthorizesRemoval: [
+        'display name, username, alias, or similarity',
+        'admin enforcement alone',
+        'behavior flag or model confidence',
+        'campaign association or repeated copies',
+        'unauthenticated or unknown-provenance fork reports'
+      ],
+      trustedLayers: config.joinTrustedLayers || ['local'],
+      maxAgeDays: config.joinEvidenceMaxAgeDays || 180,
+      minConfirmedRoots: config.joinMinConfirmedRoots || 1,
+      failClosed: 'Graph outage, missing identity key, incomplete response, stale/retracted evidence, missing rights, or admin lookup failure produce a private flag or no action.'
+    },
+    creatorCurator: {
+      configured: Boolean(config.creatorCuratorUrl || config.creatorCuratorPrivateKey),
+      statusRead: 'Fresh, auth-token-protected, Ed25519-signed status read pinned to the configured creator public key.',
+      approvalLayer: 'creator-curator',
+      requirements: [
+        'valid Ed25519 signature from the pinned creator key; Ed448/other key types are rejected',
+        'exact Telegram subject platform and user ID',
+        'classification fraud or scam and claim level confirmed_scam',
+        'configured confidence threshold and independent root minimum',
+        'current issue time, future expiry, and no revocation or correction',
+        'active creator status read; stale, unsigned, or unavailable status fails closed'
+      ],
+      neverAuthorizesRemoval: [
+        'arbitrary fork source string or boolean',
+        'Verified/Shared Working Memory membership alone',
+        'admin ban count, display-name match, behavior flag, or model output'
+      ],
+      localOverride: 'A group admin overturn is a local correction only. It cannot revoke or rewrite the creator-curator global record; the bot queues a curator reconsideration request locally.'
+    },
+    appeals: {
+      userFlow: 'A banned user starts a private chat and sends /appeal. The bot lists only that account’s locally stored ban cases.',
+      dmLimit: 'Telegram blocks bot-initiated DMs until the user starts the chat. TRACaBot documents this and looks up the case when the user arrives.',
+      submissionLimits: { perHour: config.appealMaxPerHour || 3, dedupeHours: config.appealDedupHours || 24, maxReasonChars: config.appealMaxReasonChars || 500 },
+      adminResolution: 'Only a current admin of the affected group can uphold or overturn; configured bot owners without that live admin status cannot. Overturn records a local correction and retries an idempotent Telegram unban with member-state reconciliation or new attempt keys; it cannot add a user.',
+      privacy: 'Private appeal text is local-only, bounded, and never broadcast to the group or written to DKG.'
+    },
+    federation: {
+      mode: 'creator-hosted context graph read plus opt-in bounded submissions',
+      readRequiresWriteToken: false,
+      readRequirement: 'A DKG node connected to the creator graph; no live write credential is needed.',
+      outboundSubmissions: config.submitSharedEvidence === true ? 'opt-in enabled' : 'off',
+      submitEndpoint: config.creatorSubmitUrl ? 'configured' : 'not configured',
+      submissionContent: 'bounded summary, indicators, and the stable platform ID needed for exact matching; no raw message text, screenshots, or reporter identity',
+      retry: 'local queue, idempotency key, bounded backoff',
+      optOut: 'stops new submissions; cannot unpublish records already accepted',
+      instanceNamespace: 'communityId + communityToken + policyId + optional instanceId provenance; not a separate DKG subgraph primitive',
+      untrustedByDefault: 'Creator API submissions stay observation/allegation working memory until the creator review policy promotes them.'
     },
     dkgEdgeNode: {
       verifiedInThisRepository: true,
@@ -325,6 +427,8 @@ export function createPublicServer({
   if (!store) throw new Error('createPublicServer requires store');
   const writeLimiter = rateLimiter(config.publicRateLimitPerHour || 30);
   const joinLimiter = rateLimiter(config.publicJoinRateLimitPerHour || 5);
+  const creatorReadLimiter = rateLimiter(config.creatorCuratorReadRateLimitPerHour || 120);
+  const creatorWriteLimiter = rateLimiter(config.creatorCuratorWriteRateLimitPerHour || 30);
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
@@ -340,6 +444,7 @@ export function createPublicServer({
               writeAccess: (config.communityTokens || []).length ? 'token-required' : 'not-configured',
               dkgReads: config.dkgReads !== false,
               autoPromote: config.autoPromoteEvidence !== false,
+              creatorCurator: config.creatorCuratorUrl ? 'configured' : 'not configured',
               policyVersion: EVIDENCE_POLICY_VERSION
             });
           }
@@ -348,9 +453,14 @@ export function createPublicServer({
               policyVersion: EVIDENCE_POLICY_VERSION,
               claimLevels: CLAIM_LEVELS,
               adminBanIsEvidenceNotProof: true,
+              adminEnforcementAutoShare: 'live admin enforcement is shared as admin_enforcement only with explicit consent, verified action provenance, and a valid target; high confidence cannot bypass this gate',
+              nativeBanIngestion: 'live Telegram chat_member updates only; Recent Actions and pre-install bans are unavailable',
+              missingReason: 'reason not provided',
               modelSuspicionRequiresReview: true,
               publicWriteClaimTypes: ['observation', 'allegation'],
-              retractions: 'review_overturned suppresses promotion'
+              retractions: 'review_overturned suppresses promotion and remains visible as a correction',
+              creatorCuratorApproval: 'pinned Ed25519 signature plus fresh authenticated signed status; arbitrary fork source strings, booleans, ban counts, names, behavior flags, models, and Verified Memory membership alone never authorize removal',
+              privateAppeals: 'banned users start a private chat and use /appeal; own local cases only; only current affected-group admins resolve; configured owners without live group admin status cannot; local overturn does not revoke the creator global record and remains through same-lineage wrappers'
             });
           }
           if (pathname === '/api/public/onboarding') return json(res, 200, onboarding(config));
@@ -381,8 +491,74 @@ export function createPublicServer({
           }
           return json(res, 404, { error: 'unknown public API route' });
         }
+        const creatorStatusMatch = pathname.match(/^\/api\/creator\/attestations\/telegram\/(\d{4,24})$/);
+        if (creatorStatusMatch) {
+          if (!config.creatorCuratorPrivateKey) return json(res, 503, { error: 'creator curator signing key not configured' });
+          if (!curatorReadAuthorized(req, config)) return json(res, 401, { error: 'valid creator curator read token required' });
+          const remote = req.socket.remoteAddress || 'unknown';
+          if (!creatorReadLimiter.allow(`read:${remote}`, now())) return json(res, 429, { error: 'creator read rate limit reached' });
+          const envelope = creatorStatus({
+            storePath: config.creatorCuratorStorePath,
+            privateKey: config.creatorCuratorPrivateKey,
+            subject: { platform: 'telegram', user_id: creatorStatusMatch[1] },
+            issuer: config.creatorCuratorIssuer
+          });
+          return json(res, 200, envelope);
+        }
         if (await serveStatic(pathname, res, siteDir)) return;
         return text(res, 404, 'not found');
+      }
+
+      if (req.method === 'POST' && pathname === '/api/creator/attestations') {
+        if (!config.creatorCuratorPrivateKey || !config.creatorCuratorToken) return json(res, 503, { error: 'creator curator API not configured' });
+        if (!curatorWriteAuthorized(req, config)) return json(res, 401, { error: 'valid creator curator token required' });
+        const remote = req.socket.remoteAddress || 'unknown';
+        if (!creatorWriteLimiter.allow(`write:${remote}`, now())) return json(res, 429, { error: 'creator write rate limit reached' });
+        const parsed = await parseJson(req, config.publicMaxBodyBytes || 32768);
+        if (parsed.error) return json(res, parsed.status, { error: parsed.error });
+        const body = parsed.value;
+        const rawSubject = body.subject && typeof body.subject === 'object' ? body.subject : {};
+        const subject = {
+          platform: rawSubject.platform || 'telegram',
+          user_id: rawSubject.user_id || rawSubject.userId || rawSubject.telegramUserId || body.telegram_user_id || body.user_id
+        };
+        try {
+          const attestation = createCreatorAttestation({
+            storePath: config.creatorCuratorStorePath,
+            privateKey: config.creatorCuratorPrivateKey,
+            subject,
+            classification: body.classification,
+            confidence: body.confidence,
+            roots: body.roots,
+            ttlDays: body.ttl_days ?? body.ttlDays,
+            issuer: config.creatorCuratorIssuer,
+            minConfidence: config.creatorCuratorMinConfidence || 90
+          });
+          return json(res, 201, { ok: true, status: 'active', attestation });
+        } catch (error) {
+          return json(res, 400, { error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+
+      const creatorRevokeMatch = pathname.match(/^\/api\/creator\/attestations\/telegram\/(\d{4,24})\/revoke$/);
+      if (req.method === 'POST' && creatorRevokeMatch) {
+        if (!config.creatorCuratorPrivateKey || !config.creatorCuratorToken) return json(res, 503, { error: 'creator curator API not configured' });
+        if (!curatorWriteAuthorized(req, config)) return json(res, 401, { error: 'valid creator curator token required' });
+        const remote = req.socket.remoteAddress || 'unknown';
+        if (!creatorWriteLimiter.allow(`write:${remote}`, now())) return json(res, 429, { error: 'creator write rate limit reached' });
+        const parsed = await parseJson(req, config.publicMaxBodyBytes || 32768);
+        if (parsed.error) return json(res, parsed.status, { error: parsed.error });
+        try {
+          const envelope = revokeCreatorAttestation({
+            storePath: config.creatorCuratorStorePath,
+            privateKey: config.creatorCuratorPrivateKey,
+            subject: { platform: 'telegram', user_id: creatorRevokeMatch[1] },
+            reason: parsed.value.reason
+          });
+          return json(res, 200, { ok: true, status_envelope: envelope });
+        } catch (error) {
+          return json(res, 404, { error: error instanceof Error ? error.message : String(error) });
+        }
       }
 
       if (req.method === 'POST' && pathname === '/api/public/join-requests') {
@@ -465,7 +641,9 @@ export function createPublicServer({
 
   if (autoPromote && config.autoPromoteEvidence !== false && dkg) {
     const timer = setInterval(() => {
-      promoteEligibleEvidence({ store, dkg, config }).catch(() => null);
+      promoteEligibleEvidence({ store, dkg, config })
+        .then(() => flushFederationQueue({ store, config }))
+        .catch(() => null);
     }, Math.max(30000, Number(config.autoPromoteIntervalMs) || 300000));
     timer.unref?.();
     server.on('close', () => clearInterval(timer));

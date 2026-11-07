@@ -155,7 +155,7 @@ export function buildAgentIntentPrompt({ message = {}, maxChars = 600, history =
     '- scan_target: run a full risk check on a user/wallet/message (with graph context + prior admin history).',
     '- show_campaigns: repeated scam patterns across communities from the graph.',
     '- generate_safe_tip: (rarely) produce a calm educational safety reminder for the group.',
-    '- banlist: (admin) recent enforcement actions with memory summaries.',
+    '- banlist: (admin) recent enforcement actions, including native admin bans with explicit reason status and memory summaries.',
     '- mute: (admin only) temporarily mute a replied, mentioned, or ID target. Parse durations like 5 minutes, 5 hours, 1 day; default 24 hours.',
     '- help or greeting: short friendly intro to your capabilities + how to stay safe.',
     '- false_positive_review / reject: process a correction when user says someone is "not a scammer", "legit", "false positive", etc. (admin only).',

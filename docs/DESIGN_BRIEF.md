@@ -14,13 +14,14 @@ TRACaBot turns those moderation artifacts into agent-readable knowledge. It obse
 
 ## Product Workflow
 
-1. A Telegram event arrives: join, message, report, SangMata rename alert, scan, or ban command.
+1. A Telegram event arrives: join, message, report, SangMata rename alert, scan, or a native admin ban/membership transition. The optional `/ban` command is not the primary ingestion path.
 2. TRACaBot extracts actor IDs, usernames, aliases, wallets, domains, scam patterns, and message context.
 3. Local heuristics detect impersonation, phishing, fake airdrops, wallet-drain lures, investment testimonials, partnership lures, and admin-copycat rename behavior.
 4. The bot queries DKG v10 Shared Memory through OpenClaw's DKG adapter for cross-community evidence.
 5. The risk engine combines local and DKG confidence while guarding against report-only snowballing.
 6. Low-confidence observations stay local. Low-risk joins can be challenged only when the bot is a Telegram group admin with restriction rights. Medium-confidence items can be deleted/restricted. High-confidence items can be deleted/banned.
-7. Evidence-backed unsafe chat observations, reports, bans, restrictions, campaigns, appeals, and review decisions are written to DKG Shared Memory. High-confidence reports/findings/bans, admin-verified reviews, and very-high-confidence unsafe chat events are eligible for Context Graph publication.
+7. Evidence-backed unsafe chat observations, reports, bans, restrictions, campaigns, appeals, and review decisions are written to DKG Shared Memory. High-confidence reports/findings/bans, admin-verified reviews, and very-high-confidence unsafe chat events are eligible for Context Graph publication. Provenance-backed native admin bans may be auto-shared as `admin_enforcement` only, with an explicit `reason not provided` fallback; they are not scam verdicts and do not by themselves authorize cross-community bans. When available, bounded messages the bot observed from the same user/chat before the ban are attached as `recent pre-ban context; causal link unverified` and classified only as evidence-based suspicion.
+8. Creator-curator attestations are a separate Ed25519-signed approval path for exact Telegram subjects. Consumers verify a fresh, authenticated status read against a pinned creator key and fail closed on revocation, expiry, outage, wrong subject, or invalid roots. Private ban appeals are local-only, identity-scoped, deduplicated, and resolved only by actual admins of the affected group. Overturn never rewrites the creator's global record.
 
 ## Memory Layers
 

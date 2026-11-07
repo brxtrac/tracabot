@@ -46,6 +46,13 @@ function recordNode(record) {
   head.append(el('span', 'record-time', formatDate(record.createdAt)));
   const body = el('div');
   body.append(el('p', 'record-summary', record.summary || 'Sanitized evidence record.'));
+  if (record.enforcement) {
+    body.append(el('p', 'record-summary', `Enforcement: ${record.enforcement.action}; ${record.enforcement.reason}${record.enforcement.source ? ` · source: ${record.enforcement.source}` : ''}`));
+  }
+  if (record.banContext) {
+    const context = record.banContext;
+    body.append(el('p', 'record-summary', `Recent pre-ban context: ${context.category} · ${context.messageCount} observed message(s) · causal link unverified`));
+  }
   body.append(indicatorChips(record));
   const meta = el('div', 'record-meta');
   const confidence = el('span');

@@ -20,7 +20,7 @@ tracabot exposes its Telegram fraud intelligence as OpenClaw-callable JSON tools
 - `get_digest`: 24h operator triage summary. Local-only.
 - `query_campaigns`: fraud campaign clusters from local memory.
 - `submit_appeal`: writes a correction request to DKG Shared Memory.
-- `review_event`: writes an uphold/overturn decision to DKG Shared Memory.
+- `review_event`: writes an uphold/overturn decision for one existing referenced finding. The producer resolves the reviewed subject and target chat from that finding and never falls back to the reviewer; missing or ambiguous references are rejected.
 
 ## CLI Bridge
 
@@ -49,7 +49,7 @@ The loop reads local `conversation_artifact` drafts with `lifecycle_stage: worki
 
 ## DKG Policy
 
-Evidence-backed unsafe chat observations, reports, findings, bans, restrictions, campaigns, appeals, and reviews can be written to DKG through the OpenClaw adapter. Plain watchlist state, digest generation, and watchlist reads remain local-only.
+Evidence-backed unsafe chat observations, reports, findings, bans, restrictions, campaigns, appeals, and reviews can be written to DKG through the OpenClaw adapter. Provenance-backed native Telegram admin bans are ingested by the bot runtime as `admin_enforcement`, not as confirmed scams; missing reasons are labeled `reason not provided`. A live ban may include bounded same-user/same-chat messages observed before it as `recent pre-ban context; causal link unverified`; classification is evidence-based suspicion only, and raw text stays local. Plain watchlist state, digest generation, and watchlist reads remain local-only.
 
 Events follow the lifecycle in `docs/TRACABOT_ONTOLOGY.md`: `observed`, `shared_memory`, `admin_reviewed`, `verified_memory`, and `campaign_summary`. Skill callers should pass community scope fields when available: `communityId`, `communityName`, `communityType`, and `policyId`.
 
@@ -64,4 +64,11 @@ The live Telegram bot listens to chats itself and records local WM drafts for be
 
 ## Guardrails
 
-The skill tools do not ban Telegram users directly. Telegram enforcement remains inside the bot runtime where admin identity, bot permissions, and chat context can be verified.
+- Telegram is the only implemented adapter. Discord and other platforms are not implemented.
+- Core join protection is deterministic and works with `TRACABOT_LLM_PROVIDER=off`; no model output can authorize a ban.
+- The live bot runs an exact stable-identity background check on genuine joins. Default behavior is silent observe/log. Automatic removal requires `TRACABOT_JOIN_AUTO_REMOVE=true` plus fresh, unretracted confirmed fraud/scam evidence with authenticated approval provenance. By default only same-chat local admin review qualifies; shared/verified-graph records are flag-only because the installed adapter cannot prove authenticated publisher approval. A creator-curator attestation qualifies only after a fresh signed status read from the pinned creator Ed25519 key confirms exact subject, fraud/scam classification, confidence, independent roots, issue/expiry, and active status. Admin bans, behavior flags, display names, aliases, write authorization, model confidence, campaign association, fork source strings/booleans, and Verified Memory membership alone are not confirmed fraud.
+- Banned users can start a private chat and send `/appeal`. The bot lists only that user's own local ban cases. Telegram does not allow bot-initiated DMs; the user must start the chat. Only actual admins of the affected group can uphold or overturn from private or group scope. Overturn is local-only, records a correction, retries an idempotent unban, and never revokes the creator-curator global record.
+- Current group admins get private `/start` buttons for Protection controls, Status, Recent automatic bans, and Appeals. These views are live-admin-scoped; configured owners without group admin status see no group details. Pause/resume affects future automatic join removals only and cannot override env-disabled auto-removal, chat allowlists, trusted layers, or missing rights. Reversing a specific auto-ban is a separate Override / allow return action with local correction and safe unban retry; no member appeal is required.
+- Cross-community evidence is read-only context. This skill does not perform cross-community guilty-by-association enforcement.
+- Opt-in creator submissions must use `TRACABOT_SUBMIT_SHARED_EVIDENCE=true` plus a scoped token. Never submit raw message text, screenshots, credentials, or reporter identity. Do not write to a live graph from tests.
+- The skill tools do not ban Telegram users directly. Telegram enforcement remains inside the bot runtime where admin identity, bot permissions, and chat context can be verified.

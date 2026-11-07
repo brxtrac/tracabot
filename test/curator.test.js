@@ -51,7 +51,7 @@ test('invalid or inconclusive response never shares; bounded LLM requests use me
     assert.deepEqual(result.map((item) => item.action), ['hold', 'budget_deferred']);
     assert.deepEqual(calls, []);
     let invocation;
-    const answer = await reviewDraft(base, { runner: (command, args, options) => {
+    const answer = await reviewDraft(base, { createSession: () => 'ses_synthetic', finishSession: () => {}, runner: (command, args, options) => {
       invocation = { command, args, options };
       const child = new EventEmitter();
       child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
@@ -63,7 +63,7 @@ test('invalid or inconclusive response never shares; bounded LLM requests use me
     } });
     assert.equal(answer.action, 'promote');
     assert.equal(invocation.command, 'opencode');
-    assert.deepEqual(invocation.args.slice(0, 9), ['run', '--agent', 'tracabot-curator', '--model', '9router/cx/gpt-6-sol', '--variant', 'medium', '--format', 'json']);
+    assert.deepEqual(invocation.args.slice(0, 9), ['run', '--session', 'ses_synthetic', '--agent', 'tracabot-curator', '--model', '9router/cx/gpt-6-sol#medium', '--format', 'json']);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -86,7 +86,7 @@ test('LLM failure and fabricated evidence never promote; reviewed decisions do n
     assert.deepEqual(first.map((result) => result.action), ['error', 'error']);
     assert.deepEqual(actions, []);
     await curateWorkingMemory(opts);
-    assert.equal(reviews, 3);
+    assert.equal(reviews, 2);
     assert.deepEqual(actions, []);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -110,11 +110,11 @@ test('transient DKG list failure retries then curates; persistent failure still 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('confirmed ban uses exact actor or independent campaign bans with extra indicator', () => {
-  const root = (eventId, communityId, indicators = []) => ({ eventId, communityId, indicators, eventType: 'ban_executed', adminVerified: true });
+test('confirmed ban requires exact actor confirmed evidence and rejects campaign association', () => {
+  const root = (eventId, communityId, indicators = [], eventType = 'review_upheld') => ({ eventId, communityId, indicators, eventType, adminVerified: true, localApproval: true });
   assert.equal(evaluateConfirmedCampaignBan({ exactActorRoots: [root('a', 'one')] }).eligible, true);
   assert.equal(evaluateConfirmedCampaignBan({ exactActorRoots: [root('a', 'one')], overturned: true }).eligible, false);
+  assert.equal(evaluateConfirmedCampaignBan({ exactActorRoots: [{ eventId: 'old', eventType: 'ban_executed', adminVerified: true }] }).eligible, false);
   assert.equal(evaluateConfirmedCampaignBan({ campaignRoots: [root('a', 'one', ['bc.game']), root('b', 'one', ['bc.game'])], currentIndicators: ['bc.game'] }).eligible, false);
-  assert.equal(evaluateConfirmedCampaignBan({ campaignRoots: [root('a', 'one', ['bc.game']), root('b', 'two')], currentIndicators: [] }).eligible, false);
-  assert.equal(evaluateConfirmedCampaignBan({ campaignRoots: [root('a', 'one', ['bc.game']), root('b', 'two')], currentIndicators: ['bc.game'] }).eligible, true);
+  assert.equal(evaluateConfirmedCampaignBan({ campaignRoots: [root('a', 'one', ['bc.game']), root('b', 'two')], currentIndicators: ['bc.game'] }).eligible, false);
 });

@@ -54,7 +54,7 @@ function event(overrides = {}) {
   };
 }
 
-test('admin ban alone stays enforcement evidence and never becomes a confirmed scam', () => {
+test('admin ban without provenance stays enforcement evidence and is not promoted', () => {
   const ban = event({
     event_type: 'ban_executed',
     payload: {
@@ -73,7 +73,139 @@ test('admin ban alone stays enforcement evidence and never becomes a confirmed s
   assert.equal(result.claimLevel, 'admin_enforcement');
   assert.equal(result.confirmedScam, false);
   assert.equal(result.promotion.eligible, false);
-  assert.ok(result.promotion.reasons.includes('admin_action_without_corroboration'));
+  assert.ok(result.promotion.reasons.includes('admin_enforcement_missing_provenance'));
+});
+
+test('provenance-backed native admin ban is auto-shareable as enforcement only', () => {
+  const ban = event({
+    event_type: 'ban_executed',
+    payload: {
+      confidence: 0,
+      local_confidence: 0,
+      admin_verified: true,
+      enforcement_verified: true,
+      consent_to_share: true,
+      enforcement_action: 'ban',
+      enforcement_observed_from: 'telegram_chat_member',
+      source: 'native_chat_member_admin_ban',
+      reason: 'reason not provided',
+      reason_provided: false,
+      performed_by: { id: 77, username: 'moderator' },
+      target_key: 'id:8388593201',
+      evidence: ['Telegram chat_member update observed a live ban transition'],
+      evidence_root_ids: [],
+      affected_community_ids: [],
+      domains: [],
+      wallets: [],
+      patterns: ['admin_enforcement']
+    }
+  });
+  const result = evaluateEvidence(ban, { policy: POLICY });
+  assert.equal(result.claimLevel, 'admin_enforcement');
+  assert.equal(result.confirmedScam, false);
+  assert.equal(result.promotion.eligible, true);
+  assert.deepEqual(result.promotion.reasons, []);
+});
+
+test('high-confidence admin enforcement cannot bypass explicit community opt-out', () => {
+  const ban = event({
+    event_type: 'ban_executed',
+    payload: {
+      confidence: 100,
+      local_confidence: 100,
+      admin_verified: true,
+      enforcement_verified: true,
+      consent_to_share: false,
+      enforcement_action: 'ban',
+      source: 'native_chat_member_admin_ban',
+      target_key: 'id:8388593201',
+      evidence: ['Telegram chat_member update observed a live ban transition'],
+      evidence_root_ids: ['prior-a', 'prior-b'],
+      affected_community_ids: ['community-a', 'community-b'],
+      domains: [],
+      wallets: [],
+      patterns: ['admin_enforcement']
+    }
+  });
+  const result = evaluateEvidence(ban, { policy: POLICY });
+  assert.equal(result.claimLevel, 'admin_enforcement');
+  assert.equal(result.promotion.eligible, false);
+  assert.ok(result.promotion.reasons.includes('admin_enforcement_not_shareable'));
+  assert.ok(result.promotion.reasons.includes('sharing_consent_missing'));
+});
+
+test('high-confidence admin enforcement cannot bypass missing consent', () => {
+  const ban = event({
+    event_type: 'ban_executed',
+    payload: {
+      confidence: 100,
+      local_confidence: 100,
+      admin_verified: true,
+      enforcement_verified: true,
+      enforcement_action: 'ban',
+      source: 'native_chat_member_admin_ban',
+      target_key: 'id:8388593201',
+      evidence: ['Telegram chat_member update observed a live ban transition'],
+      evidence_root_ids: ['prior-a', 'prior-b'],
+      affected_community_ids: ['community-a', 'community-b'],
+      domains: [],
+      wallets: [],
+      patterns: ['admin_enforcement']
+    }
+  });
+  const result = evaluateEvidence(ban, { policy: POLICY });
+  assert.equal(result.promotion.eligible, false);
+  assert.ok(result.promotion.reasons.includes('sharing_consent_missing'));
+});
+
+test('high-confidence admin enforcement cannot bypass missing verified action provenance', () => {
+  const ban = event({
+    event_type: 'ban_executed',
+    payload: {
+      confidence: 100,
+      local_confidence: 100,
+      admin_verified: false,
+      enforcement_verified: false,
+      consent_to_share: true,
+      enforcement_action: 'ban',
+      source: 'native_chat_member_admin_ban',
+      target_key: 'id:8388593201',
+      evidence: ['Telegram chat_member update observed a live ban transition'],
+      evidence_root_ids: ['prior-a', 'prior-b'],
+      affected_community_ids: ['community-a', 'community-b'],
+      domains: [],
+      wallets: [],
+      patterns: ['admin_enforcement']
+    }
+  });
+  const result = evaluateEvidence(ban, { policy: POLICY });
+  assert.equal(result.promotion.eligible, false);
+  assert.ok(result.promotion.reasons.includes('admin_enforcement_not_verified'));
+});
+
+test('admin enforcement cannot auto-share without a valid target', () => {
+  const ban = event({
+    event_type: 'ban_executed',
+    user: {},
+    payload: {
+      confidence: 100,
+      local_confidence: 100,
+      admin_verified: true,
+      enforcement_verified: true,
+      consent_to_share: true,
+      enforcement_action: 'ban',
+      source: 'native_chat_member_admin_ban',
+      evidence: ['Telegram chat_member update observed a live ban transition'],
+      evidence_root_ids: ['prior-a', 'prior-b'],
+      affected_community_ids: ['community-a', 'community-b'],
+      domains: [],
+      wallets: [],
+      patterns: ['admin_enforcement']
+    }
+  });
+  const result = evaluateEvidence(ban, { policy: POLICY });
+  assert.equal(result.promotion.eligible, false);
+  assert.ok(result.promotion.reasons.includes('admin_enforcement_missing_target'));
 });
 
 test('admin-reviewed corroborated evidence can be confirmed, while model-only suspicion cannot', () => {
@@ -151,6 +283,64 @@ test('public sanitization removes identities, private text, and chat metadata', 
   assert.doesNotMatch(serialized, /8388593201|fake_support|private victim|seed phrase|-100|Private Community|private\.example/);
   assert.doesNotMatch(serialized, /"user"|"chat"|"evidence"/);
   assert.equal(record.provenance.policy, EVIDENCE_POLICY_VERSION);
+});
+
+test('public admin-enforcement record exposes reason status, not identities or private text', () => {
+  const ban = event({
+    event_type: 'ban_executed',
+    payload: {
+      claim_level: 'admin_enforcement',
+      confidence: 0,
+      local_confidence: 0,
+      scam_type: 'admin_enforcement',
+      enforcement_action: 'ban',
+      enforcement_observed_from: 'telegram_chat_member',
+      reason: 'reason not provided',
+      reason_provided: false,
+      performed_by: { id: 77, username: 'moderator' },
+      ban_context: {
+        provenance: 'recent_pre_ban_context',
+        causal_link: 'unverified',
+        label: 'recent pre-ban context; causal link unverified',
+        category: 'suspected_scam',
+        severity: 'high',
+        confidence: 88,
+        confirmed_scam: false,
+        behavior_flags: ['harassment'],
+        observed_message_count: 2,
+        text_message_count: 2,
+        media_only: false,
+        partial: false,
+        indicators: { domains: ['https://api_token:secret@evil.example/claim?token=abc123'], wallets: [], patterns: ['wallet-drain'] },
+        messages: [{ message_id: 44, text: 'raw private message', caption: '' }]
+      },
+      evidence: ['Telegram chat_member update observed a live ban transition'],
+      evidence_root_ids: ['event-ban'],
+      affected_community_ids: ['community-a'],
+      domains: [],
+      wallets: [],
+      patterns: ['admin_enforcement']
+    }
+  });
+  const record = sanitizePublicEvidence(ban, { history: [ban], policy: POLICY, pseudonymKey: 'test-key-32-bytes-long' });
+  assert.equal(record.claimLevel, 'admin_enforcement');
+  assert.equal(record.enforcement.action, 'ban');
+  assert.equal(record.enforcement.reason, 'reason not provided');
+  assert.equal(record.enforcement.reasonProvided, false);
+  assert.equal(record.enforcement.actorRecorded, true);
+  assert.equal(record.banContext.category, 'suspected_scam');
+  assert.equal(record.banContext.confirmedScam, false);
+  assert.equal(record.banContext.causalLink, 'unverified');
+  assert.equal(record.banContext.messageCount, 2);
+  assert.deepEqual(record.banContext.behaviorFlags, ['harassment']);
+  assert.deepEqual(record.banContext.indicators.domains, ['evil.example']);
+  assert.equal('messages' in record.banContext, false);
+  assert.match(record.summary, /no causal link/i);
+  assert.match(record.targetRef, /^hmac:v1:[a-f0-9]{64}$/);
+  assert.equal(record.targetRef, record.actorRef);
+  assert.match(record.summary, /no reason was provided/i);
+  const serialized = JSON.stringify(record);
+  assert.doesNotMatch(serialized, /8388593201|moderator|telegram-user|evidenceText|raw private message|api_token|secret|abc123|token=/);
 });
 
 test('local-only or failed evidence never appears in the public reader', () => {

@@ -26,10 +26,11 @@ Additional provenance predicates:
 - `tracabot:evidenceFingerprint` - stable hash of event type, target reference, normalized indicators, roots, and evidence text.
 - `tracabot:evidencePolicyVersion` - policy version used for the claim level.
 - `tracabot:sourceEventType` - original event type when a promoted finding cites another record.
+- `tracabot:instanceId` - optional operator-provided provenance label. It is not a subgraph, membership, or authorization claim.
 
 The public reader (`src/public-server.js`) never returns raw RDF or arbitrary graph data. It returns a sanitized projection with hashed public IDs, normalized indicators, HMAC actor/community references, and provenance labels. Public reads are not raw private graph access.
 
-Admin bans alone are never classified as `confirmed_scam`. Model-generated text cannot independently create `confirmed_scam`, a ban, or a public definitive accusation. `review_overturned` suppresses automatic promotion and remains visible as a correction.
+Admin bans alone are never classified as `confirmed_scam`. Model-generated text cannot independently create `confirmed_scam`, a ban, or a public definitive accusation. `review_overturned` suppresses automatic promotion and remains visible as a correction. Creator-curator attestations are external signed records, not DKG claims; consumers verify them separately and fail closed on revocation, expiry, or outage. Local appeals (`appeal_submitted`, `appeal_resolved`, `appeal_unban_failed`, `appeal_unban_completed`, `appeal_unban_retry_result`, `creator_reconsideration_requested`) stay local-only and are not written to DKG; overturn uses `review_overturned` as the local correction. Live native bans may carry `tracabot:banContextCategory`, `banContextSeverity`, `banContextConfidence`, `banContextMessageCount`, `banContextCausalLink`, bounded `banContextDomain`/`banContextWallet`/`banContextPattern` values, and `banContextBehaviorFlag` triage flags. These describe recently observed pre-ban messages only; `banContextCausalLink` stays `unverified` and `banContextCategory` is never a confirmed-scam label.
 
 ## Core Classes
 

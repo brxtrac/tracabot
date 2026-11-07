@@ -6,6 +6,7 @@ import { loadConfig, validateDkgPseudonymKey } from './config.js';
 import { combineRisk } from './risk-engine.js';
 import { LlmClient } from './llm-client.js';
 import { EVIDENCE_POLICY_VERSION, evaluateEvidence } from './evidence-policy.js';
+import { resolveReviewTarget } from './review-target.js';
 
 function actorAliases(user = {}) {
   return [user.username, user.first_name, [user.first_name, user.last_name].filter(Boolean).join(' ')].filter(Boolean);
@@ -141,7 +142,12 @@ export class TracabotSkillService {
 
   explainEvent(input = {}) {
     const eventId = input.eventId || input.event_id || '';
-    const event = this.store.all().find((item) => item.id === eventId || item.payload?.target_event_id === eventId || item.payload?.report_event_id === eventId);
+    const chatId = input.chatId || input.chat_id || '';
+    const inScope = (item) => !chatId
+      || String(item.chat?.id || '') === String(chatId)
+      || String(item.payload?.target_chat_id || '') === String(chatId);
+    const event = this.store.all().find((item) => inScope(item)
+      && (item.id === eventId || item.payload?.target_event_id === eventId || item.payload?.report_event_id === eventId));
     if (!event) return { tool: 'explain_event', found: false, eventId };
     return {
       tool: 'explain_event',
@@ -250,14 +256,36 @@ export class TracabotSkillService {
   async reviewEvent(input = {}) {
     if (!writeTokenValid(input, this.config)) throw new Error('review_event requires authorized write token');
     const decision = /overturn/i.test(input.decision || '') ? 'overturned' : 'upheld';
+    const eventId = String(input.eventId || input.event_id || '');
+    const resolved = resolveReviewTarget(this.store.all(), eventId);
+    if (!resolved.ok) throw new Error(`review_event ${resolved.error}`);
+    const reviewedTarget = resolved.subject;
+    const reviewedTargetKey = resolved.subjectKey;
+    const targetChatId = resolved.targetChatId;
+    const reviewChat = input.chat || { id: input.chatId || targetChatId };
     const event = {
       id: randomUUID(),
       event_type: decision === 'overturned' ? 'review_overturned' : 'review_upheld',
       timestamp: new Date().toISOString(),
       agentDid: this.config.agentDid,
-      chat: input.chat || { id: input.chatId || 'openclaw-skill' },
+      chat: reviewChat,
       user: input.actor || { id: input.actorId || 'openclaw-skill', username: input.actorUsername || 'openclaw' },
-      payload: { target_event_id: input.eventId || '', review_decision: decision, admin_verified: true, reviewer: { id: input.actorId || '', username: input.actorUsername || 'openclaw' }, reason: input.reason || `review ${decision} via OpenClaw skill`, evidence: [`OpenClaw skill review ${decision}: ${input.reason || ''}`] }
+      payload: {
+        target_event_id: resolved.finding.id,
+        reviewed_target: reviewedTarget,
+        reviewed_target_key: reviewedTargetKey,
+        target_chat_id: String(targetChatId),
+        target_chat_title: resolved.finding.payload?.target_chat_title || resolved.finding.chat?.title || '',
+        target_chat_type: resolved.finding.payload?.target_chat_type || resolved.finding.chat?.type || '',
+        review_chat_id: String(reviewChat.id || ''),
+        review_decision: decision,
+        admin_verified: true,
+        local_approval: String(reviewChat.id || '') === String(targetChatId),
+        approval_source: 'authorized_skill_review',
+        reviewer: { id: input.actorId || '', username: input.actorUsername || 'openclaw' },
+        reason: input.reason || `review ${decision} via OpenClaw skill`,
+        evidence: [`OpenClaw skill review ${decision}: ${input.reason || ''}`]
+      }
     };
     event.dkg = await this.dkg.writeEvent(event);
     this.store.append(event);

@@ -33,6 +33,8 @@ Local JSONL files are operational working memory for weak reports, watchlist sta
 - Membership requests are open but rate-limited and local-only. Approval records a decision; it never creates a graph or token automatically.
 - In-memory rate limits are per process. Multi-process or public deployments should enforce additional limits at the reverse proxy.
 - Graph content is untrusted data. Agents must not treat records as instructions or let a shared record override their own tool permissions.
+- Creator-curator approvals are external Ed25519-signed records, not DKG content. Consumers pin the public key, require an authenticated fresh status read, verify exact Telegram subject/classification/roots/issue/expiry, and fail closed on revocation or outage. A fork `source` string, boolean, ban count, name, behavior flag, model output, or Verified Memory membership is not approval.
+- Private appeals use the incoming Telegram identity only. The bot lists the caller's own local ban cases, never accepts a user-supplied target ID, and keeps reason text local-only. Resolution requires live admin status in the affected group; configured bot owners do not inherit group jurisdiction. Unban is idempotent and cannot add a user; failures are recorded. A local overturn never revokes a creator global attestation.
 
 ## Telegram Moderation Controls
 

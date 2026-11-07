@@ -4,6 +4,7 @@ import {
   evaluateEvidence,
   eventTargetKey
 } from './evidence-policy.js';
+import { queueFederationSubmission } from './federation-client.js';
 
 function promotionId(event = {}, evaluation = {}) {
   return `promotion-${createHash('sha256')
@@ -27,18 +28,55 @@ function alreadyPromoted(events = [], event = {}) {
     && item.payload?.source_event_id === event.id);
 }
 
-function promotionRecord(event, evaluation, now) {
+function payload(event = {}) {
+  return event.payload && typeof event.payload === 'object' ? event.payload : {};
+}
+
+function safeBanContext(event = {}) {
+  const context = payload(event).ban_context;
+  if (!context || typeof context !== 'object') return null;
+  return {
+    version: String(context.version || ''),
+    provenance: 'recent_pre_ban_context',
+    causal_link: 'unverified',
+    label: 'recent pre-ban context; causal link unverified',
+    category: String(context.category || 'unknown'),
+    severity: String(context.severity || 'unknown'),
+    confidence: Number(context.confidence || 0),
+    confirmed_scam: false,
+    observed_message_count: Number(context.observed_message_count || 0),
+    text_message_count: Number(context.text_message_count || 0),
+    media_only: context.media_only === true,
+    partial: context.partial === true,
+    behavior_flags: (context.behavior_flags || []).slice(0, 5).map(String),
+    indicators: {
+      domains: (context.indicators?.domains || []).slice(0, 10),
+      wallets: (context.indicators?.wallets || []).slice(0, 10),
+      patterns: (context.indicators?.patterns || []).slice(0, 10)
+    }
+  };
+}
+
+function promotionRecord(event, evaluation, now, config = {}) {
   const p = event.payload || {};
+  const reviewEvent = ['review_upheld', 'review_overturned'].includes(event.event_type);
+  const reviewed = p.reviewed_target || p.target || (reviewEvent ? {} : event.user) || {};
+  const enforcementAction = p.enforcement_action || (event.event_type === 'restrict_executed' ? 'restriction' : 'ban');
+  const promotionEventType = evaluation.claimLevel === 'admin_enforcement'
+    ? (enforcementAction === 'restriction' ? 'restrict_executed' : 'ban_executed')
+    : 'fraud_finding';
+  const banContext = safeBanContext(event);
   return {
     id: promotionId(event, evaluation),
-    event_type: 'fraud_finding',
+    event_type: promotionEventType,
     timestamp: new Date(now).toISOString(),
     agentDid: String(p.agent_did || event.agentDid || ''),
     chat: event.chat || { id: p.community_id || 'community-evidence' },
-    user: event.user || p.target || {},
+    user: reviewed,
     payload: {
-      target: p.target || event.user || {},
+      target: reviewed,
       target_key: eventTargetKey(event),
+      target_event_id: p.target_event_id || '',
       scam_type: p.scam_type || 'unknown',
       confidence: evaluation.confidence,
       local_confidence: evaluation.localConfidence,
@@ -48,8 +86,21 @@ function promotionRecord(event, evaluation, now) {
       claim_level: evaluation.claimLevel,
       source_event_id: event.id,
       source_event_type: event.event_type,
-      evidence_root_ids: [event.id, ...evaluation.evidenceRootIds].slice(0, 20),
-      source_event_ids: [event.id],
+      source: p.source || '',
+      enforcement_action: p.enforcement_action || (event.event_type === 'restrict_executed' ? 'restriction' : event.event_type === 'ban_executed' ? 'ban' : ''),
+      enforcement_observed_from: p.enforcement_observed_from || '',
+      reason_provided: p.reason_provided === true,
+      occurred_at: p.occurred_at || event.timestamp || '',
+      campaign_root_eligible: p.campaign_root_eligible !== false,
+      performed_by_recorded: Boolean(p.performed_by?.id || p.performed_by?.username),
+      ban_context: banContext,
+      context_category: banContext?.category || 'unknown',
+      context_severity: banContext?.severity || 'unknown',
+      context_confidence: banContext?.confidence || 0,
+      context_message_count: banContext?.observed_message_count || 0,
+      context_causal_link: 'unverified',
+      evidence_root_ids: [...new Set([event.id, p.target_event_id, ...evaluation.evidenceRootIds].filter(Boolean))].slice(0, 20),
+      source_event_ids: [...new Set([event.id, p.target_event_id].filter(Boolean))],
       evidence_fingerprint: evaluation.evidenceFingerprint,
       evidence_policy_version: EVIDENCE_POLICY_VERSION,
       provenance: 'automatic_evidence_policy',
@@ -59,6 +110,7 @@ function promotionRecord(event, evaluation, now) {
       community_name: p.community_name || '',
       community_type: p.community_type || 'telegram_group',
       policy_id: p.policy_id || 'default',
+      instance_id: p.instance_id || config.instanceId || '',
       admin_verified: evaluation.claimLevel === 'confirmed_scam',
       evidence: [
         `Automatic policy promotion from ${event.event_type} ${event.id}`,
@@ -137,7 +189,7 @@ export async function promoteEligibleEvidence({
       skipped.push({ eventId: event.id, eventType: event.event_type, claimLevel: evaluation.claimLevel, reasons: ['already_promoted_or_in_progress'] });
       continue;
     }
-    const record = promotionRecord(event, evaluation, now);
+    const record = promotionRecord(event, evaluation, now, config);
     try {
       record.dkg = await dkg.writeEvent(record);
       store.append(record);
@@ -147,6 +199,7 @@ export async function promoteEligibleEvidence({
         evidence_fingerprint: evaluation.evidenceFingerprint
       }));
       store.completeEffect?.(effectKey, { promotedEventId: record.id });
+      queueFederationSubmission({ store, promotedEvent: record, sourceEvent: event, config, now });
       history.push(record);
       promoted.push({ eventId: event.id, promotedEventId: record.id, claimLevel: evaluation.claimLevel });
     } catch (error) {

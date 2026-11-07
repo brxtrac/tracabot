@@ -95,6 +95,35 @@ test('public reader returns sanitized evidence and no private fields', async () 
   }
 });
 
+test('private appeal events are never exposed by the public reader', async () => {
+  const { server, store } = makeServer();
+  store.append({
+    id: 'private-appeal',
+    event_type: 'appeal_submitted',
+    timestamp: new Date().toISOString(),
+    local_only: true,
+    chat: { id: 4242, type: 'private' },
+    user: { id: '4242' },
+    payload: {
+      appeal_ref: 'ap-private',
+      ban_event_id: 'ban-private',
+      target: { id: '4242' },
+      target_chat_id: '-100',
+      reason: 'private appeal text with medical detail and seed phrase',
+      local_only: true,
+      consent_to_share: false
+    }
+  });
+  const base = await listen(server);
+  try {
+    const body = await fetch(`${base}/api/public/incidents`).then((response) => response.json());
+    assert.equal(body.records.some((record) => String(record.publicId || '').includes('appeal')), false);
+    assert.doesNotMatch(JSON.stringify(body), /private appeal text|seed phrase|4242|ban-private/);
+  } finally {
+    await close(server);
+  }
+});
+
 test('write endpoint requires a scoped token, validates claims, and stages only working memory', async () => {
   const { server, store } = makeServer();
   const base = await listen(server);
@@ -149,12 +178,13 @@ test('tenant tokens cannot write into each other and body limits are enforced', 
       const result = await fetch(`${base}/api/public/evidence`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, 'idempotency-key': `tenant-${communityId}` },
-        body: JSON.stringify(submission({ summary: `A concrete impersonation observation for ${communityId} with enough detail.` }))
+        body: JSON.stringify(submission({ summary: `A concrete impersonation observation for ${communityId} with enough detail.`, instanceId: `instance-${communityId}` }))
       });
       assert.equal(result.status, 202);
     }
     const events = store.all().filter((event) => event.event_type === 'evidence_submission');
     assert.deepEqual(events.map((event) => event.payload.community_id).sort(), ['community-one', 'community-two']);
+    assert.deepEqual(events.map((event) => event.payload.instance_id).sort(), ['instance-community-one', 'instance-community-two']);
     assert.notEqual(events[0].payload.target_key, undefined);
     const tooLarge = await fetch(`${base}/api/public/evidence`, {
       method: 'POST',
@@ -197,6 +227,29 @@ test('membership requests require consent, are deduplicated, and never grant acc
       body: JSON.stringify({ communityName: 'Builders', contact: '@builder_admin', graph: 'tracabot', consent: true })
     });
     assert.equal(duplicate.status, 409);
+  } finally {
+    await close(server);
+  }
+});
+
+test('public policy and onboarding disclose native admin ban limits', async () => {
+  const { server } = makeServer();
+  const base = await listen(server);
+  try {
+    const policy = await fetch(`${base}/api/public/policy`).then((response) => response.json());
+    assert.match(policy.nativeBanIngestion, /chat_member/);
+    assert.match(policy.nativeBanIngestion, /Recent Actions/);
+    assert.equal(policy.missingReason, 'reason not provided');
+    assert.match(policy.adminEnforcementAutoShare, /admin_enforcement/);
+    const onboarding = await fetch(`${base}/api/public/onboarding`).then((response) => response.json());
+    assert.match(onboarding.nativeAdminBans.source, /chat_member/);
+    assert.equal(onboarding.nativeAdminBans.reasonFallback, 'reason not provided');
+    assert.ok(onboarding.nativeAdminBans.unavailable.some((item) => /Recent Actions/.test(item)));
+    assert.match(onboarding.silentJoinProtection.automaticCheck, /exact HMAC-scoped platform ID/i);
+    assert.equal(onboarding.silentJoinProtection.autoRemove, 'off');
+    assert.ok(onboarding.silentJoinProtection.neverAuthorizesRemoval.some((item) => /display name/i.test(item)));
+    assert.equal(onboarding.federation.readRequiresWriteToken, false);
+    assert.equal(onboarding.federation.outboundSubmissions, 'off');
   } finally {
     await close(server);
   }

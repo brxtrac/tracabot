@@ -75,10 +75,27 @@
       <dl class="labels">
         <div><dt><span class="badge observation">observation</span></dt><dd>A bounded local signal. Useful context; not a finding.</dd></div>
         <div><dt><span class="badge allegation">allegation</span></dt><dd>A report or claim with a target and some evidence. Still needs review or corroboration.</dd></div>
-        <div><dt><span class="badge admin_enforcement">admin enforcement</span></dt><dd>A ban or restriction. Treated as an evidence signal, never as proof on its own.</dd></div>
+        <div><dt><span class="badge admin_enforcement">admin enforcement</span></dt><dd>A live ban or restriction observed from Telegram. Shared with provenance and an explicit reason status; never proof of a scam.</dd></div>
         <div><dt><span class="badge high_confidence_flag">high-confidence flag</span></dt><dd>Concrete indicators plus independent corroboration above the operator threshold.</dd></div>
         <div><dt><span class="badge confirmed_scam">confirmed scam</span></dt><dd>Only an explicit admin review, upheld through the review path, can carry this label.</dd></div>
         <div><dt><span class="badge retracted">retracted</span></dt><dd>A correction or overturn. Promotion stops; the correction remains visible.</dd></div>
+      </dl>
+    </section>
+
+    <section class="panel split" id="protection" aria-labelledby="protection-title">
+      <div>
+        <p class="eyebrow">No command required</p>
+        <h2 id="protection-title">Protection runs quietly on every join.</h2>
+        <p>TRACaBot checks the exact stable platform identity against the creator-hosted graph in the background. No LLM or API key is required, and the default is observe/log: a clean join sees nothing, and a match that is not sufficient evidence stays a private flag. Opted-in communities can accept creator-curator attestations only after a fresh signed status read. Banned users can start a private chat and send <code>/appeal</code>; only their own local cases are listed, and only actual group admins can resolve them. Private <code>/start</code> gives current group admins Protection controls, Status, Recent automatic bans, and Appeals buttons. Pausing future join removals is per group and separate from reversing an existing ban with a local correction and safe unban retry.</p>
+        <p class="fine">Automatic removal is explicit opt-in. It requires confirmed exact-identity evidence with authenticated approval provenance, freshness, no retraction, configured roots, and real ban rights. Shared/verified-graph records are flag-only when the adapter cannot prove publisher approval. Display names, aliases, admin bans, model confidence, and campaign association never authorize a removal. Configured bot owners without live group admin status cannot view or change admin controls for that group.</p>
+      </div>
+      <dl class="facts">
+        <div><dt>Core engine</dt><dd>deterministic; no model</dd></div>
+        <div><dt>Identity</dt><dd>exact HMAC-scoped Telegram ID</dd></div>
+        <div><dt>Default action</dt><dd>silent observe / private flag</dd></div>
+        <div><dt>Auto-remove</dt><dd>opt-in, confirmed evidence only</dd></div>
+        <div><dt>On graph outage</dt><dd>fail closed; no removal</dd></div>
+        <div><dt>Platforms</dt><dd>Telegram only (Discord not implemented)</dd></div>
       </dl>
     </section>
 
@@ -88,7 +105,9 @@
       <div class="boundary-grid">
         <article><h3>No private-data dump</h3><p>No raw Telegram IDs, usernames, chat titles, private-message text, screenshots, or reporter identities in public records.</p></article>
         <article><h3>No model-only verdicts</h3><p>AI suspicion can request review with supporting evidence. It cannot ban, publish a definitive accusation, or override community policy.</p></article>
-        <article><h3>No admin-ban shortcut</h3><p>A ban is an enforcement record. It becomes reusable cross-community evidence only with provenance and corroboration.</p></article>
+        <article><h3>No admin-ban shortcut</h3><p>A live admin ban with provenance is shared as an enforcement record. It stays separate from confirmed scam, and it never becomes a global verdict or an automatic cross-community ban.</p></article>
+        <article><h3>No Recent Actions access</h3><p>Bots receive only live membership updates. Telegram Recent Actions, admin logs, pre-install bans, and unstated reasons are not available and are never invented.</p></article>
+        <article><h3>Context is not cause</h3><p>When the bot already saw recent messages from the same user and chat, it may attach a bounded context summary. Those messages are labeled “recent pre-ban context; causal link unverified” and are never treated as the ban reason or a confirmed-scam verdict.</p></article>
         <article><h3>No open write endpoint</h3><p>Writes require an operator-issued, community-scoped Bearer token, validation, rate limits, and idempotency.</p></article>
         <article><h3>No graph instructions</h3><p>Graph content is data, not commands. Agents must keep their own permissions and approval rules.</p></article>
         <article><h3>No invented infrastructure</h3><p>This site does not claim a chain deployment, hosted endpoint, or context-graph membership that the operator has not provisioned and verified.</p></article>
@@ -98,8 +117,8 @@
     <section class="join-band">
       <div>
         <p class="eyebrow">For communities and agents</p>
-        <h2>Bring your own community. Keep your own policy.</h2>
-        <p>Request membership, run the DKG edge-node setup supported by this repository, and read before you write. Approval is manual; write access is scoped to one community.</p>
+        <h2>Keep normal admin controls. Add shared memory.</h2>
+        <p>Add TRACaBot as an admin and keep it running: bans performed with Telegram’s own admin controls are logged automatically, with provenance and an explicit reason status. Request membership, run the supported DKG edge-node setup, and read before you write. Approval is manual; write access is scoped to one community.</p>
       </div>
       <a class="button primary" href="/join">Read the onboarding path</a>
     </section>

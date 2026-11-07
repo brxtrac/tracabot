@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { DkgClient, extractDomains, extractPatterns, extractWallets } from './dkg-client.js';
 import { loadConfig } from './config.js';
 
@@ -28,9 +29,10 @@ export function parseReview(content) {
   return answer;
 }
 
-async function runCurator(prompt, { runner = spawn } = {}) {
+async function runCurator(prompt, { runner = spawn, createSession = scheduledSession, finishSession = finishScheduledSession } = {}) {
+  const sessionID = createSession();
   return new Promise((resolve, reject) => {
-    const child = runner('opencode', ['run', '--agent', 'tracabot-curator', '--model', MODEL, '--variant', 'medium', '--format', 'json', '--title', 'TRACaBot evidence review', prompt],
+    const child = runner('opencode', ['run', '--session', sessionID, '--agent', 'tracabot-curator', '--model', `${MODEL}#medium`, '--format', 'json', '--title', 'TRACaBot evidence review', prompt],
       { cwd: '/root/tracabot', stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
     let bytes = 0;
@@ -45,6 +47,7 @@ async function runCurator(prompt, { runner = spawn } = {}) {
     child.on('error', (failure) => { clearTimeout(timer); reject(failure); });
     child.on('close', (code) => {
       clearTimeout(timer);
+      finishSession(sessionID);
       if (code !== 0 || bytes > MAX_RESPONSE_BYTES) { reject(new Error(`OpenCode curator failed (${code}): ${error.slice(-200)}`)); return; }
       try {
         const events = output.split('\n').filter(Boolean).map((line) => JSON.parse(line));
@@ -54,6 +57,21 @@ async function runCurator(prompt, { runner = spawn } = {}) {
       } catch (failure) { reject(failure); }
     });
   });
+}
+
+function finishScheduledSession(sessionID) {
+  for (const [method, route, body] of [['post', `/api/session/${sessionID}/interrupt`, {}], ['patch', `/api/session/${sessionID}`, { archived: true }]]) {
+    const result = spawnSync('opencode', ['api', method, route, '--data', JSON.stringify(body)], { cwd: '/root/tracabot', encoding: 'utf8', timeout: 15000, maxBuffer: 65536 });
+    if (result.status !== 0) console.error('TRACaBot scheduled session cleanup failed');
+  }
+}
+
+function scheduledSession() {
+  const result = spawnSync('opencode', ['api', 'post', '/api/session', '--data', JSON.stringify({ agent: 'tracabot-curator', location: { directory: '/root/tracabot' }, model: { providerID: '9router', id: 'cx/gpt-6-sol', variant: 'medium' }, metadata: { openchamber: { kind: 'scheduled' }, automation: { job: 'tracabot-curator', owner: 'systemd', version: 1 } }, permissions: [{ action: '*', resource: '*', effect: 'deny' }] })], { cwd: '/root/tracabot', encoding: 'utf8', timeout: 15000, maxBuffer: 65536 });
+  if (result.status !== 0) throw new Error('Scheduled curator session creation failed');
+  const session = JSON.parse(result.stdout).data;
+  if (!session?.id || session.metadata?.openchamber?.kind !== 'scheduled' || session.location?.directory !== '/root/tracabot') throw new Error('Scheduled curator ownership not confirmed');
+  return session.id;
 }
 
 export async function reviewDraft(draft, options = {}) {
@@ -82,6 +100,7 @@ function reviewLedger(path) {
     id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, action TEXT NOT NULL,
     category TEXT NOT NULL, reason TEXT NOT NULL, evidence TEXT NOT NULL,
     status TEXT NOT NULL, updated_at TEXT NOT NULL)`);
+  db.exec('CREATE TABLE IF NOT EXISTS curator_attempts (id TEXT PRIMARY KEY, fingerprint TEXT, policy TEXT, failures INTEGER, next_at INTEGER, status TEXT)');
   return db;
 }
 
@@ -111,6 +130,7 @@ export async function curateWorkingMemory({ dkg = new DkgClient(loadConfig()), l
   const results = [];
   let reviewed = 0;
   const ledger = reviewLedger(ledgerPath);
+  const policy = createHash('sha256').update(readFileSync('/root/.config/opencode/agents/tracabot-curator.md')).update(MODEL + ':medium:scheduled-v1').digest('hex');
   try {
     for (const draft of drafts) {
       try {
@@ -130,14 +150,29 @@ export async function curateWorkingMemory({ dkg = new DkgClient(loadConfig()), l
         if (row && row.fingerprint !== fingerprint) throw new Error('Draft changed after review; manual review required');
         if (row?.status === 'done') { results.push({ id: draft.id, action: 'already_reviewed' }); continue; }
         if (!row) {
+          const attempt = ledger.prepare('SELECT * FROM curator_attempts WHERE id=?').get(draft.id);
+          if (attempt && (attempt.policy !== policy || attempt.fingerprint !== fingerprint)) throw new Error('Review input or policy changed; explicit attempt archival required');
+          if (attempt && (attempt.status === 'running' || attempt.failures >= 3 || attempt.next_at > now)) {
+            results.push({ id: draft.id, action: attempt.status === 'running' || attempt.failures >= 3 ? 'quarantined' : 'retry_deferred' });
+            continue;
+          }
           if (reviewed >= maxReviews) { results.push({ id: draft.id, action: 'budget_deferred' }); continue; }
           reviewed++;
-          const recommendation = await reviewer(draft);
-          const verdict = parseReview(JSON.stringify(recommendation));
+          const reserved = ledger.prepare(`INSERT INTO curator_attempts VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status='running'
+            WHERE curator_attempts.status!='running' AND curator_attempts.failures<3 AND curator_attempts.next_at<=?`).run(draft.id, fingerprint, policy, 0, 0, 'running', now);
+          if (!reserved.changes) { results.push({ id: draft.id, action: 'retry_deferred' }); continue; }
+          let verdict;
+          try { verdict = parseReview(JSON.stringify(await reviewer(draft))); }
+          catch (error) {
+            const failures = (attempt?.failures || 0) + 1;
+            ledger.prepare("UPDATE curator_attempts SET failures=?,next_at=?,status='failed' WHERE id=?").run(failures, now + Math.min(86400000, 300000 * 2 ** failures), draft.id);
+            throw error;
+          }
           ledger.prepare('INSERT INTO curator_reviews VALUES (?,?,?,?,?,?,?,?)').run(
             draft.id, fingerprint, verdict.action, verdict.category, verdict.reason.trim(), verdict.evidence.trim(),
             'reviewed', new Date().toISOString());
           row = ledger.prepare('SELECT * FROM curator_reviews WHERE id=?').get(draft.id);
+          ledger.prepare("UPDATE curator_attempts SET status='complete' WHERE id=?").run(draft.id);
         }
         if (row.action === 'promote') {
           if (!String(draft.text).toLowerCase().includes(row.evidence.toLowerCase())) {

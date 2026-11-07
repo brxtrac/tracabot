@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { generateKeyPairSync } from 'node:crypto';
 import { loadConfig } from '../src/config.js';
 
 test('loadConfig rejects unsafe context graph names', () => {
@@ -78,6 +79,43 @@ test('loadConfig known-campaign auto-ban defaults and parsing', () => {
     loadConfig({ TRACABOT_KNOWN_CAMPAIGN_PATTERNS: 'bc game, OtherWave' }).knownCampaignPatterns,
     ['bc game', 'OtherWave']
   );
+});
+
+test('loadConfig defaults silent join protection and validates opt-in safeguards', () => {
+  const defaults = loadConfig({});
+  assert.equal(defaults.joinAutoRemove, false);
+  assert.deepEqual(defaults.joinAutoRemoveChats, []);
+  assert.equal(defaults.joinEvidenceMaxAgeDays, 180);
+  assert.equal(defaults.joinMinConfirmedRoots, 1);
+  assert.deepEqual(defaults.joinTrustedLayers, ['local']);
+  assert.deepEqual(defaults.joinTrustedSources, []);
+  assert.equal(defaults.submitSharedEvidence, false);
+  const optedIn = loadConfig({
+    TRACABOT_INSTANCE_ID: 'instance-one',
+    TRACABOT_JOIN_AUTO_REMOVE: 'true',
+    TRACABOT_JOIN_AUTO_REMOVE_CHATS: '-100123, -100456',
+    TRACABOT_JOIN_EVIDENCE_MAX_AGE_DAYS: '30',
+    TRACABOT_JOIN_MIN_CONFIRMED_ROOTS: '2',
+    TRACABOT_JOIN_TRUSTED_LAYERS: 'verified-memory,local',
+    TRACABOT_JOIN_TRUSTED_SOURCES: 'creator-curator,local_admin_review',
+    TRACABOT_SUBMIT_SHARED_EVIDENCE: 'true',
+    TRACABOT_CREATOR_SUBMIT_URL: 'https://creator.example/api/public/evidence',
+    TRACABOT_CREATOR_SUBMIT_TOKEN: 'token-at-least-16-chars'
+  });
+  assert.equal(optedIn.instanceId, 'instance-one');
+  assert.equal(optedIn.joinAutoRemove, true);
+  assert.deepEqual(optedIn.joinAutoRemoveChats, ['-100123', '-100456']);
+  assert.equal(optedIn.joinEvidenceMaxAgeDays, 30);
+  assert.equal(optedIn.joinMinConfirmedRoots, 2);
+  assert.deepEqual(optedIn.joinTrustedSources, ['creator-curator', 'local_admin_review']);
+  assert.equal(optedIn.submitSharedEvidence, true);
+  assert.throws(() => loadConfig({ TRACABOT_INSTANCE_ID: 'bad id!' }), /TRACABOT_INSTANCE_ID/);
+  assert.throws(() => loadConfig({ TRACABOT_JOIN_EVIDENCE_MAX_AGE_DAYS: '0' }), /TRACABOT_JOIN_EVIDENCE_MAX_AGE_DAYS/);
+  assert.throws(() => loadConfig({ TRACABOT_JOIN_AUTO_REMOVE_CHATS: 'all-groups' }), /TRACABOT_JOIN_AUTO_REMOVE_CHATS/);
+  assert.throws(() => loadConfig({ TRACABOT_JOIN_MIN_CONFIRMED_ROOTS: '6' }), /TRACABOT_JOIN_MIN_CONFIRMED_ROOTS/);
+  assert.throws(() => loadConfig({ TRACABOT_JOIN_TRUSTED_LAYERS: 'anything' }), /TRACABOT_JOIN_TRUSTED_LAYERS/);
+  assert.throws(() => loadConfig({ TRACABOT_SUBMIT_SHARED_EVIDENCE: 'true' }), /TRACABOT_CREATOR_SUBMIT_URL/);
+  assert.throws(() => loadConfig({ TRACABOT_CREATOR_SUBMIT_URL: 'ftp://creator.example' }), /http or https/);
 });
 
 test('loadConfig requires explicit opt-in for unauthenticated skill writes', () => {
@@ -220,6 +258,46 @@ test('loadConfig validates evidence policy and community write tokens', () => {
   assert.throws(() => loadConfig({ TRACABOT_COMMUNITY_TOKENS: JSON.stringify([{ token: 'short', communityId: 'x' }]) }), /at least 16/);
   assert.throws(() => loadConfig({ TRACABOT_EVIDENCE_PROMOTION_THRESHOLD: '101' }), /TRACABOT_EVIDENCE_PROMOTION_THRESHOLD/);
   assert.throws(() => loadConfig({ TRACABOT_PUBLIC_MAX_BODY_BYTES: '10' }), /TRACABOT_PUBLIC_MAX_BODY_BYTES/);
+});
+
+test('loadConfig parses creator-curator and appeal limits', () => {
+  const defaults = loadConfig({});
+  assert.equal(defaults.creatorCuratorUrl, '');
+  assert.equal(defaults.creatorCuratorIssuer, 'tracabot-creator-curator');
+  assert.equal(defaults.creatorCuratorMinConfidence, 90);
+  assert.equal(defaults.creatorCuratorMinRoots, 1);
+  assert.equal(defaults.creatorCuratorStorePath, './data/creator-attestations.json');
+  assert.equal(defaults.creatorCuratorReadRateLimitPerHour, 120);
+  assert.equal(defaults.creatorCuratorWriteRateLimitPerHour, 30);
+  assert.equal(defaults.appealMaxPerHour, 3);
+  assert.equal(defaults.appealDedupHours, 24);
+  assert.equal(defaults.appealMaxReasonChars, 500);
+
+  const publicKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' });
+  const config = loadConfig({
+    TRACABOT_JOIN_TRUSTED_LAYERS: 'creator-curator,local',
+    TRACABOT_CREATOR_CURATOR_URL: 'https://creator.example/',
+    TRACABOT_CREATOR_CURATOR_PUBLIC_KEY: publicKey,
+    TRACABOT_CREATOR_CURATOR_READ_TOKEN: 'creator-read-token-123456',
+    TRACABOT_APPEAL_MAX_PER_HOUR: '5',
+    TRACABOT_APPEAL_DEDUP_HOURS: '12',
+    TRACABOT_APPEAL_MAX_REASON_CHARS: '600',
+    TRACABOT_CREATOR_CURATOR_READ_RATE_LIMIT_PER_HOUR: '7',
+    TRACABOT_CREATOR_CURATOR_WRITE_RATE_LIMIT_PER_HOUR: '4'
+  });
+  assert.deepEqual(config.joinTrustedLayers, ['creator-curator', 'local']);
+  assert.equal(config.creatorCuratorUrl, 'https://creator.example');
+  assert.equal(config.appealMaxPerHour, 5);
+  assert.equal(config.appealDedupHours, 12);
+  assert.equal(config.appealMaxReasonChars, 600);
+  assert.equal(config.creatorCuratorReadRateLimitPerHour, 7);
+  assert.equal(config.creatorCuratorWriteRateLimitPerHour, 4);
+
+  assert.throws(() => loadConfig({ TRACABOT_JOIN_TRUSTED_LAYERS: 'creator' }), /TRACABOT_JOIN_TRUSTED_LAYERS/);
+  assert.throws(() => loadConfig({ TRACABOT_CREATOR_CURATOR_URL: 'https://creator.example' }), /requires TRACABOT_CREATOR_CURATOR_PUBLIC_KEY/);
+  assert.throws(() => loadConfig({ TRACABOT_CREATOR_CURATOR_TOKEN: 'short' }), /TRACABOT_CREATOR_CURATOR_TOKEN/);
+  assert.throws(() => loadConfig({ TRACABOT_APPEAL_MAX_PER_HOUR: '0' }), /TRACABOT_APPEAL_MAX_PER_HOUR/);
+  assert.throws(() => loadConfig({ TRACABOT_CREATOR_CURATOR_READ_RATE_LIMIT_PER_HOUR: '0' }), /TRACABOT_CREATOR_CURATOR_READ_RATE_LIMIT_PER_HOUR/);
 });
 
 test('loadConfig parses pending review notification policy', () => {

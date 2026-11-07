@@ -165,3 +165,54 @@ test('bounds persisted observed messages by age and per-user count', () => {
   assert.equal(store.knownMessageIds('-old', '1').length, 0);
   assert.deepEqual(store.knownMessageIds('-100', '77'), Array.from({ length: 100 }, (_, index) => index + 2));
 });
+
+test('stores bounded message text for same-chat same-user pre-ban context only', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'tracabot-')), 'events.sqlite');
+  const store = new EventStore(path);
+  store.rememberMessage('-100', '77', 11, { text: 'first', caption: '', hasMedia: false, date: 1000 });
+  store.rememberMessage('-100', '77', 12, { text: '', caption: 'photo caption', hasMedia: true, date: 1001 });
+  store.rememberMessage('-100', '78', 13, { text: 'other user', date: 1001 });
+  store.rememberMessage('-200', '77', 14, { text: 'other chat', date: 1001 });
+
+  const rows = store.recentMessages('-100', '77', { before: 1001, since: 900, limit: 8 });
+  assert.deepEqual(rows.map((row) => row.message_id), [12, 11]);
+  assert.equal(rows[0].caption, 'photo caption');
+  assert.equal(rows[0].has_media, true);
+  assert.deepEqual(store.recentMessages('-100', '77', { before: 1000, since: 900, limit: 8 }).map((row) => row.message_id), [11]);
+  assert.deepEqual(store.recentMessages('-100', '77', { before: 1001, since: 1001, limit: 8 }).map((row) => row.message_id), [12]);
+
+  const reopened = new EventStore(path);
+  assert.equal(reopened.recentMessages('-100', '77', { before: 1001, since: 900, limit: 8 })[0].caption, 'photo caption');
+});
+
+test('activity cleanup expires cached text and old raw ban-context text without restart', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'tracabot-')), 'events.sqlite');
+  const store = new EventStore(path);
+  store.append({
+    id: 'old-native-ban',
+    event_type: 'ban_executed',
+    timestamp: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(),
+    chat: { id: '-100' },
+    user: { id: '77' },
+    payload: {
+      ban_context: {
+        category: 'spam',
+        confirmed_scam: false,
+        messages: [{ message_id: 1, text: 'private text', caption: 'private caption' }]
+      }
+    }
+  });
+  store.db.prepare('INSERT INTO observed_messages (chat_id, user_id, message_id, observed_at, text, caption, message_date) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run('-100', '77', 2, new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(), 'expired text', 'expired caption', 100);
+
+  store.lastContextPruneAt = 0;
+  store.append({ id: 'ordinary-activity', event_type: 'risk_query', timestamp: new Date().toISOString(), chat: { id: '-100' } });
+
+  const event = store.all().find((item) => item.id === 'old-native-ban');
+  assert.equal(event.payload.ban_context.messages[0].text, '');
+  assert.equal(event.payload.ban_context.messages[0].caption, '');
+  assert.equal(event.payload.ban_context.messages[0].text_redacted, true);
+  assert.equal(event.payload.ban_context.category, 'spam');
+  assert.equal(store.db.prepare('SELECT text, caption FROM observed_messages WHERE message_id = 2').get(), undefined);
+  assert.equal(store.pruneBanContextText(), 0);
+});
