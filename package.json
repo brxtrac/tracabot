@@ -16,7 +16,10 @@
     "tracabot-skill": "bin/tracabot-skill.js",
     "tracabot-openclaw-learning-loop": "bin/openclaw-learning-loop.js",
     "tracabot-curator": "bin/tracabot-curator.js",
-    "tracabot-telegram-artifacts": "bin/telegram-artifacts.js"
+    "tracabot-telegram-artifacts": "bin/telegram-artifacts.js",
+    "tracabot-web": "bin/tracabot-web.js",
+    "tracabot-promote": "bin/tracabot-promote.js",
+    "tracabot-membership": "bin/tracabot-membership.js"
   },
   "scripts": {
     "start": "node ./bin/tracabot.js",
@@ -25,7 +28,10 @@
     "test:commands": "node ./scripts/test-command-loop.js",
     "test": "node --test test/*.test.js",
     "check:release": "npm test && npm run test:commands && npm run audit:production && npm pack --dry-run",
-    "audit:production": "npm audit --omit=dev"
+    "audit:production": "npm audit --omit=dev",
+    "web": "node ./bin/tracabot-web.js",
+    "promote": "node ./bin/tracabot-promote.js --once",
+    "membership": "node ./bin/tracabot-membership.js"
   },
   "keywords": [
     "origintrail",
@@ -61,6 +67,8 @@
     "LICENSE",
     "README.md",
     "SECURITY.md",
-    "AGENT_INSTALL.md"
+    "AGENT_INSTALL.md",
+    "site",
+    "docs/PUBLIC_GRAPH.md"
   ]
 }

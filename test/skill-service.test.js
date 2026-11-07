@@ -6,7 +6,9 @@ import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { TracabotSkillService } from '../src/skill-service.js';
+import { TelegramShieldBot } from '../src/telegram.js';
 import { EventStore } from '../src/store.js';
+import { evaluateEvidence, eventTargetKey } from '../src/evidence-policy.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -62,6 +64,14 @@ test('skill service watchlist and digest stay local', () => {
 
 test('skill service appeal and review write DKG evidence', async () => {
   const { service, dkgWrites } = makeService();
+  service.store.append({
+    id: 'evt-1',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat: { id: -100, title: 'demo', type: 'supergroup' },
+    user: { id: '4242' },
+    payload: { target: { id: '4242' }, target_key: 'id:4242', target_chat_id: '-100', confidence: 90, recommended_action: 'admin_review' }
+  });
   await assert.rejects(() => service.submitAppeal({ eventId: 'evt-1', reason: 'false positive', actorUsername: 'admin' }), /authorized write token/);
   const appeal = await service.submitAppeal({ eventId: 'evt-1', reason: 'false positive', actorUsername: 'admin', writeToken: 'test-write-token' });
   await assert.rejects(() => service.reviewEvent({ eventId: 'evt-1', decision: 'overturn', reason: 'appeal accepted', actorUsername: 'admin' }), /authorized write token/);
@@ -73,6 +83,108 @@ test('skill service appeal and review write DKG evidence', async () => {
   assert.match(dkgWrites.find((event) => event.event_type === 'appeal_submitted').payload.appeal_receipt_id, /^appeal-/);
   assert.ok(dkgWrites.some((event) => event.event_type === 'review_overturned'));
   assert.equal(dkgWrites.find((event) => event.event_type === 'review_overturned').payload.admin_verified, true);
+  assert.equal(dkgWrites.find((event) => event.event_type === 'review_overturned').payload.reviewed_target.id, '4242');
+});
+
+test('skill review resolves the referenced subject and cannot approve an unrelated or missing finding', async () => {
+  const { service } = makeService();
+  service.store.append({
+    id: 'skill-finding-4242',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat: { id: -100, title: 'demo', type: 'supergroup' },
+    user: { id: '4242', username: 'subject' },
+    payload: { target: { id: '4242', username: 'subject' }, target_key: 'id:4242', target_chat_id: '-100' }
+  });
+  await assert.rejects(
+    () => service.reviewEvent({ eventId: 'missing-finding', decision: 'upheld', actorId: '2222', writeToken: 'test-write-token' }),
+    /missing referenced finding/
+  );
+  const review = await service.reviewEvent({
+    eventId: 'skill-finding-4242',
+    decision: 'upheld',
+    actorId: '2222',
+    actorUsername: 'moderator',
+    chatId: '-100',
+    writeToken: 'test-write-token'
+  });
+  const stored = service.store.all().find((event) => event.id === review.eventId);
+  assert.equal(stored.user.id, '2222');
+  assert.equal(stored.payload.reviewed_target.id, '4242');
+  assert.equal(stored.payload.reviewed_target_key, 'id:4242');
+  assert.equal(stored.payload.target_chat_id, '-100');
+  assert.equal(stored.payload.local_approval, true);
+  assert.equal(stored.payload.approval_source, 'authorized_skill_review');
+
+  const bot = new TelegramShieldBot({
+    config: { adminIds: new Set(), botOwnerIds: new Set(), joinEvidenceMaxAgeDays: 180, joinMinConfirmedRoots: 1, joinTrustedLayers: ['local'] },
+    analyzer: () => ({ is_scam: false, confidence: 0, evidence: [], recommended_action: 'ignore' }),
+    dkg: { async writeEvent(event) { return { eventId: event.id }; } },
+    store: service.store
+  });
+  assert.equal(bot.localProtectionEvidence({ id: '2222' }, '-100').evidence.length, 0);
+  const subjectEvidence = bot.localProtectionEvidence({ id: '4242' }, '-100').evidence;
+  assert.equal(subjectEvidence.length, 1);
+  assert.equal(subjectEvidence[0].localApproval, true);
+  assert.equal(subjectEvidence[0].targetEventId, 'skill-finding-4242');
+});
+
+test('legacy subjectless review resolves the underlying finding, never the reviewer', async () => {
+  const { service } = makeService();
+  service.store.append({
+    id: 'legacy-finding-4242',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat: { id: -100, title: 'demo', type: 'supergroup' },
+    user: { id: '4242', username: 'subject' },
+    payload: { target: { id: '4242', username: 'subject' }, target_key: 'id:4242', target_chat_id: '-100' }
+  });
+  service.store.append({
+    id: 'legacy-review-2222',
+    event_type: 'review_upheld',
+    timestamp: new Date().toISOString(),
+    chat: { id: -100, title: 'demo', type: 'supergroup' },
+    user: { id: '2222', username: 'moderator' },
+    payload: { target_event_id: 'legacy-finding-4242', review_decision: 'confirm' }
+  });
+  const review = await service.reviewEvent({
+    eventId: 'legacy-review-2222',
+    decision: 'upheld',
+    actorId: '2222',
+    actorUsername: 'moderator',
+    chatId: '-100',
+    writeToken: 'test-write-token'
+  });
+  const stored = service.store.all().find((event) => event.id === review.eventId);
+  assert.equal(stored.payload.reviewed_target.id, '4242');
+  assert.notEqual(stored.payload.reviewed_target.id, '2222');
+  assert.equal(stored.payload.reviewed_target_key, 'id:4242');
+  assert.equal(eventTargetKey(stored), 'id:4242');
+  const evidence = evaluateEvidence(stored, { history: service.store.all() });
+  assert.equal(evidence.confirmedScam, true);
+  assert.equal(evidence.promotion.reasons.includes('missing_reviewed_target'), false);
+
+  const bot = new TelegramShieldBot({
+    config: { adminIds: new Set(), botOwnerIds: new Set(), joinEvidenceMaxAgeDays: 180, joinMinConfirmedRoots: 1, joinTrustedLayers: ['local'] },
+    analyzer: () => ({ is_scam: false, confidence: 0, evidence: [], recommended_action: 'ignore' }),
+    dkg: { async writeEvent(event) { return { eventId: event.id }; } },
+    store: service.store
+  });
+  assert.equal(bot.localProtectionEvidence({ id: '2222' }, '-100').evidence.length, 0);
+  assert.equal(bot.localProtectionEvidence({ id: '4242' }, '-100').evidence.length, 1);
+
+  service.store.append({
+    id: 'subjectless-review-3333',
+    event_type: 'review_upheld',
+    timestamp: new Date().toISOString(),
+    chat: { id: -100, title: 'demo', type: 'supergroup' },
+    user: { id: '3333', username: 'moderator' },
+    payload: { review_decision: 'confirm' }
+  });
+  await assert.rejects(
+    () => service.reviewEvent({ eventId: 'subjectless-review-3333', decision: 'upheld', actorId: '3333', writeToken: 'test-write-token' }),
+    /subjectless review wrapper/
+  );
 });
 
 test('skill service monitors unsafe chat events through DKG working memory', async () => {

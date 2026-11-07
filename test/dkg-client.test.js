@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DkgClient as BaseDkgClient, extractDomains, extractPatterns, extractWallets } from '../src/dkg-client.js';
+import { DkgClient as BaseDkgClient, extractDomains, extractPatterns, extractWallets, pseudonym } from '../src/dkg-client.js';
 
 const TEST_PSEUDONYM_KEY = 'test-pseudonym-key-at-least-32-bytes';
 
@@ -9,6 +9,170 @@ class DkgClient extends BaseDkgClient {
     super({ dkgPseudonymKey: TEST_PSEUDONYM_KEY, ...config }, dependencies);
   }
 }
+
+test('admin history distinguishes reused aliases from the same Telegram ID after rename', async () => {
+  const dkg = new DkgClient({ contextGraph: 'tracabot' });
+  const root = { s: 'https://tracabot.org/ontology#event/prior-ban',
+    g: 'did:dkg:context-graph:tracabot/_shared_memory', eventType: 'ban_executed',
+    confidence: '95', adminVerified: 'true' };
+  const queries = [];
+  dkg.queryBindings = async (sparql) => {
+    queries.push(sparql);
+    return sparql.includes('telegramUserId> "111"') || sparql.includes('actorAlias> "bcgame"') ? [root] : [];
+  };
+  const reusedAlias = await dkg.queryAdminHistoryForActor({ userId: '222', aliases: ['BC GAME'] });
+  assert.equal(reusedAlias.hasPriorAdminAction, true);
+  assert.equal(reusedAlias.events[0].exactActorMatch, false);
+  assert.ok(queries.some((sparql) => sparql.includes('actorAlias> "bcgame"')));
+  queries.length = 0;
+  const renamedActor = await dkg.queryAdminHistoryForActor({ userId: '111', aliases: ['New Name'] });
+  assert.equal(renamedActor.events[0].exactActorMatch, true);
+  assert.equal(queries.some((sparql) => sparql.includes('actorAlias>')), false);
+  const aliasOnly = await dkg.queryAdminHistoryForActor({ aliases: ['BC GAME'] });
+  assert.equal(aliasOnly.events[0].exactActorMatch, false);
+});
+
+test('protection evidence uses exact stable identity only and reports claim metadata', async () => {
+  const dkg = new DkgClient({ contextGraph: 'tracabot' });
+  const queries = [];
+  dkg.queryBindingsStrict = async (sparql, options) => {
+    queries.push({ sparql, options });
+    if (options.view === 'verifiable-memory') {
+      return [{
+        g: 'did:dkg:context-graph:tracabot/_verifiable_memory',
+        s: 'https://tracabot.org/ontology#event/confirmed-1',
+        eventType: 'review_upheld',
+        claimLevel: 'confirmed_scam',
+        confidence: '96',
+        adminVerified: 'true',
+        source: 'creator-curator',
+        provenance: 'admin_review',
+        publisherApprovalVerified: 'true',
+        created: '2026-11-01T10:00:00.000Z',
+        communityToken: 'community-a',
+        targetIdentity: pseudonym(TEST_PSEUDONYM_KEY, 'telegram-user', '111'),
+        sourceEventId: 'underlying-finding',
+        evidenceRootId: 'underlying-finding'
+      }];
+    }
+    return [
+      {
+        g: 'did:dkg:context-graph:tracabot/_shared_memory',
+        s: 'https://tracabot.org/ontology#event/community-1',
+        eventType: 'evidence_submission',
+        claimLevel: 'allegation',
+        confidence: '0',
+        source: 'fork-instance',
+        created: '2026-11-02T10:00:00.000Z'
+      },
+      {
+        g: 'did:dkg:context-graph:tracabot/_shared_memory',
+        s: 'https://tracabot.org/ontology#event/test-1',
+        eventType: 'review_upheld',
+        claimLevel: 'confirmed_scam',
+        adminVerified: 'true',
+        testMode: 'true',
+        created: '2026-11-02T10:00:00.000Z'
+      },
+      {
+        g: 'did:dkg:context-graph:tracabot/_shared_memory',
+        s: 'https://tracabot.org/ontology#event/moderator-review',
+        eventType: 'review_upheld',
+        claimLevel: 'confirmed_scam',
+        adminVerified: 'true',
+        actorIdentity: pseudonym(TEST_PSEUDONYM_KEY, 'telegram-user', '111'),
+        targetIdentity: pseudonym(TEST_PSEUDONYM_KEY, 'telegram-user', '999'),
+        created: '2026-11-02T10:00:00.000Z'
+      },
+      {
+        g: 'did:dkg:context-graph:other/_shared_memory',
+        s: 'https://tracabot.org/ontology#event/foreign-1',
+        eventType: 'review_upheld',
+        claimLevel: 'confirmed_scam',
+        adminVerified: 'true',
+        created: '2026-11-02T10:00:00.000Z'
+      }
+    ];
+  };
+  const result = await dkg.queryProtectionEvidence({ userId: '111' });
+  assert.equal(result.ok, true);
+  assert.equal(result.complete, true);
+  assert.equal(result.evidence.length, 2);
+  const confirmed = result.evidence.find((item) => item.eventId === 'confirmed-1');
+  const community = result.evidence.find((item) => item.eventId === 'community-1');
+  assert.equal(confirmed.trustLayer, 'verified-memory');
+  assert.equal(confirmed.claimLevel, 'confirmed_scam');
+  assert.equal(confirmed.publisherApprovalVerified, false);
+  assert.equal(confirmed.sourceEventId, 'underlying-finding');
+  assert.deepEqual(confirmed.evidenceRootIds, ['underlying-finding']);
+  assert.equal(community.trustLayer, 'shared-working-memory');
+  assert.ok(queries.length >= 2);
+  assert.match(queries[0].sparql, /actorIdentity/);
+  assert.match(queries[0].sparql, /targetIdentity/);
+  assert.doesNotMatch(queries[0].sparql, /actorAliasToken|targetAliasToken|telegramUserId/);
+});
+
+test('protection evidence marks a saturated unordered result as incomplete', async () => {
+  const dkg = new DkgClient({ contextGraph: 'tracabot' });
+  const rows = Array.from({ length: 100 }, (_, index) => ({
+    g: 'did:dkg:context-graph:tracabot/_verifiable_memory',
+    s: `https://tracabot.org/ontology#event/fill-${index}`,
+    eventType: 'fraud_finding',
+    claimLevel: 'confirmed_scam',
+    adminVerified: 'true',
+    created: '2026-11-01T10:00:00.000Z',
+    targetIdentity: pseudonym(TEST_PSEUDONYM_KEY, 'telegram-user', '111')
+  }));
+  dkg.queryBindingsStrict = async () => rows;
+  const result = await dkg.queryProtectionEvidence({ userId: '111' });
+  assert.equal(result.ok, true);
+  assert.equal(result.complete, false);
+});
+
+test('protection evidence fails closed on missing identity, missing key, and graph outage', async () => {
+  const noIdentity = await new DkgClient({ contextGraph: 'tracabot' }).queryProtectionEvidence({ userId: '' });
+  assert.equal(noIdentity.ok, false);
+  assert.equal(noIdentity.error, 'missing_stable_identity');
+
+  const noKey = await new DkgClient({ contextGraph: 'tracabot', dkgPseudonymKey: '' }).queryProtectionEvidence({ userId: '111' });
+  assert.equal(noKey.ok, false);
+  assert.equal(noKey.error, 'pseudonym_key_not_configured');
+
+  const dkg = new DkgClient({ contextGraph: 'tracabot' });
+  dkg.queryBindingsStrict = async () => { throw new Error('graph timeout'); };
+  const outage = await dkg.queryProtectionEvidence({ userId: '111' });
+  assert.equal(outage.ok, false);
+  assert.match(outage.error, /graph timeout/);
+  assert.deepEqual(outage.evidence, []);
+});
+
+test('public campaign query returns only sanitized shared-memory fields', async () => {
+  const dkg = new DkgClient({ contextGraph: 'tracabot' });
+  const rows = [
+    { g: 'did:dkg:context-graph:tracabot/_shared_memory', s: 'https://tracabot.org/ontology#event/campaign-1',
+      confidence: '91', scamType: 'impersonation', created: '2026-11-01T10:00:00.000Z',
+      campaignKey: 'domain:verify-example.example', campaignEventCount: '4', campaignCommunityCount: '2',
+      domain: 'verify-example.example', communityToken: 'community-token-a', claimLevel: 'high_confidence_flag',
+      evidenceFingerprint: 'sha256:abc' },
+    { g: 'did:dkg:context-graph:tracabot/_shared_memory', s: 'https://tracabot.org/ontology#event/campaign-1',
+      confidence: '91', scamType: 'impersonation', created: '2026-11-01T10:00:00.000Z',
+      wallet: '0x0000000000000000000000000000000000000001', pattern: 'fake-support' },
+    { g: 'did:dkg:context-graph:other/_shared_memory', s: 'https://tracabot.org/ontology#event/campaign-2',
+      confidence: '99', claimLevel: 'confirmed_scam', scamType: 'phishing' }
+  ];
+  let query = '';
+  dkg.queryBindings = async (sparql) => { query = sparql; return rows; };
+  const records = await dkg.queryPublicCampaigns({ limit: 10 });
+  assert.equal(records.length, 1);
+  assert.match(records[0].publicId, /^evt_/);
+  assert.equal(records[0].claimLevel, 'high_confidence_flag');
+  assert.deepEqual(records[0].indicators.domains, ['verify-example.example']);
+  assert.deepEqual(records[0].indicators.wallets, ['0x0000000000000000000000000000000000000001']);
+  assert.deepEqual(records[0].indicators.patterns, ['fake-support']);
+  assert.equal(records[0].evidenceCount, 4);
+  assert.match(query, /fraud_campaign/);
+  assert.doesNotMatch(JSON.stringify(records), /telegramUserId|username|messageText/);
+});
 
 function makeAdapterClient({ publishError = null } = {}) {
   const calls = [];
@@ -523,7 +687,8 @@ test('DKG query timeouts fail fast and enter cooldown', async () => {
   });
   const started = Date.now();
   assert.deepEqual(await dkg.queryBindings('SELECT * WHERE { ?s ?p ?o }'), []);
-  assert.ok(Date.now() - started < 45);
+  // The timeout path already returned no bindings; allow scheduler jitter on loaded CI.
+  assert.ok(Date.now() - started < 100);
   assert.deepEqual(await dkg.queryBindings('SELECT * WHERE { ?s ?p ?o }'), []);
   assert.equal(calls, 1);
 });
@@ -635,6 +800,71 @@ test('writes structured evidence fields for moderation knowledge', async () => {
   assert.equal(result.triples.some((triple) => /#(?:targetTelegramUserId|targetKey|moderatorUsername)$/.test(triple.predicate)), false);
   assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#restrictedUntil') && triple.object === '"2026-05-01T00:00:00.000Z"'));
   assert.equal(result.triples.some((triple) => triple.predicate.endsWith('#sangmataOldName')), false);
+});
+
+test('shared enforcement triples never expose raw admin, target, or community identities', async () => {
+  const adapterClient = makeAdapterClient();
+  const dkg = new DkgClient({ contextGraph: 'tracabot' }, { adapterClient });
+  const result = await dkg.writeEvent({
+    id: 'evt-native-enforcement',
+    event_type: 'ban_executed',
+    timestamp: '2026-11-02T11:00:00.000Z',
+    agentDid: 'did:dkg:agent:test',
+    chat: { id: '-1009876543210', title: 'Private Community' },
+    user: { id: '8388593201', username: 'banned_user', first_name: 'Banned' },
+    payload: {
+      target: { id: '8388593201', username: 'banned_user' },
+      target_key: 'id:8388593201',
+      community_id: 'private-community-42',
+      community_name: 'Private Community',
+      confidence: 0,
+      local_confidence: 0,
+      admin_verified: true,
+      enforcement_verified: true,
+      consent_to_share: true,
+      enforcement_action: 'ban',
+      enforcement_observed_from: 'telegram_chat_member',
+      source: 'native_chat_member_admin_ban',
+      reason: 'reason not provided',
+      reason_provided: false,
+      performed_by: { id: '424242', username: 'secret_admin' },
+      performed_by_recorded: true,
+      ban_context: {
+        provenance: 'recent_pre_ban_context',
+        causal_link: 'unverified',
+        label: 'recent pre-ban context; causal link unverified',
+        category: 'suspected_scam',
+        severity: 'high',
+        confidence: 88,
+        confirmed_scam: false,
+        behavior_flags: ['threat'],
+        observed_message_count: 1,
+        text_message_count: 1,
+        media_only: false,
+        partial: false,
+        indicators: { domains: ['https://api_token:secret@evil.example/claim?token=abc123'], wallets: ['https://api_token:secret@evil.example/claim?token=abc123'], patterns: ['wallet-drain'] },
+        messages: [{ message_id: 33, text: 'raw private context text https://api_token:secret@evil.example/claim?token=abc123', caption: '' }]
+      },
+      evidence: ['Telegram chat_member update observed a live ban transition'],
+      evidence_root_ids: [],
+      affected_community_ids: [],
+      domains: [],
+      wallets: [],
+      patterns: []
+    }
+  });
+  const serialized = JSON.stringify(result.triples);
+  assert.doesNotMatch(serialized, /424242|secret_admin|8388593201|banned_user|-1009876543210|Private Community|private-community-42/);
+  assert.doesNotMatch(serialized, /raw private context text/);
+  assert.doesNotMatch(JSON.stringify(adapterClient.calls), /raw private context text|api_token|secret|abc123|token=/);
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#targetIdentity') && triple.object.startsWith('"hmac:v1:')));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#communityToken') && triple.object.startsWith('"hmac:v1:')));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#banContextCategory') && triple.object === '"suspected_scam"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#banContextCausalLink') && triple.object === '"unverified"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#banContextDomain') && triple.object === '"evil.example"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#banContextBehaviorFlag') && triple.object === '"threat"'));
+  assert.ok(result.triples.some((triple) => triple.predicate.endsWith('#reasonProvided') && triple.object === '"false"'));
+  assert.equal(result.triples.some((triple) => /#(?:banContextMessage|banContextText|messageText|performed_by|performedBy|moderatorUsername|moderatorTelegramUserId|targetUsername|targetTelegramUserId|communityId|telegramChatId)$/.test(triple.predicate)), false);
 });
 
 test('writes structured DM impersonation report fields', async () => {

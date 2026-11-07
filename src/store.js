@@ -5,7 +5,13 @@ import { DatabaseSync } from 'node:sqlite';
 
 const OBSERVED_MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const OBSERVED_MESSAGE_MAX_PER_USER = 100;
+const OBSERVED_MESSAGE_TEXT_MAX = 2000;
+const BAN_CONTEXT_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 const CLAIM_TTL_MS = 5 * 60 * 1000;
+
+function boundedMessageText(value = '') {
+  return String(value || '').slice(0, OBSERVED_MESSAGE_TEXT_MAX);
+}
 
 function sqlitePath(path) {
   return path.endsWith('.jsonl') ? path.replace(/\.jsonl$/i, '.sqlite') : path;
@@ -25,6 +31,7 @@ export class EventStore {
     this.db = new DatabaseSync(this.path);
     this.eventsCache = null;
     this.eventsDataVersion = null;
+    this.lastContextPruneAt = 0;
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = NORMAL;
@@ -81,6 +88,10 @@ export class EventStore {
         user_id TEXT NOT NULL,
         message_id INTEGER NOT NULL,
         observed_at TEXT NOT NULL,
+        text TEXT,
+        caption TEXT,
+        has_media INTEGER NOT NULL DEFAULT 0,
+        message_date INTEGER,
         PRIMARY KEY (chat_id, user_id, message_id)
       ) STRICT;
       CREATE TABLE IF NOT EXISTS cooldowns (
@@ -97,6 +108,7 @@ export class EventStore {
     this.migrateSchema();
     this.insertEvent = this.db.prepare('INSERT OR IGNORE INTO events (id, event_type, timestamp, dedupe_key, source_update_id, body) VALUES (?, ?, ?, ?, ?, ?)');
     this.importLegacy();
+    this.maybePruneExpiredContext({ force: true });
   }
 
   migrateSchema() {
@@ -105,6 +117,11 @@ export class EventStore {
     if (!eventColumns.has('source_update_id')) this.db.exec('ALTER TABLE events ADD COLUMN source_update_id INTEGER');
     const candidateColumns = new Set(this.db.prepare('PRAGMA table_info(ban_candidates)').all().map((column) => column.name));
     if (!candidateColumns.has('review_started_at')) this.db.exec('ALTER TABLE ban_candidates ADD COLUMN review_started_at TEXT');
+    const observedColumns = new Set(this.db.prepare('PRAGMA table_info(observed_messages)').all().map((column) => column.name));
+    if (!observedColumns.has('text')) this.db.exec('ALTER TABLE observed_messages ADD COLUMN text TEXT');
+    if (!observedColumns.has('caption')) this.db.exec('ALTER TABLE observed_messages ADD COLUMN caption TEXT');
+    if (!observedColumns.has('has_media')) this.db.exec('ALTER TABLE observed_messages ADD COLUMN has_media INTEGER NOT NULL DEFAULT 0');
+    if (!observedColumns.has('message_date')) this.db.exec('ALTER TABLE observed_messages ADD COLUMN message_date INTEGER');
     this.db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS events_dedupe_key ON events(dedupe_key) WHERE dedupe_key IS NOT NULL;
       PRAGMA user_version = 2;
@@ -155,6 +172,7 @@ export class EventStore {
       JSON.stringify(event)
     );
     if (Number(result.changes || 0) > 0) this.eventsCache = null;
+    this.maybePruneExpiredContext();
     return { event, inserted: Number(result.changes || 0) > 0 };
   }
 
@@ -350,16 +368,33 @@ export class EventStore {
     this.db.prepare('INSERT INTO metrics (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value=value+excluded.value').run(name, Number(amount));
   }
 
-  rememberMessage(chatId, userId, messageId) {
+  rememberMessage(chatId, userId, messageId, details = {}) {
     const normalizedChatId = String(chatId);
     const normalizedUserId = String(userId);
     const now = new Date();
+    const messageDate = Number(details.date);
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.prepare('DELETE FROM observed_messages WHERE observed_at < ?')
         .run(new Date(now.getTime() - OBSERVED_MESSAGE_TTL_MS).toISOString());
-      this.db.prepare('INSERT OR IGNORE INTO observed_messages (chat_id, user_id, message_id, observed_at) VALUES (?, ?, ?, ?)')
-        .run(normalizedChatId, normalizedUserId, Number(messageId), now.toISOString());
+      this.db.prepare(`
+        INSERT INTO observed_messages (chat_id, user_id, message_id, observed_at, text, caption, has_media, message_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(chat_id, user_id, message_id) DO UPDATE SET
+          text = COALESCE(NULLIF(excluded.text, ''), observed_messages.text),
+          caption = COALESCE(NULLIF(excluded.caption, ''), observed_messages.caption),
+          has_media = MAX(observed_messages.has_media, excluded.has_media),
+          message_date = COALESCE(excluded.message_date, observed_messages.message_date)
+      `).run(
+        normalizedChatId,
+        normalizedUserId,
+        Number(messageId),
+        now.toISOString(),
+        boundedMessageText(details.text),
+        boundedMessageText(details.caption),
+        details.hasMedia === true ? 1 : 0,
+        Number.isFinite(messageDate) && messageDate > 0 ? messageDate : null
+      );
       this.db.prepare(`
         DELETE FROM observed_messages
         WHERE chat_id = ? AND user_id = ? AND message_id NOT IN (
@@ -374,7 +409,76 @@ export class EventStore {
       this.db.exec('ROLLBACK');
       throw error;
     }
+    this.maybePruneExpiredContext();
   }
+
+  maybePruneExpiredContext({ now = Date.now(), force = false } = {}) {
+    if (!force && now - this.lastContextPruneAt < BAN_CONTEXT_PRUNE_INTERVAL_MS) return { observedMessages: 0, banContexts: 0 };
+    this.lastContextPruneAt = now;
+    return {
+      observedMessages: this.pruneExpiredObservedMessages(),
+      banContexts: this.pruneBanContextText()
+    };
+  }
+
+  pruneExpiredObservedMessages(maxAgeMs = OBSERVED_MESSAGE_TTL_MS) {
+    const result = this.db.prepare('DELETE FROM observed_messages WHERE observed_at < ?')
+      .run(new Date(Date.now() - maxAgeMs).toISOString());
+    return Number(result.changes || 0);
+  }
+
+  recentMessages(chatId, userId, { before, since, limit = 8 } = {}) {
+    const beforeSeconds = Number(before);
+    const sinceSeconds = Number(since);
+    if (!Number.isFinite(beforeSeconds)) return [];
+    return this.db.prepare(`
+      SELECT message_id, text, caption, has_media, message_date, observed_at
+      FROM observed_messages
+      WHERE chat_id = ? AND user_id = ? AND message_date IS NOT NULL
+        AND message_date <= ? AND message_date >= ?
+      ORDER BY message_date DESC, message_id DESC
+      LIMIT ?
+    `).all(
+      String(chatId),
+      String(userId),
+      beforeSeconds,
+      Number.isFinite(sinceSeconds) ? sinceSeconds : beforeSeconds,
+      Math.min(OBSERVED_MESSAGE_MAX_PER_USER, Math.max(1, Number(limit) || 8))
+    ).map((row) => ({
+      message_id: Number(row.message_id),
+      text: String(row.text || ''),
+      caption: String(row.caption || ''),
+      has_media: Number(row.has_media) === 1,
+      message_date: Number(row.message_date),
+      observed_at: row.observed_at
+    }));
+  }
+
+  pruneBanContextText(maxAgeMs = OBSERVED_MESSAGE_TTL_MS) {
+    const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+    const rows = this.db.prepare(`
+      SELECT sequence, body FROM events
+      WHERE event_type = 'ban_executed' AND timestamp < ? AND body LIKE '%"ban_context"%'
+    `).all(cutoff);
+    let changed = 0;
+    for (const row of rows) {
+      const event = JSON.parse(row.body);
+      const messages = event.payload?.ban_context?.messages;
+      if (!Array.isArray(messages) || !messages.some((message) => message.text || message.caption)) continue;
+      event.payload.ban_context.messages = messages.map((message) => ({
+        ...message,
+        text: '',
+        caption: '',
+        text_redacted: true
+      }));
+      event.payload.ban_context.text_redacted = true;
+      this.db.prepare('UPDATE events SET body = ? WHERE sequence = ?').run(JSON.stringify(event), row.sequence);
+      changed += 1;
+    }
+    if (changed) this.eventsCache = null;
+    return changed;
+  }
+
 
   knownMessageIds(chatId, userId) {
     const cutoff = new Date(Date.now() - OBSERVED_MESSAGE_TTL_MS).toISOString();

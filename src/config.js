@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
+import { createPublicKey } from 'node:crypto';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 
@@ -10,6 +11,27 @@ function parseBoolean(value, fallback = false) {
   if (/^(true|1|yes)$/i.test(value)) return true;
   if (/^(false|0|no)$/i.test(value)) return false;
   throw new Error(`Invalid boolean value: ${value}`);
+}
+
+function readOptionalFile(path = '') {
+  const value = String(path || '').trim();
+  if (!value) return '';
+  const resolved = resolve(value);
+  if (!existsSync(resolved)) throw new Error(`configured key file does not exist: ${value}`);
+  return readFileSync(resolved, 'utf8');
+}
+
+function assertEd25519KeyMaterial(value = '', label = 'creator curator key') {
+  if (!value) return;
+  let key;
+  try {
+    key = createPublicKey(value);
+  } catch {
+    throw new Error(`${label} must be a valid PEM key`);
+  }
+  if (key.asymmetricKeyType !== 'ed25519') {
+    throw new Error(`${label} must be an Ed25519 key`);
+  }
 }
 
 function readLocalDkgToken() {
@@ -40,6 +62,36 @@ function parseChallengeBank(value = '') {
   }
 }
 
+function parseChatIdList(value = '') {
+  const items = String(value || '')
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const invalid = items.filter((item) => !/^-?\d{4,24}$/.test(item));
+  if (invalid.length) throw new Error(`TRACABOT_JOIN_AUTO_REMOVE_CHATS must contain numeric Telegram chat IDs; got ${invalid.join(', ')}`);
+  return [...new Set(items)];
+}
+
+function parseTrustedSources(value = '') {
+  return [...new Set(String(value || '')
+    .split(/[\s,]+/)
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean)
+    .map((item) => item.slice(0, 160)))]
+    .slice(0, 50);
+}
+
+function parseTrustedLayers(value = '') {
+  const supported = new Set(['verified-memory', 'local', 'shared-working-memory', 'creator-curator']);
+  const layers = String(value || 'local')
+    .split(/[\s,]+/)
+    .map((item) => item.trim().toLowerCase().replace(/_/g, '-'))
+    .filter(Boolean);
+  const unknown = layers.filter((layer) => !supported.has(layer));
+  if (unknown.length) throw new Error(`TRACABOT_JOIN_TRUSTED_LAYERS supports only verified-memory, local, shared-working-memory, creator-curator; got ${unknown.join(', ')}`);
+  return [...new Set(layers)];
+}
+
 function parseKnownCampaignPatterns(value = '') {
   const raw = String(value || '').trim();
   if (!raw) return [];
@@ -47,6 +99,29 @@ function parseKnownCampaignPatterns(value = '') {
     .split(/[\n,|]+/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function parseCommunityTokens(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`TRACABOT_COMMUNITY_TOKENS must be a JSON array: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!Array.isArray(parsed)) throw new Error('TRACABOT_COMMUNITY_TOKENS must be a JSON array');
+  return parsed.map((entry, index) => {
+    const token = String(entry?.token || '').trim();
+    const communityId = String(entry?.communityId || entry?.community_id || '').trim();
+    if (token.length < 16) throw new Error(`TRACABOT_COMMUNITY_TOKENS[${index}].token must be at least 16 characters`);
+    if (!communityId || communityId.length > 128) throw new Error(`TRACABOT_COMMUNITY_TOKENS[${index}].communityId must be 1-128 characters`);
+    const scopes = Array.isArray(entry?.scopes) && entry.scopes.length ? entry.scopes : ['evidence:write'];
+    if (scopes.some((scope) => !['evidence:write'].includes(scope))) {
+      throw new Error(`TRACABOT_COMMUNITY_TOKENS[${index}].scopes supports only evidence:write`);
+    }
+    return { token, communityId, name: String(entry?.name || '').trim().slice(0, 120), instanceId: String(entry?.instanceId || entry?.instance_id || '').trim().slice(0, 64), scopes: [...new Set(scopes)] };
+  });
 }
 
 export function loadConfig(env = process.env) {
@@ -109,7 +184,118 @@ export function loadConfig(env = process.env) {
   const channelMemoryMaxTextChars = Number(env.TRACABOT_CHANNEL_MEMORY_MAX_TEXT_CHARS || 1000);
   const wmArtifactMinConfidence = Number(env.TRACABOT_WM_ARTIFACT_MIN_CONFIDENCE || 40);
   const wmArtifactMaxTextChars = Number(env.TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS || 700);
+  const banContextMaxMessages = Number(env.TRACABOT_BAN_CONTEXT_MAX_MESSAGES || 8);
+  const banContextMaxAgeMinutes = Number(env.TRACABOT_BAN_CONTEXT_MAX_AGE_MINUTES || 60);
+  const banContextMaxTextChars = Number(env.TRACABOT_BAN_CONTEXT_MAX_TEXT_CHARS || 1000);
   const pendingReviewNotificationIntervalHours = Number(env.TRACABOT_PENDING_REVIEW_NOTIFICATION_INTERVAL_HOURS || 12);
+  const instanceId = String(env.TRACABOT_INSTANCE_ID || '').trim();
+  if (instanceId && !/^[A-Za-z0-9._-]{1,64}$/.test(instanceId)) {
+    throw new Error('TRACABOT_INSTANCE_ID must be 1-64 characters using letters, numbers, dots, underscores, or hyphens');
+  }
+  const joinAutoRemove = parseBoolean(env.TRACABOT_JOIN_AUTO_REMOVE, false);
+  const joinAutoRemoveChats = parseChatIdList(env.TRACABOT_JOIN_AUTO_REMOVE_CHATS || '');
+  const joinEvidenceMaxAgeDays = Number(env.TRACABOT_JOIN_EVIDENCE_MAX_AGE_DAYS || 180);
+  if (!Number.isFinite(joinEvidenceMaxAgeDays) || joinEvidenceMaxAgeDays < 1 || joinEvidenceMaxAgeDays > 3650) {
+    throw new Error('TRACABOT_JOIN_EVIDENCE_MAX_AGE_DAYS must be a number from 1 to 3650');
+  }
+  const joinMinConfirmedRoots = Number(env.TRACABOT_JOIN_MIN_CONFIRMED_ROOTS || 1);
+  if (!Number.isFinite(joinMinConfirmedRoots) || joinMinConfirmedRoots < 1 || joinMinConfirmedRoots > 5) {
+    throw new Error('TRACABOT_JOIN_MIN_CONFIRMED_ROOTS must be a number from 1 to 5');
+  }
+  const joinTrustedLayers = parseTrustedLayers(env.TRACABOT_JOIN_TRUSTED_LAYERS || '');
+  const joinTrustedSources = parseTrustedSources(env.TRACABOT_JOIN_TRUSTED_SOURCES || '');
+  const submitSharedEvidence = parseBoolean(env.TRACABOT_SUBMIT_SHARED_EVIDENCE, false);
+  const creatorSubmitUrl = String(env.TRACABOT_CREATOR_SUBMIT_URL || '').trim();
+  if (creatorSubmitUrl) {
+    let parsed;
+    try { parsed = new URL(creatorSubmitUrl); } catch { throw new Error('TRACABOT_CREATOR_SUBMIT_URL must be a valid http(s) URL'); }
+    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('TRACABOT_CREATOR_SUBMIT_URL must use http or https');
+  }
+  const creatorSubmitToken = String(env.TRACABOT_CREATOR_SUBMIT_TOKEN || '').trim();
+  if (creatorSubmitToken && creatorSubmitToken.length < 16) {
+    throw new Error('TRACABOT_CREATOR_SUBMIT_TOKEN must be at least 16 characters when configured');
+  }
+  if (submitSharedEvidence && (!creatorSubmitUrl || !creatorSubmitToken)) {
+    throw new Error('TRACABOT_SUBMIT_SHARED_EVIDENCE=true requires TRACABOT_CREATOR_SUBMIT_URL and TRACABOT_CREATOR_SUBMIT_TOKEN');
+  }
+  const creatorCuratorUrl = String(env.TRACABOT_CREATOR_CURATOR_URL || '').trim().replace(/\/+$/, '');
+  if (creatorCuratorUrl) {
+    let parsed;
+    try { parsed = new URL(creatorCuratorUrl); } catch { throw new Error('TRACABOT_CREATOR_CURATOR_URL must be a valid http(s) URL'); }
+    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('TRACABOT_CREATOR_CURATOR_URL must use http or https');
+  }
+  const creatorCuratorPublicKey = String(env.TRACABOT_CREATOR_CURATOR_PUBLIC_KEY || '').trim()
+    || readOptionalFile(env.TRACABOT_CREATOR_CURATOR_PUBLIC_KEY_PATH);
+  if (creatorCuratorUrl && !creatorCuratorPublicKey) {
+    throw new Error('TRACABOT_CREATOR_CURATOR_URL requires TRACABOT_CREATOR_CURATOR_PUBLIC_KEY or TRACABOT_CREATOR_CURATOR_PUBLIC_KEY_PATH');
+  }
+  const creatorCuratorPrivateKey = String(env.TRACABOT_CREATOR_CURATOR_PRIVATE_KEY || '').trim()
+    || readOptionalFile(env.TRACABOT_CREATOR_CURATOR_PRIVATE_KEY_PATH);
+  assertEd25519KeyMaterial(creatorCuratorPublicKey, 'TRACABOT_CREATOR_CURATOR_PUBLIC_KEY');
+  assertEd25519KeyMaterial(creatorCuratorPrivateKey, 'TRACABOT_CREATOR_CURATOR_PRIVATE_KEY');
+  const creatorCuratorToken = String(env.TRACABOT_CREATOR_CURATOR_TOKEN || '').trim();
+  if (creatorCuratorToken && creatorCuratorToken.length < 16) {
+    throw new Error('TRACABOT_CREATOR_CURATOR_TOKEN must be at least 16 characters when configured');
+  }
+  const creatorCuratorReadToken = String(env.TRACABOT_CREATOR_CURATOR_READ_TOKEN || '').trim();
+  if (creatorCuratorReadToken && creatorCuratorReadToken.length < 16) {
+    throw new Error('TRACABOT_CREATOR_CURATOR_READ_TOKEN must be at least 16 characters when configured');
+  }
+  if (creatorCuratorUrl && !(creatorCuratorReadToken || creatorCuratorToken)) {
+    throw new Error('TRACABOT_CREATOR_CURATOR_URL requires TRACABOT_CREATOR_CURATOR_READ_TOKEN or TRACABOT_CREATOR_CURATOR_TOKEN');
+  }
+  if ((creatorCuratorPrivateKey || creatorCuratorToken) && !creatorCuratorPrivateKey) {
+    throw new Error('creator curator API requires TRACABOT_CREATOR_CURATOR_PRIVATE_KEY or TRACABOT_CREATOR_CURATOR_PRIVATE_KEY_PATH');
+  }
+  const creatorCuratorIssuer = String(env.TRACABOT_CREATOR_CURATOR_ISSUER || 'tracabot-creator-curator').trim();
+  if (creatorCuratorIssuer.length < 3 || creatorCuratorIssuer.length > 120) {
+    throw new Error('TRACABOT_CREATOR_CURATOR_ISSUER must be 3-120 characters');
+  }
+  const creatorCuratorMinConfidence = Number(env.TRACABOT_CREATOR_CURATOR_MIN_CONFIDENCE || 90);
+  if (!Number.isFinite(creatorCuratorMinConfidence) || creatorCuratorMinConfidence < 50 || creatorCuratorMinConfidence > 100) {
+    throw new Error('TRACABOT_CREATOR_CURATOR_MIN_CONFIDENCE must be a number from 50 to 100');
+  }
+  const creatorCuratorMinRoots = Number(env.TRACABOT_CREATOR_CURATOR_MIN_ROOTS || 1);
+  if (!Number.isFinite(creatorCuratorMinRoots) || creatorCuratorMinRoots < 1 || creatorCuratorMinRoots > 5) {
+    throw new Error('TRACABOT_CREATOR_CURATOR_MIN_ROOTS must be a number from 1 to 5');
+  }
+  const creatorCuratorMaxAgeDays = Number(env.TRACABOT_CREATOR_CURATOR_MAX_AGE_DAYS || 180);
+  if (!Number.isFinite(creatorCuratorMaxAgeDays) || creatorCuratorMaxAgeDays < 1 || creatorCuratorMaxAgeDays > 3650) {
+    throw new Error('TRACABOT_CREATOR_CURATOR_MAX_AGE_DAYS must be a number from 1 to 3650');
+  }
+  const creatorCuratorTimeoutMs = Number(env.TRACABOT_CREATOR_CURATOR_TIMEOUT_MS || 4000);
+  if (!Number.isFinite(creatorCuratorTimeoutMs) || creatorCuratorTimeoutMs < 500 || creatorCuratorTimeoutMs > 30000) {
+    throw new Error('TRACABOT_CREATOR_CURATOR_TIMEOUT_MS must be a number from 500 to 30000');
+  }
+  const creatorCuratorReadRateLimitPerHour = Number(env.TRACABOT_CREATOR_CURATOR_READ_RATE_LIMIT_PER_HOUR || 120);
+  if (!Number.isFinite(creatorCuratorReadRateLimitPerHour) || creatorCuratorReadRateLimitPerHour < 1 || creatorCuratorReadRateLimitPerHour > 10000) {
+    throw new Error('TRACABOT_CREATOR_CURATOR_READ_RATE_LIMIT_PER_HOUR must be a number from 1 to 10000');
+  }
+  const creatorCuratorWriteRateLimitPerHour = Number(env.TRACABOT_CREATOR_CURATOR_WRITE_RATE_LIMIT_PER_HOUR || 30);
+  if (!Number.isFinite(creatorCuratorWriteRateLimitPerHour) || creatorCuratorWriteRateLimitPerHour < 1 || creatorCuratorWriteRateLimitPerHour > 10000) {
+    throw new Error('TRACABOT_CREATOR_CURATOR_WRITE_RATE_LIMIT_PER_HOUR must be a number from 1 to 10000');
+  }
+  const creatorCuratorStorePath = String(env.TRACABOT_CREATOR_CURATOR_STORE || './data/creator-attestations.json').trim();
+  const appealMaxPerHour = Number(env.TRACABOT_APPEAL_MAX_PER_HOUR || 3);
+  if (!Number.isFinite(appealMaxPerHour) || appealMaxPerHour < 1 || appealMaxPerHour > 20) {
+    throw new Error('TRACABOT_APPEAL_MAX_PER_HOUR must be a number from 1 to 20');
+  }
+  const appealDedupHours = Number(env.TRACABOT_APPEAL_DEDUP_HOURS || 24);
+  if (!Number.isFinite(appealDedupHours) || appealDedupHours < 1 || appealDedupHours > 168) {
+    throw new Error('TRACABOT_APPEAL_DEDUP_HOURS must be a number from 1 to 168');
+  }
+  const appealMaxReasonChars = Number(env.TRACABOT_APPEAL_MAX_REASON_CHARS || 500);
+  if (!Number.isFinite(appealMaxReasonChars) || appealMaxReasonChars < 80 || appealMaxReasonChars > 1000) {
+    throw new Error('TRACABOT_APPEAL_MAX_REASON_CHARS must be a number from 80 to 1000');
+  }
+  const llmTimeoutMs = Number(env.TRACABOT_LLM_TIMEOUT_MS || 30000);
+  if (!Number.isFinite(llmTimeoutMs) || llmTimeoutMs < 1000 || llmTimeoutMs > 120000) {
+    throw new Error('TRACABOT_LLM_TIMEOUT_MS must be a number from 1000 to 120000');
+  }
+  const llmMaxTokens = Number(env.TRACABOT_LLM_MAX_TOKENS || 220);
+  if (!Number.isFinite(llmMaxTokens) || llmMaxTokens < 32 || llmMaxTokens > 2000) {
+    throw new Error('TRACABOT_LLM_MAX_TOKENS must be a number from 32 to 2000');
+  }
   const joinChallengeMode = /^(memory-card|qa|ual)$/i.test(env.TRACABOT_JOIN_CHALLENGE_MODE || '') ? env.TRACABOT_JOIN_CHALLENGE_MODE.toLowerCase() : 'memory-card';
   const joinChallengeQaBank = parseChallengeBank(env.TRACABOT_JOIN_CHALLENGE_QA_BANK || '');
   const dkgMode = env.TRACABOT_DKG_MODE || 'openclaw-adapter';
@@ -124,6 +310,45 @@ export function loadConfig(env = process.env) {
   const knownCampaignPatterns = parseKnownCampaignPatterns(env.TRACABOT_KNOWN_CAMPAIGN_PATTERNS || '');
   if (!Number.isFinite(knownCampaignMinBanRoots) || knownCampaignMinBanRoots < 1 || knownCampaignMinBanRoots > 20) {
     throw new Error('TRACABOT_KNOWN_CAMPAIGN_MIN_BAN_ROOTS must be a number from 1 to 20');
+  }
+  const communityTokens = parseCommunityTokens(env.TRACABOT_COMMUNITY_TOKENS || '');
+  const evidenceHighConfidenceThreshold = Number(env.TRACABOT_EVIDENCE_HIGH_CONFIDENCE_THRESHOLD || 85);
+  const evidenceLocalConfidenceThreshold = Number(env.TRACABOT_EVIDENCE_LOCAL_CONFIDENCE_THRESHOLD || 60);
+  const evidenceMinIndependentSignals = Number(env.TRACABOT_EVIDENCE_MIN_INDEPENDENT_SIGNALS || 2);
+  const evidenceMinIndependentCommunities = Number(env.TRACABOT_EVIDENCE_MIN_INDEPENDENT_COMMUNITIES || 2);
+  const evidencePromotionThreshold = Number(env.TRACABOT_EVIDENCE_PROMOTION_THRESHOLD || 85);
+  const autoPromoteIntervalMs = Number(env.TRACABOT_AUTO_PROMOTE_INTERVAL_MS || 300000);
+  const publicPort = Number(env.TRACABOT_PUBLIC_PORT || 8787);
+  const publicRateLimitPerHour = Number(env.TRACABOT_PUBLIC_RATE_LIMIT_PER_HOUR || 30);
+  const publicJoinRateLimitPerHour = Number(env.TRACABOT_PUBLIC_JOIN_RATE_LIMIT_PER_HOUR || 5);
+  for (const [name, value] of [
+    ['TRACABOT_EVIDENCE_HIGH_CONFIDENCE_THRESHOLD', evidenceHighConfidenceThreshold],
+    ['TRACABOT_EVIDENCE_LOCAL_CONFIDENCE_THRESHOLD', evidenceLocalConfidenceThreshold],
+    ['TRACABOT_EVIDENCE_PROMOTION_THRESHOLD', evidencePromotionThreshold]
+  ]) {
+    if (!Number.isFinite(value) || value < 1 || value > 100) throw new Error(`${name} must be a number from 1 to 100`);
+  }
+  for (const [name, value] of [
+    ['TRACABOT_EVIDENCE_MIN_INDEPENDENT_SIGNALS', evidenceMinIndependentSignals],
+    ['TRACABOT_EVIDENCE_MIN_INDEPENDENT_COMMUNITIES', evidenceMinIndependentCommunities]
+  ]) {
+    if (!Number.isFinite(value) || value < 1 || value > 10) throw new Error(`${name} must be a number from 1 to 10`);
+  }
+  if (!Number.isFinite(autoPromoteIntervalMs) || autoPromoteIntervalMs < 30000) {
+    throw new Error('TRACABOT_AUTO_PROMOTE_INTERVAL_MS must be at least 30000');
+  }
+  if (!Number.isFinite(publicPort) || publicPort < 0 || publicPort > 65535) {
+    throw new Error('TRACABOT_PUBLIC_PORT must be a number from 0 to 65535');
+  }
+  const publicMaxBodyBytes = Number(env.TRACABOT_PUBLIC_MAX_BODY_BYTES || 32768);
+  if (!Number.isFinite(publicMaxBodyBytes) || publicMaxBodyBytes < 1024 || publicMaxBodyBytes > 1048576) {
+    throw new Error('TRACABOT_PUBLIC_MAX_BODY_BYTES must be a number from 1024 to 1048576');
+  }
+  for (const [name, value] of [
+    ['TRACABOT_PUBLIC_RATE_LIMIT_PER_HOUR', publicRateLimitPerHour],
+    ['TRACABOT_PUBLIC_JOIN_RATE_LIMIT_PER_HOUR', publicJoinRateLimitPerHour]
+  ]) {
+    if (!Number.isFinite(value) || value < 1 || value > 10000) throw new Error(`${name} must be a number from 1 to 10000`);
   }
   if (dkgMode !== 'openclaw-adapter') {
     throw new Error('TRACABOT_DKG_MODE currently supports only openclaw-adapter');
@@ -173,6 +398,15 @@ export function loadConfig(env = process.env) {
   if (!Number.isFinite(wmArtifactMaxTextChars) || wmArtifactMaxTextChars < 160 || wmArtifactMaxTextChars > 2000) {
     throw new Error('TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS must be a number from 160 to 2000');
   }
+  if (!Number.isFinite(banContextMaxMessages) || banContextMaxMessages < 1 || banContextMaxMessages > 20) {
+    throw new Error('TRACABOT_BAN_CONTEXT_MAX_MESSAGES must be a number from 1 to 20');
+  }
+  if (!Number.isFinite(banContextMaxAgeMinutes) || banContextMaxAgeMinutes < 5 || banContextMaxAgeMinutes > 1440) {
+    throw new Error('TRACABOT_BAN_CONTEXT_MAX_AGE_MINUTES must be a number from 5 to 1440');
+  }
+  if (!Number.isFinite(banContextMaxTextChars) || banContextMaxTextChars < 160 || banContextMaxTextChars > 2000) {
+    throw new Error('TRACABOT_BAN_CONTEXT_MAX_TEXT_CHARS must be a number from 160 to 2000');
+  }
   if (!Number.isFinite(pendingReviewNotificationIntervalHours) || pendingReviewNotificationIntervalHours < 1 || pendingReviewNotificationIntervalHours > 168) {
     throw new Error('TRACABOT_PENDING_REVIEW_NOTIFICATION_INTERVAL_HOURS must be a number from 1 to 168');
   }
@@ -201,6 +435,7 @@ export function loadConfig(env = process.env) {
     communityId: env.TRACABOT_COMMUNITY_ID || '',
     communityName: env.TRACABOT_COMMUNITY_NAME || '',
     communityType: env.TRACABOT_COMMUNITY_TYPE || 'telegram_group',
+    instanceId,
     policyId: env.TRACABOT_POLICY_ID || 'default',
     dkgMode,
     dkgNodeUrl: env.DKG_NODE_URL || 'http://127.0.0.1:9200',
@@ -221,6 +456,8 @@ export function loadConfig(env = process.env) {
     llmBaseUrl: env.TRACABOT_LLM_BASE_URL || '',
     llmApiKey: env.TRACABOT_LLM_API_KEY || '',
     llmModel: env.TRACABOT_LLM_MODEL || '',
+    llmTimeoutMs,
+    llmMaxTokens,
     openClawConfigPath: env.OPENCLAW_CONFIG_PATH || resolve(homedir(), '.openclaw', 'openclaw.json'),
     conversationMinConfidence,
     proactiveReplyThreshold,
@@ -238,6 +475,31 @@ export function loadConfig(env = process.env) {
     joinChallengeDeleteOnPass: parseBoolean(env.TRACABOT_JOIN_CHALLENGE_DELETE_ON_PASS, true),
     joinChallengeDeleteBadAttempts: parseBoolean(env.TRACABOT_JOIN_CHALLENGE_DELETE_BAD_ATTEMPTS, true),
     joinChallengeDkgValidate: parseBoolean(env.TRACABOT_JOIN_CHALLENGE_DKG_VALIDATE, true),
+    joinAutoRemove,
+    joinAutoRemoveChats,
+    joinEvidenceMaxAgeDays,
+    joinMinConfirmedRoots,
+    joinTrustedLayers,
+    joinTrustedSources,
+    submitSharedEvidence,
+    creatorSubmitUrl,
+    creatorSubmitToken,
+    creatorCuratorUrl,
+    creatorCuratorPublicKey,
+    creatorCuratorPrivateKey,
+    creatorCuratorToken,
+    creatorCuratorReadToken,
+    creatorCuratorIssuer,
+    creatorCuratorMinConfidence,
+    creatorCuratorMinRoots,
+    creatorCuratorMaxAgeDays,
+    creatorCuratorTimeoutMs,
+    creatorCuratorStorePath,
+    creatorCuratorReadRateLimitPerHour,
+    creatorCuratorWriteRateLimitPerHour,
+    appealMaxPerHour,
+    appealDedupHours,
+    appealMaxReasonChars,
     autoDeleteBotMessages: parseBoolean(env.TRACABOT_AUTO_DELETE_BOT_MESSAGES, true),
     botMessageTtlSeconds,
     challengeMessageTtlSeconds,
@@ -245,6 +507,10 @@ export function loadConfig(env = process.env) {
     channelMemory: parseBoolean(env.TRACABOT_CHANNEL_MEMORY, true),
     channelMemoryMinConfidence,
     channelMemoryMaxTextChars,
+    banContext: parseBoolean(env.TRACABOT_BAN_CONTEXT, true),
+    banContextMaxMessages,
+    banContextMaxAgeMinutes,
+    banContextMaxTextChars,
     wmArtifacts: parseBoolean(env.TRACABOT_WM_ARTIFACTS, true),
     wmArtifactShareLowConfidence: parseBoolean(env.TRACABOT_WM_ARTIFACT_SHARE_LOW_CONFIDENCE, false),
     wmArtifactRedact: parseBoolean(env.TRACABOT_WM_ARTIFACT_REDACT, true),
@@ -255,7 +521,22 @@ export function loadConfig(env = process.env) {
     dailySafeTipIntervalHours: Number(env.TRACABOT_DAILY_SAFE_TIP_INTERVAL_HOURS ?? 0),
     artefactReviewThreshold: Number(env.TRACABOT_ARTEFACT_REVIEW_THRESHOLD || 70),
     proactiveAlertCrossGroup: parseBoolean(env.TRACABOT_PROACTIVE_ALERT_CROSS_GROUP, true),
-    skillAllowUnauthenticatedWrites: parseBoolean(env.TRACABOT_SKILL_ALLOW_UNAUTHENTICATED_WRITES, false)
+    skillAllowUnauthenticatedWrites: parseBoolean(env.TRACABOT_SKILL_ALLOW_UNAUTHENTICATED_WRITES, false),
+    evidenceHighConfidenceThreshold,
+    evidenceLocalConfidenceThreshold,
+    evidenceMinIndependentSignals,
+    evidenceMinIndependentCommunities,
+    evidencePromotionThreshold,
+    autoPromoteEvidence: parseBoolean(env.TRACABOT_AUTO_PROMOTE_EVIDENCE, true),
+    autoPromoteIntervalMs,
+    publicHost: env.TRACABOT_PUBLIC_HOST || '127.0.0.1',
+    publicPort,
+    publicBaseUrl: env.TRACABOT_PUBLIC_BASE_URL || '',
+    publicReadDkg: parseBoolean(env.TRACABOT_PUBLIC_READ_DKG, true),
+    publicRateLimitPerHour,
+    publicJoinRateLimitPerHour,
+    publicMaxBodyBytes,
+    communityTokens
   };
 }
 
