@@ -1559,31 +1559,37 @@ test('record awaits pending-review notification and reuses stable effect on repl
   assert.equal(calls.filter((call) => call.method === 'sendMessage').length, 1);
 });
 
-test('direct DKG writes respect explicit sharing consent and privacy opt-out', async () => {
+test('explicit writeDkg cannot bypass consent or privacy denial', async () => {
   const { bot, dkgWrites } = makeBot({ canBan: true });
   const chat = { id: -100, type: 'supergroup' };
   const from = { id: 77, username: 'suspect' };
-  await bot.record('fraud_finding', { chat, from, message_id: 90 }, {
+  const deniedConsent = await bot.record('fraud_finding', { chat, from, message_id: 90 }, {
     confidence: 95,
     local_confidence: 80,
     evidence: ['private denial'],
     consent_to_share: false
-  }, {});
-  await bot.record('fraud_finding', { chat, from, message_id: 91 }, {
+  }, { writeDkg: true });
+  const deniedPrivacy = await bot.record('fraud_finding', { chat, from, message_id: 91 }, {
     confidence: 95,
     local_confidence: 80,
     evidence: ['privacy opt-out'],
+    consent_to_share: true,
     privacy_opt_out: true
-  }, {});
+  }, { writeDkg: true });
   assert.equal(dkgWrites.length, 0);
+  assert.equal(deniedConsent.dkg, undefined);
+  assert.equal(deniedPrivacy.dkg, undefined);
+  assert.ok(bot.store.all().some((event) => event.id === deniedConsent.id));
+  assert.ok(bot.store.all().some((event) => event.id === deniedPrivacy.id));
 
-  await bot.record('fraud_finding', { chat, from, message_id: 92 }, {
+  const allowed = await bot.record('fraud_finding', { chat, from, message_id: 92 }, {
     confidence: 95,
     local_confidence: 80,
     evidence: ['intentional native sharing'],
     consent_to_share: true
-  }, {});
+  }, { writeDkg: true });
   assert.equal(dkgWrites.length, 1);
+  assert.equal(dkgWrites[0].id, allowed.id);
   assert.equal(dkgWrites[0].payload.consent_to_share, true);
 });
 

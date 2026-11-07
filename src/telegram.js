@@ -579,8 +579,12 @@ function sangmataTargetFromText(text = '') {
   };
 }
 
+function sharingDenied(payload = {}) {
+  return payload.consent_to_share === false || payload.privacy_opt_out === true;
+}
+
 function hasEvidenceForDkg(eventType = '', payload = {}) {
-  if (payload.consent_to_share === false || payload.privacy_opt_out === true) return false;
+  if (sharingDenied(payload)) return false;
   if (['risk_check', 'risk_query', 'scam_detection'].includes(eventType)) return false;
   if (['watch_started', 'watch_ended', 'reporter_reputation_update'].includes(eventType)) return false;
   if (eventType.startsWith('join_challenge_') && eventType !== 'join_challenge_repeat_failure') return false;
@@ -1671,7 +1675,8 @@ export class TelegramShieldBot {
       }
       return existingEvent;
     }
-    const shouldWriteDkg = writeDkg ?? (!this.config.testMode && hasEvidenceForDkg(eventType, decoratedPayload));
+    const shouldWriteDkg = !sharingDenied(decoratedPayload)
+      && (writeDkg ?? (!this.config.testMode && hasEvidenceForDkg(eventType, decoratedPayload)));
     if (shouldWriteDkg) {
       const dkgStarted = Date.now();
       try {
