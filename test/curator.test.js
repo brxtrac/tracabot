@@ -24,7 +24,7 @@ test('curator only promotes screened evidence after reasoned LLM approval; reuse
     async resolveConversationArtifact(id, options) { calls.push(['resolve', id, Boolean(options?.share)]); }
   };
   try {
-    const opts = { dkg, ledgerPath: join(dir, 'reviews.sqlite'), now: Date.parse('2026-01-01'),
+    const opts = { dkg, ledgerPath: join(dir, 'reviews.sqlite'), policyPath: join(dir, 'missing-policy.md'), now: Date.parse('2026-01-01'),
       reviewer: async () => { reviews++; return approval; } };
     const results = await curateWorkingMemory(opts);
     assert.deepEqual(results.map((item) => item.action), ['promote', 'discard_filtered', 'discard_expired']);
@@ -51,7 +51,7 @@ test('invalid or inconclusive response never shares; bounded LLM requests use me
     assert.deepEqual(result.map((item) => item.action), ['hold', 'budget_deferred']);
     assert.deepEqual(calls, []);
     let invocation;
-    const answer = await reviewDraft(base, { createSession: () => 'ses_synthetic', finishSession: () => {}, runner: (command, args, options) => {
+    const answer = await reviewDraft(base, { cwd: '/synthetic/tracabot', createSession: () => 'ses_synthetic', finishSession: () => {}, runner: (command, args, options) => {
       invocation = { command, args, options };
       const child = new EventEmitter();
       child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
@@ -63,6 +63,7 @@ test('invalid or inconclusive response never shares; bounded LLM requests use me
     } });
     assert.equal(answer.action, 'promote');
     assert.equal(invocation.command, 'opencode');
+    assert.equal(invocation.options.cwd, '/synthetic/tracabot');
     assert.deepEqual(invocation.args.slice(0, 9), ['run', '--session', 'ses_synthetic', '--agent', 'tracabot-curator', '--model', '9router/cx/gpt-6-sol#medium', '--format', 'json']);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
