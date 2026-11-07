@@ -28,4 +28,4 @@ Telegram identifiers, private appeal text, screenshots, or real user data.
 - [ ] Sanitized logs or error output
 
 Security vulnerabilities must be reported privately as described in
-[SECURITY.md](../SECURITY.md), not in this issue.
+[SECURITY.md](../../SECURITY.md), not in this issue.
