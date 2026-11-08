@@ -22,6 +22,7 @@ import { buildAgentIntentPrompt, buildAlertReplyClassifierPrompt, buildGeneralPr
 import { redactedOpenClawStatus } from './openclaw-config.js';
 import { TracabotSkillService } from './skill-service.js';
 import { evaluateEvidence, EVIDENCE_POLICY_VERSION, sharingDeniedInLineage } from './evidence-policy.js';
+import { artifactSharingPolicy } from './artifact-policy.js';
 import { promoteEligibleEvidence } from './evidence-promoter.js';
 import { analyzeBanContext, BAN_CONTEXT_LIMITS, emptyBanContext } from './ban-context.js';
 import { evaluateJoinProtection, PROTECTION_POLICY_VERSION, protectionSummary } from './protection-policy.js';
@@ -3128,14 +3129,21 @@ export class TelegramShieldBot {
     const patterns = risk.patterns?.length ? risk.patterns : extractPatterns(rawText);
     const quality = this.artifactQuality({ risk: { ...risk, domains, wallets, patterns }, text: rawText, artifactKind });
     const confidence = Number(risk.local_confidence || risk.confidence || 0);
+    const sources = sourceEventIds.filter(Boolean);
+    const sharing = artifactSharingPolicy({
+      config: this.config,
+      message,
+      history: this.store.all(),
+      sourceEventIds: sources
+    });
     const stageCandidate = forceDkg || (artifactKind !== 'benign_conversation_flow' && (
       confidence >= 40 || domains.length > 0 || wallets.length > 0 || patterns.length > 0
       || /\b(?:phish|airdrop|verify wallet|fake support|gambling)\b/i.test(rawText)
     ));
     const useful = forceDkg || quality >= 40 || confidence >= (this.config.wmArtifactMinConfidence || 40) || domains.length || wallets.length || patterns.length;
     if (!useful) return null;
-    const commitStamped = forceDkg;
-    const commitReceiptId = commitStamped ? this.commitReceiptId({ artifactKind, quality, risk, sourceEventIds, text: rawText }) : '';
+    const commitStamped = forceDkg && sharing.allowed;
+    const commitReceiptId = commitStamped ? this.commitReceiptId({ artifactKind, quality, risk, sourceEventIds: sources, text: rawText }) : '';
     const normalized = this.redactArtifactText(rawText).toLowerCase().replace(/https?:\/\/\S+/g, '[url]').replace(/\s+/g, ' ').trim();
     const event = await this.record('conversation_artifact', message, {
       ...risk,
@@ -3146,8 +3154,10 @@ export class TelegramShieldBot {
       normalized_text: normalized,
       message_text: this.redactArtifactText(rawText),
       text_fingerprint: textFingerprint(rawText),
-      source_event_ids: sourceEventIds.filter(Boolean),
+      source_event_ids: sources,
       operator_note: operatorNote,
+      consent_to_share: sharing.allowed,
+      privacy_opt_out: !sharing.allowed,
       learning_value: quality >= 70 ? 'high' : quality >= 45 ? 'medium' : 'low',
       teaches_tactics: patterns,
       domains,
@@ -3156,8 +3166,8 @@ export class TelegramShieldBot {
       source_message_id: message.message_id || '',
       expires_at: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(),
       commit_receipt_id: commitReceiptId,
-      commit_policy: commitStamped ? (forceDkg ? 'human_or_admin_verified' : 'artifact_quality_threshold') : 'draft_only',
-      commit_authority: commitStamped ? (forceDkg ? 'admin_review' : 'policy_rule') : '',
+      commit_policy: commitStamped ? 'human_or_admin_verified' : 'draft_only',
+      commit_authority: commitStamped ? 'admin_review' : '',
       publication_status: commitStamped ? 'shared_memory' : 'working_memory',
       lifecycle_stage: commitStamped ? 'shared_memory' : 'working_memory_draft',
       evidence: [
@@ -3167,7 +3177,7 @@ export class TelegramShieldBot {
         operatorNote ? `operator note: ${operatorNote}` : ''
       ].filter(Boolean)
     }, { writeDkg: commitStamped });
-    if (stageCandidate && !commitStamped && !this.config.testMode && this.config.dkgWrites !== false && typeof this.dkg.stageConversationArtifact === 'function') {
+    if (stageCandidate && !commitStamped && sharing.allowed && !this.config.testMode && this.config.dkgWrites !== false && typeof this.dkg.stageConversationArtifact === 'function') {
       try {
         event.wm = await this.dkg.stageConversationArtifact(event);
       } catch (error) {
@@ -7736,7 +7746,7 @@ export class TelegramShieldBot {
       updates = await this.call('getUpdates', {
         offset: this.offset,
         timeout: 25,
-        allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member']
+        allowed_updates: ['message', 'channel_post', 'callback_query', 'chat_member', 'my_chat_member']
       }, { signal });
       this.notePollingSuccess();
     } catch (error) {
@@ -7755,6 +7765,7 @@ export class TelegramShieldBot {
       try {
         if (update.callback_query) await this.handleCallbackQuery(update.callback_query);
         else if (update.message) await this.handleMessage(update.message);
+        else if (update.channel_post) await this.handleMessage(update.channel_post);
         else if (update.chat_member) await this.handleChatMemberUpdate(update.chat_member);
         else if (update.my_chat_member) await this.handleMyChatMemberUpdate(update.my_chat_member);
         const nextOffset = update.update_id + 1;
@@ -7871,7 +7882,7 @@ export class TelegramShieldBot {
       this.offset = this.store.initializePollingOffset?.(this.botKey, this.offset) ?? this.offset;
       return;
     }
-    const updates = await this.call('getUpdates', { offset: -1, limit: 1, timeout: 0, allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member'] }, { signal });
+    const updates = await this.call('getUpdates', { offset: -1, limit: 1, timeout: 0, allowed_updates: ['message', 'channel_post', 'callback_query', 'chat_member', 'my_chat_member'] }, { signal });
     if (updates.length) this.offset = updates[0].update_id + 1;
     this.offset = this.store.initializePollingOffset?.(this.botKey, this.offset) ?? this.offset;
   }

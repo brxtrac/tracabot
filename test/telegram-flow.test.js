@@ -120,6 +120,10 @@ function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = nu
       channelMemory: true,
       channelMemoryMinConfidence: 80,
       channelMemoryMaxTextChars: 1000,
+      wmArtifacts: true,
+      dkgWrites: true,
+      autoPromoteEvidence: true,
+      artifactOptOutChats: [],
       ...configOverrides
     },
     analyzer: analyzerOverride || analyzer,
@@ -664,9 +668,107 @@ test('committed false-positive artifact carries receipt before Shared Memory wri
   await bot.handleMessage({ chat, from: { id: 1, username: 'admin' }, message_id: 35, text: '@tracethembot @guerodelosbajos is not a scammer; SynthID discussion, not impersonation' });
   const artifact = dkgWrites.find((event) => event.event_type === 'conversation_artifact' && event.payload.artifact_kind === 'false_positive_signal');
   assert.ok(artifact);
+  assert.equal(artifact.payload.consent_to_share, true);
+  assert.equal(artifact.payload.privacy_opt_out, false);
   assert.match(artifact.payload.commit_receipt_id, /^commit:/);
   assert.equal(artifact.payload.commit_policy, 'human_or_admin_verified');
   assert.equal(artifact.payload.lifecycle_stage, 'shared_memory');
+});
+
+test('rejected review with a denied source keeps the correction artifact local-only', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: true });
+  const stages = [];
+  bot.dkg.stageConversationArtifact = async (event) => { stages.push(event); return { ok: true }; };
+  const chat = { id: -100, title: 'demo', type: 'supergroup' };
+  bot.store.append({
+    id: 'evt-fp-denied-source',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 86, username: 'guerodelosbajos', is_bot: false },
+    payload: { confidence: 90, scam_type: 'impersonation', privacy_opt_out: true, evidence: ['private appeal material'] }
+  });
+  await bot.handleMessage({ chat, from: { id: 1, username: 'admin' }, message_id: 36, text: '@tracethembot @guerodelosbajos is not a scammer; admin correction' });
+  await new Promise((resolve) => setImmediate(resolve));
+  const artifact = bot.store.all().find((event) => event.event_type === 'conversation_artifact' && event.payload.artifact_kind === 'false_positive_signal');
+  assert.ok(artifact);
+  assert.equal(artifact.payload.consent_to_share, false);
+  assert.equal(artifact.payload.privacy_opt_out, true);
+  assert.equal(artifact.payload.lifecycle_stage, 'working_memory_draft');
+  assert.equal(artifact.payload.commit_receipt_id, '');
+  assert.equal(dkgWrites.some((event) => event.event_type === 'conversation_artifact'), false);
+  assert.equal(stages.length, 0);
+});
+
+test('forceDkg artifact honors a source chat opt-out and never reaches DKG', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: true, configOverrides: { artifactOptOutChats: ['-100'] } });
+  const stages = [];
+  bot.dkg.stageConversationArtifact = async (event) => { stages.push(event); return { ok: true }; };
+  bot.store.append({
+    id: 'evt-source-opted-out',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat: { id: -100, type: 'supergroup' },
+    user: { id: 86, username: 'target', is_bot: false },
+    payload: { confidence: 90, scam_type: 'impersonation' }
+  });
+  const artifact = await bot.recordConversationArtifact(
+    { chat: { id: 1, type: 'private' }, from: { id: 1, username: 'admin' }, message_id: 37 },
+    {
+      risk: { confidence: 80, local_confidence: 80, scam_type: 'false_positive' },
+      text: 'admin correction', artifactKind: 'false_positive_signal',
+      sourceEventIds: ['evt-source-opted-out'], forceDkg: true
+    }
+  );
+  assert.equal(artifact.payload.consent_to_share, false);
+  assert.equal(artifact.payload.privacy_opt_out, true);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'conversation_artifact'), false);
+  assert.equal(stages.length, 0);
+});
+
+test('main poller accepts channel_post and stages one consenting artifact', async () => {
+  const { bot } = makeBot({
+    canBan: false,
+    analyzer: () => ({ is_scam: true, confidence: 88, scam_type: 'phishing', evidence: ['wallet lure'], recommended_action: 'warn' }),
+    dkgIntel: { riskScore: 70, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] },
+    configOverrides: { actionThreshold: 99 }
+  });
+  const stages = [];
+  bot.dkg.stageConversationArtifact = async (event) => { stages.push(event); return { ok: true }; };
+  const originalCall = bot.call;
+  let updatePayload = null;
+  bot.call = async (method, payload) => {
+    if (method === 'getUpdates') {
+      updatePayload = payload;
+      return [{ update_id: 7, channel_post: {
+        message_id: 50, date: Math.floor(Date.now() / 1000),
+        chat: { id: -200, type: 'channel', title: 'public chan' },
+        text: 'Urgent verify your wallet at https://scam.example now'
+      } }];
+    }
+    return originalCall(method, payload);
+  };
+  await bot.pollOnce();
+  assert.ok(updatePayload.allowed_updates.includes('channel_post'));
+  assert.equal(stages.length, 1);
+  assert.equal(stages[0].event_type, 'conversation_artifact');
+  assert.equal(stages[0].payload.consent_to_share, true);
+  assert.equal(stages[0].chat?.type, 'channel');
+});
+
+test('main artifact policy keeps ordinary denied config as a private WM draft', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: false, configOverrides: { autoPromoteEvidence: false } });
+  const stages = [];
+  bot.dkg.stageConversationArtifact = async (event) => { stages.push(event); return { ok: true }; };
+  const artifact = await bot.recordConversationArtifact(
+    { chat: { id: -100, type: 'supergroup' }, from: { id: 42 }, message_id: 51, text: 'verify wallet at https://scam.example' },
+    { risk: { confidence: 88, local_confidence: 88, scam_type: 'phishing' }, text: 'verify wallet at https://scam.example', artifactKind: 'tactic_candidate' }
+  );
+  assert.equal(artifact.payload.consent_to_share, false);
+  assert.equal(artifact.payload.privacy_opt_out, true);
+  assert.equal(artifact.payload.lifecycle_stage, 'working_memory_draft');
+  assert.equal(dkgWrites.some((event) => event.event_type === 'conversation_artifact'), false);
+  assert.equal(stages.length, 0);
 });
 
 test('ordinary scam discussion does not trigger conversational reply', async () => {
@@ -1202,7 +1304,7 @@ test('polling requests chat member updates for joins', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   await bot.pollOnce();
   const poll = calls.find((call) => call.method === 'getUpdates');
-  assert.deepEqual(poll.payload.allowed_updates, ['message', 'callback_query', 'chat_member', 'my_chat_member']);
+  assert.deepEqual(poll.payload.allowed_updates, ['message', 'channel_post', 'callback_query', 'chat_member', 'my_chat_member']);
 });
 
 test('polling HTTP timeout exceeds Telegram long poll with minimum timeout config', async () => {

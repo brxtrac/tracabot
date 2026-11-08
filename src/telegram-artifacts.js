@@ -2,20 +2,7 @@ import { createHash } from 'node:crypto';
 import { analyzeMessage } from './scam-analyzer.js';
 import { extractDomains, extractPatterns, extractWallets, pseudonym } from './dkg-client.js';
 import { reviewBan } from './curator.js';
-
-function artifactSharingAllowed(update, config, message) {
-  if (config.dkgWrites === false || config.wmArtifacts === false) return false;
-  // Absent settings are not authorization. loadConfig supplies explicit true
-  // defaults for the real pipeline; partial configs stay non-shareable.
-  if (config.autoPromoteEvidence !== true) return false;
-  if (message?.consent_to_share === false || message?.privacy_opt_out === true) return false;
-  const optOutChats = new Set((Array.isArray(config.artifactOptOutChats) ? config.artifactOptOutChats : [])
-    .map((value) => String(value)));
-  if (optOutChats.has(String(message?.chat?.id ?? ''))) return false;
-  const isChannel = Boolean(update.channel_post || message?.chat?.type === 'channel');
-  if (isChannel && config.channelMemory !== true) return false;
-  return true;
-}
+import { artifactSharingPolicy } from './artifact-policy.js';
 
 export function artifactFromUpdate(update, config) {
   if (config.wmArtifacts === false || config.dkgWrites === false) return null;
@@ -34,7 +21,7 @@ export function artifactFromUpdate(update, config) {
   const safeText = text.replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[email]')
     .replace(/\+?\d[\d\s().-]{8,}\d/g, '[phone]');
   const id = `tg-${createHash('sha256').update(`${message.chat.id}:${message.message_id}`).digest('hex').slice(0, 24)}`;
-  const sharingAllowed = artifactSharingAllowed(update, config, message);
+  const sharingAllowed = artifactSharingPolicy({ config, message, update }).allowed;
   return {
     id, event_type: 'conversation_artifact', timestamp: new Date(message.date * 1000 || Date.now()).toISOString(),
     chat: { id: hash('telegram-chat', String(message.chat.id)) },
@@ -122,7 +109,7 @@ export async function pollArtifacts({ config, store, dkg, fetcher = fetch, signa
       if (claim !== 'completed') {
         try {
           const event = artifactFromUpdate(update, config);
-          if (event) await dkg.stageConversationArtifact(event);
+          if (event?.payload?.consent_to_share === true) await dkg.stageConversationArtifact(event);
           store.completeUpdate(botKey, update.update_id, update.update_id + 1);
         } catch (error) {
           store.failUpdate(botKey, update.update_id, error);

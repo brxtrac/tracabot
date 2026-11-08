@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const config = { telegramToken: 'test', dkgWrites: true, dkgPseudonymKey: 'x'.repeat(32) };
+const config = { telegramToken: 'test', dkgWrites: true, dkgPseudonymKey: 'x'.repeat(32), autoPromoteEvidence: true };
 const update = { update_id: 12, message: { message_id: 9, date: 1780000000, chat: { id: -1001 }, from: { id: 47 }, text: 'Urgent: verify your wallet at https://scam.example now' } };
 
 test('captures relevant message with stable ID and pseudonymous identities', () => {
@@ -77,6 +77,21 @@ test('transient getUpdates reset stays in poll loop; fatal and once-mode still t
     config, store: { pollingOffset: () => 0 }, dkg: {}, once: true,
     fetcher: async () => ({ ok: false, status: 401, json: async () => ({}) })
   }), /Telegram HTTP 401/);
+});
+
+test('polling does not stage an artifact denied by sharing policy', async () => {
+  const calls = [];
+  const store = {
+    pollingOffset: () => 12, claimUpdate: () => 'claimed',
+    completeUpdate: () => calls.push('complete'), failUpdate: () => calls.push('fail')
+  };
+  let stages = 0;
+  await pollArtifacts({ config: { ...config, autoPromoteEvidence: false }, store,
+    dkg: { stageConversationArtifact: async () => { stages += 1; } },
+    fetcher: async () => ({ ok: true, json: async () => ({ ok: true, result: [update] }) }), once: true
+  });
+  assert.equal(stages, 0);
+  assert.deepEqual(calls, ['complete']);
 });
 
 test('failed DKG write leaves update unacknowledged for retry', async () => {
