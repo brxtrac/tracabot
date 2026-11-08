@@ -756,6 +756,177 @@ test('main poller accepts channel_post and stages one consenting artifact', asyn
   assert.equal(stages[0].chat?.type, 'channel');
 });
 
+test('forceDkg correction honors a root chat opt-out reached through a wrapper', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: true, configOverrides: { artifactOptOutChats: ['-200'] } });
+  const stages = [];
+  bot.dkg.stageConversationArtifact = async (event) => { stages.push(event); return { ok: true }; };
+  bot.store.append({
+    id: 'root-opted-out', event_type: 'risk_review_needed', timestamp: new Date().toISOString(),
+    chat: { id: -200, type: 'supergroup' }, user: { id: 86 },
+    payload: { confidence: 90, scam_type: 'impersonation' }
+  });
+  bot.store.append({
+    id: 'wrapper-review', event_type: 'review_overturned', timestamp: new Date().toISOString(),
+    chat: { id: -300, type: 'supergroup' }, user: { id: 1 },
+    payload: { target_event_id: 'root-opted-out', confidence: 80, evidence: ['wrapper'] }
+  });
+  const artifact = await bot.recordConversationArtifact(
+    { chat: { id: 1, type: 'private' }, from: { id: 1, username: 'admin' }, message_id: 52 },
+    {
+      risk: { confidence: 80, local_confidence: 80, scam_type: 'false_positive' },
+      text: 'admin correction', artifactKind: 'false_positive_signal',
+      sourceEventIds: ['wrapper-review'], forceDkg: true
+    }
+  );
+  assert.equal(artifact.payload.consent_to_share, false);
+  assert.equal(artifact.payload.privacy_opt_out, true);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'conversation_artifact'), false);
+  assert.equal(stages.length, 0);
+});
+
+test('forceDkg correction permits a wrapper whose root is not opted out', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: true, configOverrides: { artifactOptOutChats: ['-999'] } });
+  bot.store.append({
+    id: 'root-permitted', event_type: 'risk_review_needed', timestamp: new Date().toISOString(),
+    chat: { id: -200, type: 'supergroup' }, user: { id: 86 },
+    payload: { confidence: 90, scam_type: 'impersonation' }
+  });
+  bot.store.append({
+    id: 'wrapper-permitted', event_type: 'review_overturned', timestamp: new Date().toISOString(),
+    chat: { id: -300, type: 'supergroup' }, user: { id: 1 },
+    payload: { target_event_id: 'root-permitted', confidence: 80, evidence: ['wrapper'] }
+  });
+  const artifact = await bot.recordConversationArtifact(
+    { chat: { id: 1, type: 'private' }, from: { id: 1, username: 'admin' }, message_id: 53 },
+    {
+      risk: { confidence: 80, local_confidence: 80, scam_type: 'false_positive' },
+      text: 'admin correction', artifactKind: 'false_positive_signal',
+      sourceEventIds: ['wrapper-permitted'], forceDkg: true
+    }
+  );
+  assert.equal(artifact.payload.consent_to_share, true);
+  assert.equal(artifact.payload.privacy_opt_out, false);
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'conversation_artifact').length, 1);
+});
+
+test('upward private appeal citation does not taint an unrelated permitted root', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: true });
+  bot.store.append({
+    id: 'root-unrelated', event_type: 'risk_review_needed', timestamp: new Date().toISOString(),
+    chat: { id: -200, type: 'supergroup' }, user: { id: 86 },
+    payload: { confidence: 90, scam_type: 'impersonation' }
+  });
+  bot.store.append({
+    id: 'private-appeal', event_type: 'appeal_submitted', timestamp: new Date().toISOString(),
+    chat: { id: 1, type: 'private' }, user: { id: 87 },
+    payload: { target_event_id: 'root-unrelated', privacy_opt_out: true }
+  });
+  const artifact = await bot.recordConversationArtifact(
+    { chat: { id: 1, type: 'private' }, from: { id: 1, username: 'admin' }, message_id: 54 },
+    {
+      risk: { confidence: 80, local_confidence: 80, scam_type: 'false_positive' },
+      text: 'admin correction', artifactKind: 'false_positive_signal',
+      sourceEventIds: ['root-unrelated'], forceDkg: true
+    }
+  );
+  assert.equal(artifact.payload.consent_to_share, true);
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'conversation_artifact').length, 1);
+});
+
+function channelObservationFixture({ configOverrides = {}, text = 'From Zero to $685K profit I joined Alpha Trading (https://t.me/alpha_trading_circle) 16 months ago and within the past 3 months I earned $685,000 thanks to the coaching Mr Theo provides.' } = {}) {
+  const { bot, dkgWrites } = makeBot({
+    canBan: false,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] },
+    configOverrides: { actionThreshold: 99, ...configOverrides }
+  });
+  const stages = [];
+  bot.dkg.stageConversationArtifact = async (event) => { stages.push(event); return { ok: true }; };
+  const originalCall = bot.call;
+  let updates = [{
+    update_id: 91,
+    channel_post: {
+      message_id: 60, date: Math.floor(Date.now() / 1000),
+      chat: { id: -200, type: 'channel', title: 'public chan' },
+      text
+    }
+  }];
+  bot.call = async (method, payload) => {
+    if (method === 'getUpdates') {
+      const result = updates;
+      updates = [];
+      return result;
+    }
+    return originalCall(method, payload);
+  };
+  return { bot, dkgWrites, stages };
+}
+
+test('main pollOnce publishes one channel observation for a permitted high-confidence channel post', async () => {
+  const { bot, dkgWrites } = channelObservationFixture();
+  await bot.pollOnce();
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'channel_observation').length, 1);
+});
+
+test('main pollOnce publishes no channel observation for an opted-out channel', async () => {
+  const { bot, dkgWrites, stages } = channelObservationFixture({ configOverrides: { artifactOptOutChats: ['-200'] } });
+  await bot.pollOnce();
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'channel_observation').length, 0);
+  assert.equal(stages.length, 0);
+  const local = bot.store.all().find((event) => event.event_type === 'channel_observation');
+  assert.equal(local.payload.consent_to_share, false);
+  assert.equal(local.payload.privacy_opt_out, true);
+});
+
+test('main pollOnce publishes no channel observation when automatic promotion is disabled', async () => {
+  const { bot, dkgWrites } = channelObservationFixture({ configOverrides: { autoPromoteEvidence: false } });
+  await bot.pollOnce();
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'channel_observation').length, 0);
+});
+
+test('main pollOnce publishes no channel observation for explicit message denial', async () => {
+  const { bot, dkgWrites } = channelObservationFixture();
+  bot.call = async (method) => {
+    if (method === 'getUpdates') return [{
+      update_id: 92,
+      channel_post: {
+        message_id: 61, date: Math.floor(Date.now() / 1000),
+        chat: { id: -200, type: 'channel', title: 'public chan' },
+        text: 'From Zero to $685K profit I joined Alpha Trading (https://t.me/alpha_trading_circle) 16 months ago.',
+        consent_to_share: false
+      }
+    }];
+    return { ok: true };
+  };
+  await bot.pollOnce();
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'channel_observation').length, 0);
+});
+
+test('channel observation retries with the same update deduplicate the shared publication', async () => {
+  const { bot, dkgWrites } = channelObservationFixture();
+  bot.currentUpdateId = 93;
+  const message = {
+    message_id: 62, date: Math.floor(Date.now() / 1000),
+    chat: { id: -200, type: 'channel', title: 'public chan' },
+    text: 'From Zero to $685K profit I joined Alpha Trading (https://t.me/alpha_trading_circle) 16 months ago.'
+  };
+  const risk = { confidence: 90, local_confidence: 90, is_scam: true, scam_type: 'investment_scam', domains: [], wallets: [], patterns: [], evidence: ['Investment-profit testimonial lure'] };
+  await bot.recordChannelObservation(message, risk);
+  await bot.recordChannelObservation(message, risk);
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'channel_observation').length, 1);
+});
+
+test('getChatAdministrators failure does not bypass an opted-out channel gate', async () => {
+  const { bot, dkgWrites } = channelObservationFixture({ configOverrides: { artifactOptOutChats: ['-200'] } });
+  const originalCall = bot.call;
+  bot.call = async (method, payload) => {
+    if (method === 'getChatAdministrators') throw new Error('admin lookup unavailable');
+    return originalCall(method, payload);
+  };
+  await bot.pollOnce();
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'channel_observation').length, 0);
+});
+
 test('main artifact policy keeps ordinary denied config as a private WM draft', async () => {
   const { bot, dkgWrites } = makeBot({ canBan: false, configOverrides: { autoPromoteEvidence: false } });
   const stages = [];

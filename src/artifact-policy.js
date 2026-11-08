@@ -1,4 +1,4 @@
-import { sharingDeniedInLineage } from './evidence-policy.js';
+import { lineagePrivacyAudit } from './evidence-policy.js';
 
 function chatId(value) {
   const id = value?.chat?.id ?? value;
@@ -25,14 +25,14 @@ export function artifactSharingPolicy({
   const sourceIds = [...new Set((Array.isArray(sourceEventIds) ? sourceEventIds : [])
     .map((value) => String(value || ''))
     .filter(Boolean))];
-  const byId = new Map((Array.isArray(history) ? history : [])
-    .map((event) => [String(event?.id || ''), event]));
   const sourceChatIds = new Set();
+  const lineageOk = { value: true };
+  let lineageDenied = false;
   for (const id of sourceIds) {
-    const event = byId.get(id);
-    if (!event) continue;
-    const sourceChatId = chatId(event.payload?.target_chat_id) || chatId(event);
-    if (sourceChatId) sourceChatIds.add(sourceChatId);
+    const audit = lineagePrivacyAudit(history, id);
+    if (!audit.ok) lineageOk.value = false;
+    if (audit.denied) lineageDenied = true;
+    for (const sourceChatId of audit.chatIds) sourceChatIds.add(sourceChatId);
   }
 
   const reasons = [];
@@ -43,7 +43,8 @@ export function artifactSharingPolicy({
   if (message?.consent_to_share === false || message?.privacy_opt_out === true) reasons.push('explicit_privacy_denial');
   if (optOutChats.has(messageChatId)) reasons.push('chat_opt_out');
   for (const id of sourceChatIds) if (optOutChats.has(id)) reasons.push('source_chat_opt_out');
-  if (sourceIds.some((id) => sharingDeniedInLineage(history, id))) reasons.push('lineage_privacy_denial');
+  if (!lineageOk.value) reasons.push('lineage_incomplete');
+  if (lineageDenied) reasons.push('lineage_privacy_denial');
 
   return {
     allowed: reasons.length === 0,

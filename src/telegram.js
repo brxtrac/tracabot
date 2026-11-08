@@ -3215,6 +3215,11 @@ export class TelegramShieldBot {
 
   async recordChannelObservation(message, risk = {}, observationType = 'high_confidence_channel_message') {
     if (!this.shouldShareChannelObservation(message, risk)) return null;
+    const sharing = artifactSharingPolicy({
+      config: this.config,
+      message,
+      history: this.store.all()
+    });
     const text = boundedText(message.text || '', this.config.channelMemoryMaxTextChars || 1000);
     return this.record('channel_observation', message, {
       ...risk,
@@ -3228,13 +3233,17 @@ export class TelegramShieldBot {
       domains: risk.domains?.length ? risk.domains : extractDomains(text),
       wallets: risk.wallets?.length ? risk.wallets : extractWallets(text),
       patterns: risk.patterns?.length ? risk.patterns : extractPatterns(text),
-      publication_status: 'shared_memory',
-      lifecycle_stage: 'shared_memory',
+      consent_to_share: sharing.allowed,
+      privacy_opt_out: !sharing.allowed,
+      publication_status: sharing.allowed ? 'shared_memory' : 'working_memory',
+      lifecycle_stage: sharing.allowed ? 'shared_memory' : 'working_memory_draft',
       evidence: [
         ...(risk.evidence || []),
-        'high-confidence public channel message stored in DKG v10 Shared Memory for spam/scam/fraud pattern analysis'
+        sharing.allowed
+          ? 'high-confidence public channel message stored in DKG v10 Shared Memory for spam/scam/fraud pattern analysis'
+          : 'local-only channel observation; sharing policy denied DKG publication'
       ]
-    }, { writeDkg: true });
+    }, { writeDkg: sharing.allowed });
   }
 
   shouldSendConversation(message, target, risk, explicit = false) {
@@ -6884,7 +6893,6 @@ export class TelegramShieldBot {
       }
 
       await this.recordBenignConversationFlow(message, risk);
-      await this.recordChannelObservation(message, risk);
       if (passiveLowRisk) return;
     }
     if (risk.confidence >= policy.warnThreshold) {

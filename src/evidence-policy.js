@@ -337,14 +337,14 @@ function lineageRefIds(event = {}, limit = 40) {
 }
 
 /**
- * Walk the resolved downward lineage (wrappers to roots) for explicit privacy
- * denial. Returns true for denial or for any lineage that cannot be fully
- * verified: missing referenced events, reference/depth/node truncation. A
- * bounded cycle-safe walk terminates on malformed graphs. Upward citations are
- * intentionally excluded so a private appeal that cites a finding does not
- * taint that finding globally.
+ * Bounded downward-lineage audit shared by denial and chat-opt-out checks.
+ * `ok:false` means the lineage could not be fully verified (missing structural
+ * reference, reference/depth/node truncation, or missing source). `denied`
+ * means an event in the downward lineage carries explicit privacy denial.
+ * Upward citations are intentionally excluded so a private appeal that cites a
+ * finding does not taint that finding globally.
  */
-export function sharingDeniedInLineage(events = [], eventOrId = '', { maxDepth = 8, maxNodes = 64 } = {}) {
+export function lineagePrivacyAudit(events = [], eventOrId = '', { maxDepth = 8, maxNodes = 64 } = {}) {
   const list = Array.isArray(events) ? events : [];
   const byId = new Map(list.map((event) => [String(event?.id || ''), event]));
   let start = typeof eventOrId === 'string' || typeof eventOrId === 'number'
@@ -357,37 +357,61 @@ export function sharingDeniedInLineage(events = [], eventOrId = '', { maxDepth =
         || String(event?.payload?.report_event_id || '') === startId);
     if (matches.length === 1) start = matches[0];
   }
-  if (!start) return true;
-  if (sharingDenied(start)) return true;
+  if (!start) return { ok: false, denied: false, chatIds: [] };
+  const audit = {
+    ok: true,
+    denied: sharingDenied(start),
+    chatIds: []
+  };
+  const addChat = (event = {}) => {
+    const id = event.payload?.target_chat_id || event.chat?.id;
+    if (id !== undefined && id !== null && String(id) !== '') audit.chatIds.push(String(id));
+  };
+  addChat(start);
   const depthLimit = Math.max(1, Number(maxDepth) || 8);
   const nodeLimit = Math.max(1, Number(maxNodes) || 64);
   const seen = new Set([String(start.id || '')].filter(Boolean));
   const startRefs = lineageRefIds(start);
-  if (startRefs.overflow) return true;
-  if (startRefs.refs.some((ref) => ref.structural && !byId.has(ref.id))) return true;
+  if (startRefs.overflow) audit.ok = false;
+  if (startRefs.refs.some((ref) => ref.structural && !byId.has(ref.id))) audit.ok = false;
   const queue = startRefs.refs.map((ref) => ({ ...ref, depth: 1 }));
   while (queue.length) {
     const { id, depth } = queue.shift();
     if (!id || seen.has(id)) continue;
-    if (seen.size >= nodeLimit) return true;
+    if (seen.size >= nodeLimit) {
+      audit.ok = false;
+      break;
+    }
     seen.add(id);
     const current = byId.get(id);
     if (!current) continue;
-    if (sharingDenied(current)) return true;
+    addChat(current);
+    if (sharingDenied(current)) audit.denied = true;
     const refs = lineageRefIds(current);
-    if (refs.overflow) return true;
+    if (refs.overflow) audit.ok = false;
     // Validate structural existence independently of the visited set: the same
     // ID may already have been traversed as a corroborating root.
-    if (refs.refs.some((ref) => ref.structural && !byId.has(ref.id))) return true;
+    if (refs.refs.some((ref) => ref.structural && !byId.has(ref.id))) audit.ok = false;
     if (depth >= depthLimit) {
-      if (refs.refs.length) return true;
+      if (refs.refs.length) audit.ok = false;
       continue;
     }
     for (const next of refs.refs) {
       if (!seen.has(next.id)) queue.push({ ...next, depth: depth + 1 });
     }
   }
-  return false;
+  audit.chatIds = [...new Set(audit.chatIds)];
+  return audit;
+}
+
+/**
+ * True for explicit denial or for any lineage that cannot be fully verified:
+ * missing referenced events, reference/depth/node truncation. Uses the same
+ * conservative traversal as lineagePrivacyAudit.
+ */
+export function sharingDeniedInLineage(events = [], eventOrId = '', options = {}) {
+  const audit = lineagePrivacyAudit(events, eventOrId, options);
+  return !audit.ok || audit.denied;
 }
 
 function modelOnly(event = {}) {
