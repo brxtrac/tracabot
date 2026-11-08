@@ -7,7 +7,7 @@ import { connect } from 'node:net';
 import { EventStore } from '../src/store.js';
 import { createPublicServer } from '../src/public-server.js';
 import { DkgClient } from '../src/dkg-client.js';
-import { publicCampaignKey } from '../src/evidence-policy.js';
+import { publicCampaignKey, publicIdFor } from '../src/evidence-policy.js';
 
 test('malformed Host returns a bounded 400 and the server remains healthy', async () => {
   const { server } = makeServer();
@@ -27,14 +27,28 @@ test('malformed Host returns a bounded 400 and the server remains healthy', asyn
   } finally { await close(server); }
 });
 
-test('remote DKG campaign API hashes legacy text keys without exposing reporter or private evidence', async () => {
+test('remote DKG campaign API hashes legacy text keys and sanitizes untrusted graph strings', async () => {
   const { store, config } = makeServer({ publicReadDkg: true });
   const dkg = new DkgClient({ contextGraph: 'tracabot' });
   const key = 'text:synthetic_reporter_contact private_evidence_secret';
+  const secret = 'sk-live-SYNTHETIC-REMOTE-SECRET';
   dkg.queryBindings = async () => [{
     g: 'did:dkg:context-graph:tracabot/_shared_memory',
     s: 'https://tracabot.org/ontology#event/legacy-campaign',
-    confidence: '91', campaignKey: key, campaignEventCount: '2', campaignCommunityCount: '2'
+    confidence: '91', campaignKey: key, campaignEventCount: '2', campaignCommunityCount: '2',
+    scamType: `${secret} raw seed phrase`,
+    claimLevel: 'not-a-real-level',
+    created: 'not-a-date',
+    actorIdentity: '8388593201',
+    communityToken: 'private-chat-id',
+    evidenceFingerprint: 'private fingerprint',
+    domain: 'https://user:pass@evil.example/private/path?token=secret',
+    wallet: 'private wallet value',
+    pattern: 'wallet-drain'
+  }, {
+    g: 'did:dkg:context-graph:tracabot/_shared_memory',
+    s: 'https://tracabot.org/ontology#event/legacy-campaign',
+    pattern: secret
   }];
   const server = createPublicServer({ store, config, dkg, autoPromote: false });
   const base = await listen(server);
@@ -45,7 +59,17 @@ test('remote DKG campaign API hashes legacy text keys without exposing reporter 
     assert.equal(body.records.length, 1);
     assert.equal(body.records[0].campaignKey, publicCampaignKey(key));
     assert.equal(publicCampaignKey(publicCampaignKey(key)), publicCampaignKey(key));
-    assert.doesNotMatch(JSON.stringify(body), /synthetic_reporter_contact|private_evidence_secret/);
+    assert.equal(body.records[0].scamType, 'unknown');
+    assert.equal(body.records[0].createdAt, '');
+    assert.equal(body.records[0].actorRef, '');
+    assert.equal(body.records[0].communityRef, '');
+    assert.equal(body.records[0].evidenceFingerprint, '');
+    assert.deepEqual(body.records[0].indicators.domains, ['evil.example']);
+    assert.deepEqual(body.records[0].indicators.wallets, []);
+    assert.deepEqual(body.records[0].indicators.patterns, ['wallet-drain']);
+    assert.notEqual(body.records[0].claimLevel, 'not-a-real-level');
+    assert.doesNotMatch(JSON.stringify(body), /synthetic_reporter_contact|private_evidence_secret|8388593201|private-chat-id|private fingerprint|user:pass|private\/path|token=secret|private wallet value/);
+    assert.doesNotMatch(JSON.stringify(body), new RegExp(secret));
   } finally { await close(server); }
 });
 
@@ -162,6 +186,118 @@ test('private appeal events are never exposed by the public reader', async () =>
     const body = await fetch(`${base}/api/public/incidents`).then((response) => response.json());
     assert.equal(body.records.some((record) => String(record.publicId || '').includes('appeal')), false);
     assert.doesNotMatch(JSON.stringify(body), /private appeal text|seed phrase|4242|ban-private/);
+  } finally {
+    await close(server);
+  }
+});
+
+test('public reader exposes sanitized corrections and hides disabled DKG writes', async () => {
+  const { server, store } = makeServer();
+  store.append({
+    id: 'public-ban-1',
+    event_type: 'ban_executed',
+    timestamp: '2026-11-01T11:00:00.000Z',
+    chat: { id: -100, title: 'Private Community' },
+    user: { id: '8388593201', username: 'private_target' },
+    dkg: { ual: 'did:dkg:context-graph:tracabot/_shared_memory' },
+    payload: {
+      target: { id: '8388593201', username: 'private_target' },
+      target_key: 'id:8388593201',
+      confidence: 0,
+      admin_verified: true,
+      enforcement_action: 'ban',
+      enforcement_observed_from: 'password=HUSH',
+      source: 'token=SECRET',
+      occurred_at: 'api_key=SUPERSECRET',
+      reason_provided: false,
+      reason: 'reason not provided',
+      consent_to_share: true,
+      evidence: ['raw target 8388593201 private note']
+    }
+  });
+  store.append({
+    id: 'public-correction-1',
+    event_type: 'review_overturned',
+    timestamp: '2026-11-01T12:00:00.000Z',
+    chat: { id: -100, title: 'Private Community' },
+    user: { id: '8388593201' },
+    dkg: { ual: 'did:dkg:context-graph:tracabot/_shared_memory' },
+    payload: {
+      target_event_id: 'public-ban-1',
+      reviewed_target: { id: '8388593201', username: 'private_target' },
+      reviewed_target_key: 'id:8388593201',
+      target_chat_id: '-100',
+      admin_verified: true,
+      enforcement_action: 'unban',
+      enforcement_observed_from: 'telegram_chat_member',
+      reason_provided: false,
+      reason: 'private appeal detail 8388593201',
+      retracted: true,
+      evidence: ['private evidence 8388593201']
+    }
+  });
+  store.append({
+    id: 'disabled-public-1',
+    event_type: 'fraud_finding',
+    timestamp: '2026-11-01T13:00:00.000Z',
+    chat: { id: -100, title: 'Private Community' },
+    user: { id: '8388593201' },
+    dkg: { mode: 'dkg-disabled' },
+    payload: {
+      confidence: 95,
+      local_confidence: 90,
+      scam_type: 'disabled-record',
+      evidence: ['must not be public']
+    }
+  });
+  store.append({
+    id: 'fallback-public-1',
+    event_type: 'fraud_finding',
+    timestamp: '2026-11-01T14:00:00.000Z',
+    chat: { id: -100, title: 'Private Community' },
+    user: { id: '8388593201' },
+    dkg: { graph: 'did:dkg:context-graph:tracabot/_working_memory', swmDegraded: true },
+    payload: {
+      confidence: 95,
+      local_confidence: 90,
+      scam_type: 'working-memory-fallback',
+      evidence: ['must not be public']
+    }
+  });
+  store.append({
+    id: 'failed-public-1',
+    event_type: 'fraud_finding',
+    timestamp: '2026-11-01T15:00:00.000Z',
+    chat: { id: -100, title: 'Private Community' },
+    user: { id: '8388593201' },
+    dkg: { graph: 'did:dkg:context-graph:tracabot/_shared_memory', status: 'failed' },
+    payload: {
+      confidence: 95,
+      local_confidence: 90,
+      scam_type: 'failed-publication',
+      evidence: ['must not be public']
+    }
+  });
+  const base = await listen(server);
+  try {
+    const body = await fetch(`${base}/api/public/incidents`).then((response) => response.json());
+    const original = body.records.find((record) => record.eventType === 'ban_executed');
+    const correction = body.records.find((record) => record.eventType === 'review_overturned');
+    assert.ok(original);
+    assert.ok(correction);
+    assert.equal(original.claimLevel, 'retracted');
+    assert.equal(correction.claimLevel, 'retracted');
+    assert.equal(correction.enforcement.action, 'unban');
+    assert.equal(original.enforcement.source, '');
+    assert.equal(original.provenance.source, 'unknown');
+    assert.equal(original.createdAt, '');
+    assert.match(correction.summary, /lifted or corrected/);
+    assert.equal(body.records.some((record) => ['disabled-record', 'working-memory-fallback', 'failed-publication'].includes(record.scamType)), false);
+    assert.equal((await fetch(`${base}/api/public/evidence/${publicIdFor({ id: 'fallback-public-1' })}`)).status, 404);
+    assert.equal((await fetch(`${base}/api/public/evidence/${publicIdFor({ id: 'failed-public-1' })}`)).status, 404);
+    const serialized = JSON.stringify(body);
+    assert.doesNotMatch(serialized, /8388593201|private_target|Private Community|-100|private appeal detail|private evidence/);
+    assert.doesNotMatch(serialized, /SECRET|HUSH|SUPERSECRET/);
   } finally {
     await close(server);
   }

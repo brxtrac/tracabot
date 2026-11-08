@@ -4,7 +4,8 @@ import {
   EVIDENCE_POLICY_VERSION,
   evaluateEvidence,
   sanitizePublicEvidence,
-  sanitizePublicEvidenceList
+  sanitizePublicEvidenceList,
+  sharingDeniedInLineage
 } from '../src/evidence-policy.js';
 
 const POLICY = {
@@ -296,6 +297,31 @@ test('retractions suppress promotion and keep the correction as the claim state'
   assert.ok(result.promotion.reasons.includes('retracted'));
 });
 
+test('retraction of an underlying finding also retracts its review wrapper', () => {
+  const review = event({
+    id: 'review-up',
+    event_type: 'review_upheld',
+    payload: {
+      target_event_id: 'finding-under-review',
+      admin_verified: true,
+      review_decision: 'upheld',
+      reviewed_target: { id: '8388593201' },
+      reviewed_target_key: 'id:8388593201',
+      target_chat_id: '-100'
+    }
+  });
+  const overturned = {
+    id: 'review-down',
+    event_type: 'review_overturned',
+    timestamp: '2026-11-02T10:00:00.000Z',
+    payload: { target_event_id: 'finding-under-review', admin_verified: true }
+  };
+  const result = evaluateEvidence(review, { history: [review, overturned], policy: POLICY });
+  assert.equal(result.retracted, true);
+  assert.equal(result.claimLevel, 'retracted');
+  assert.equal(result.promotion.eligible, false);
+});
+
 test('public sanitization removes identities, private text, and chat metadata', () => {
   const source = event({
     payload: {
@@ -314,6 +340,164 @@ test('public sanitization removes identities, private text, and chat metadata', 
   assert.doesNotMatch(serialized, /8388593201|fake_support|private victim|seed phrase|-100|Private Community|private\.example/);
   assert.doesNotMatch(serialized, /"user"|"chat"|"evidence"/);
   assert.equal(record.provenance.policy, EVIDENCE_POLICY_VERSION);
+});
+
+test('public sanitization drops arbitrary graph text from scam types, patterns, and context labels', () => {
+  const secret = 'sk-live-SYNTHETIC-DO-NOT-PUBLISH';
+  const ban = event({
+    event_type: 'ban_executed',
+    payload: {
+      confidence: 0,
+      local_confidence: 0,
+      admin_verified: true,
+      enforcement_verified: true,
+      enforcement_action: 'ban',
+      enforcement_observed_from: 'telegram_chat_member',
+      consent_to_share: true,
+      reason_provided: false,
+      scam_type: secret,
+      patterns: [secret],
+      target: { id: '8388593201' },
+      target_key: 'id:8388593201',
+      ban_context: {
+        category: secret,
+        severity: secret,
+        confidence: 70,
+        behavior_flags: [secret],
+        observed_message_count: 1,
+        text_message_count: 1,
+        indicators: { domains: [], wallets: [], patterns: [secret] }
+      }
+    }
+  });
+  const record = sanitizePublicEvidence(ban, { history: [ban], policy: POLICY, pseudonymKey: 'test-key-32-bytes-long' });
+  assert.ok(record);
+  assert.equal(record.scamType, 'unknown');
+  assert.deepEqual(record.indicators.patterns, []);
+  assert.equal(record.banContext.category, 'unknown');
+  assert.equal(record.banContext.severity, 'unknown');
+  assert.deepEqual(record.banContext.behaviorFlags, []);
+  assert.deepEqual(record.banContext.indicators.patterns, []);
+  assert.doesNotMatch(JSON.stringify(record), new RegExp(secret));
+});
+
+test('explicit denial propagates through bounded review lineage for promotion and public reads', () => {
+  const root = event({
+    id: 'denied-root',
+    payload: { consent_to_share: false }
+  });
+  const wrapper = event({
+    id: 'allowed-wrapper',
+    event_type: 'review_upheld',
+    payload: {
+      target_event_id: 'denied-root',
+      evidence_root_ids: ['denied-root'],
+      reviewed_target: { id: '8388593201' },
+      reviewed_target_key: 'id:8388593201',
+      review_decision: 'upheld',
+      admin_verified: true
+    }
+  });
+  const lineage = [root, wrapper];
+  const result = evaluateEvidence(wrapper, { history: lineage, policy: POLICY });
+  assert.equal(result.promotion.eligible, false);
+  assert.ok(result.promotion.reasons.includes('sharing_consent_denied'));
+  assert.equal(sanitizePublicEvidence(wrapper, { history: lineage, policy: POLICY }), null);
+  assert.equal(sharingDeniedInLineage(lineage, 'allowed-wrapper'), true);
+  assert.equal(sharingDeniedInLineage(lineage, wrapper), true);
+
+  const cycleA = { id: 'cycle-a', payload: { target_event_id: 'cycle-b' } };
+  const cycleB = { id: 'cycle-b', payload: { target_event_id: 'cycle-a' } };
+  assert.equal(sharingDeniedInLineage([cycleA, cycleB], 'cycle-a'), false);
+
+  const openRoot = event({ id: 'open-root', payload: { consent_to_share: true } });
+  const openWrapper = event({
+    id: 'open-wrapper',
+    event_type: 'review_upheld',
+    payload: {
+      target_event_id: 'open-root',
+      evidence_root_ids: ['open-root'],
+      reviewed_target: { id: '8388593201' },
+      reviewed_target_key: 'id:8388593201',
+      review_decision: 'upheld',
+      admin_verified: true
+    }
+  });
+  const openLineage = [openRoot, openWrapper];
+  assert.equal(evaluateEvidence(openWrapper, { history: openLineage, policy: POLICY }).promotion.reasons.includes('sharing_consent_denied'), false);
+  assert.equal(sharingDeniedInLineage(openLineage, 'open-wrapper'), false);
+  assert.ok(sanitizePublicEvidence(openWrapper, { history: openLineage, policy: POLICY }));
+});
+
+test('lineage walk fails closed on depth, node, and reference overflow and missing structural links', () => {
+  const chain = (length) => Array.from({ length }, (_, index) => ({
+    id: `n${index}`,
+    payload: { consent_to_share: true, ...(index < length - 1 ? { target_event_id: `n${index + 1}` } : {}) }
+  }));
+  assert.equal(sharingDeniedInLineage(chain(9), 'n0'), false);
+  assert.equal(sharingDeniedInLineage(chain(10), 'n0'), true);
+
+  const refs = Array.from({ length: 41 }, (_, index) => `root-${index}`);
+  const refOverflow = [
+    { id: 'ref-root', payload: { consent_to_share: true, evidence_root_ids: refs } },
+    ...refs.map((id) => ({ id, payload: { consent_to_share: true } }))
+  ];
+  assert.equal(sharingDeniedInLineage(refOverflow, 'ref-root'), true);
+
+  const children = Array.from({ length: 33 }, (_, index) => `b${index}`);
+  const leaves = Array.from({ length: 33 }, (_, index) => ({ id: `c${index}`, payload: { consent_to_share: true } }));
+  const nodeOverflow = [
+    { id: 'node-root', payload: { consent_to_share: true, target_event_id: 'node-a' } },
+    { id: 'node-a', payload: { consent_to_share: true, target_event_id: 'b0', evidence_root_ids: children.slice(1) } },
+    ...children.map((id, index) => ({ id, payload: { consent_to_share: true, target_event_id: `c${index}` } })),
+    ...leaves
+  ];
+  assert.equal(sharingDeniedInLineage(nodeOverflow, 'node-root'), true);
+
+  const missingStructural = [{ id: 'missing-root', payload: { consent_to_share: true, target_event_id: 'not-present' } }];
+  assert.equal(sharingDeniedInLineage(missingStructural, 'missing-root'), true);
+  const missingCorroborating = [{ id: 'external-root', payload: { consent_to_share: true, evidence_root_ids: ['https://dkg.example/root'] } }];
+  assert.equal(sharingDeniedInLineage(missingCorroborating, 'external-root'), false);
+
+  // The same missing ID may appear first as a corroborating root and later as
+  // a structural review link. Structural resolution must be validated even when
+  // the ID was already visited as corroborating.
+  const sharedMissing = [
+    { id: 'lineage-start', payload: { consent_to_share: true, target_event_id: 'lineage-middle', evidence_root_ids: ['shared-missing'] } },
+    { id: 'lineage-middle', payload: { consent_to_share: true, target_event_id: 'shared-missing' } }
+  ];
+  assert.equal(sharingDeniedInLineage(sharedMissing, 'lineage-start'), true);
+  const reversed = [...sharedMissing].reverse();
+  assert.equal(sharingDeniedInLineage(reversed, 'lineage-start'), true);
+  const sameEvent = [{
+    id: 'lineage-same',
+    payload: { consent_to_share: true, target_event_id: 'shared-missing', evidence_root_ids: ['shared-missing'] }
+  }];
+  assert.equal(sharingDeniedInLineage(sameEvent, 'lineage-same'), true);
+});
+
+test('public projection allowlists enforcement and provenance labels and validates timestamps', () => {
+  const record = sanitizePublicEvidence(event({
+    event_type: 'ban_executed',
+    payload: {
+      consent_to_share: true,
+      admin_verified: true,
+      enforcement_verified: true,
+      confidence: 95,
+      local_confidence: 90,
+      source: 'token=SECRET',
+      enforcement_action: 'password=HUSH',
+      enforcement_observed_from: 'api_key=SUPERSECRET',
+      occurred_at: 'api_key=SUPERSECRET',
+      target_key: 'id:8388593201'
+    }
+  }), { history: [], policy: POLICY, pseudonymKey: 'k'.repeat(32) });
+  assert.ok(record);
+  assert.equal(record.enforcement.action, 'unknown');
+  assert.equal(record.enforcement.source, '');
+  assert.equal(record.provenance.source, 'unknown');
+  assert.equal(record.createdAt, '');
+  assert.doesNotMatch(JSON.stringify(record), /SECRET|HUSH|SUPERSECRET/);
 });
 
 test('public admin-enforcement record exposes reason status, not identities or private text', () => {

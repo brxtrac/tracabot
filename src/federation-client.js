@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { fetchService } from './secure-transport.js';
 
 export const FEDERATION_QUEUE_TYPE = 'federation_submission_queued';
 export const FEDERATION_SENT_TYPE = 'federation_submission_sent';
@@ -96,7 +97,7 @@ async function postOnce({ config, submission, queueId, fetchImpl, timeoutMs }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetchImpl(config.creatorSubmitUrl, {
+    const response = await fetchService(config.creatorSubmitUrl, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${config.creatorSubmitToken}`,
@@ -105,7 +106,7 @@ async function postOnce({ config, submission, queueId, fetchImpl, timeoutMs }) {
       },
       body: JSON.stringify(submission),
       signal: controller.signal
-    });
+    }, { fetchImpl, label: 'creator submission' });
     const body = await response.text().catch(() => '');
     if (!response.ok) throw new Error(`creator submission rejected with ${response.status}: ${body.slice(0, 200)}`);
     let parsed = {};

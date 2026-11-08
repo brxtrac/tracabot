@@ -64,6 +64,22 @@ function evidenceEvent(overrides = {}) {
 
 test('promotion of a review uses the reviewed subject and keeps underlying lineage', async () => {
   const eventStore = store();
+  eventStore.append({
+    id: 'underlying-finding',
+    event_type: 'fraud_finding',
+    timestamp: new Date().toISOString(),
+    chat: { id: -100, title: 'Community' },
+    user: { id: '8388593201', username: 'subject' },
+    payload: {
+      target: { id: '8388593201', username: 'subject' },
+      target_key: 'id:8388593201',
+      confidence: 96,
+      local_confidence: 90,
+      consent_to_share: true,
+      evidence: ['underlying finding'],
+      publication_status: 'shared_memory'
+    }
+  });
   const source = {
     id: 'review-upheld-source',
     event_type: 'review_upheld',

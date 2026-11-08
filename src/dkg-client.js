@@ -2,7 +2,16 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createHmac } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { canonicalizeMessageText, detectGamblingPromotion } from './message-patterns.js';
-import { publicCampaignKey, publicIdFor } from './evidence-policy.js';
+import {
+  CLAIM_LEVELS,
+  publicBanContextCategory,
+  publicBanContextSeverity,
+  publicBehaviorFlags,
+  publicCampaignKey,
+  publicEvidencePattern,
+  publicIdFor,
+  publicScamType
+} from './evidence-policy.js';
 
 const NS = 'https://tracabot.org/ontology#';
 const DCTERMS_CREATED = 'http://purl.org/dc/terms/created';
@@ -32,6 +41,11 @@ function cleanValue(value = '') {
 function numeric(value = '') {
   const match = cleanValue(value).match(/\d+/);
   return match ? Number(match[0]) : 0;
+}
+
+function sharingDenied(event = {}) {
+  const payload = event?.payload || {};
+  return payload.consent_to_share === false || payload.privacy_opt_out === true;
 }
 
 function eventIdFromSource(source = '') {
@@ -124,8 +138,24 @@ function normalizeContextWallet(value = '') {
   return '';
 }
 
-function normalizeContextPattern(value = '') {
-  return String(value).trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
+function publicHmacRef(value = '') {
+  const ref = cleanValue(value);
+  return /^hmac:v1:[a-f0-9]{64}$/.test(ref) ? ref : '';
+}
+
+function publicFingerprint(value = '') {
+  const fingerprint = cleanValue(value);
+  return /^sha256:[a-f0-9]{64}$/.test(fingerprint) ? fingerprint : '';
+}
+
+function publicClaimLevel(value = '') {
+  const claimLevel = cleanValue(value);
+  return CLAIM_LEVELS.includes(claimLevel) ? claimLevel : '';
+}
+
+function publicTimestamp(value = '') {
+  const parsed = Date.parse(cleanValue(value));
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : '';
 }
 
 function boundedList(values = [], limit = MAX_INDICATORS, itemLength = 160) {
@@ -369,7 +399,7 @@ function eventTriples(event, pseudonymKey = '') {
     { subject, predicate: `${NS}confidence`, object: literal(event.payload?.confidence ?? '') },
     { subject, predicate: `${NS}localConfidence`, object: literal(event.payload?.local_confidence ?? '') },
     { subject, predicate: `${NS}dkgConfidence`, object: literal(event.payload?.dkg_confidence ?? '') },
-    { subject, predicate: `${NS}scamType`, object: literal(event.payload?.scam_type || '') },
+    { subject, predicate: `${NS}scamType`, object: literal(publicScamType(event.payload?.scam_type)) },
     { subject, predicate: `${NS}claimLevel`, object: literal(event.payload?.claim_level || '') },
     { subject, predicate: `${NS}evidenceFingerprint`, object: literal(event.payload?.evidence_fingerprint || '') },
     { subject, predicate: `${NS}instanceId`, object: literal(event.payload?.instance_id || event.instanceId || '') },
@@ -390,8 +420,8 @@ function eventTriples(event, pseudonymKey = '') {
   }
   if (event.payload?.ban_context || event.payload?.context_category) {
     triples.push(
-      { subject, predicate: `${NS}banContextCategory`, object: literal(event.payload?.ban_context?.category || event.payload?.context_category || '') },
-      { subject, predicate: `${NS}banContextSeverity`, object: literal(event.payload?.ban_context?.severity || event.payload?.context_severity || '') },
+      { subject, predicate: `${NS}banContextCategory`, object: literal(publicBanContextCategory(event.payload?.ban_context?.category || event.payload?.context_category || 'unknown')) },
+      { subject, predicate: `${NS}banContextSeverity`, object: literal(publicBanContextSeverity(event.payload?.ban_context?.severity || event.payload?.context_severity || 'unknown')) },
       { subject, predicate: `${NS}banContextConfidence`, object: literal(event.payload?.ban_context?.confidence ?? event.payload?.context_confidence ?? '') },
       { subject, predicate: `${NS}banContextMessageCount`, object: literal(event.payload?.ban_context?.observed_message_count ?? event.payload?.context_message_count ?? '') },
       { subject, predicate: `${NS}banContextTextMessageCount`, object: literal(event.payload?.ban_context?.text_message_count ?? '') },
@@ -459,11 +489,13 @@ function eventTriples(event, pseudonymKey = '') {
     triples.push({ subject: domainSubject, predicate: `${NS}domainName`, object: literal(normalized) });
   }
   for (const pattern of boundedList(event.payload?.patterns || [])) {
-    const patternSubject = `${NS}pattern/${encodeURIComponent(pattern).slice(0, MAX_FACT_ID_LENGTH)}`;
-    triples.push({ subject, predicate: `${NS}scamPattern`, object: literal(pattern) });
+    const publicPattern = publicEvidencePattern(pattern);
+    if (!publicPattern) continue;
+    const patternSubject = `${NS}pattern/${encodeURIComponent(publicPattern).slice(0, MAX_FACT_ID_LENGTH)}`;
+    triples.push({ subject, predicate: `${NS}scamPattern`, object: literal(publicPattern) });
     triples.push({ subject, predicate: `${NS}observedPattern`, object: patternSubject });
     triples.push({ subject: patternSubject, predicate: 'rdf:type', object: `${NS}ScamPattern` });
-    triples.push({ subject: patternSubject, predicate: `${NS}patternName`, object: literal(pattern) });
+    triples.push({ subject: patternSubject, predicate: `${NS}patternName`, object: literal(publicPattern) });
   }
   const contextIndicators = event.payload?.ban_context?.indicators || {};
   for (const domain of boundedList(contextIndicators.domains || [])) {
@@ -475,10 +507,10 @@ function eventTriples(event, pseudonymKey = '') {
     if (normalized) triples.push({ subject, predicate: `${NS}banContextWallet`, object: literal(normalized) });
   }
   for (const pattern of boundedList(contextIndicators.patterns || [])) {
-    const normalized = normalizeContextPattern(pattern);
+    const normalized = publicEvidencePattern(pattern);
     if (normalized) triples.push({ subject, predicate: `${NS}banContextPattern`, object: literal(normalized) });
   }
-  for (const flag of boundedList(event.payload?.ban_context?.behavior_flags || [], 5)) {
+  for (const flag of publicBehaviorFlags(event.payload?.ban_context?.behavior_flags || [], 5)) {
     triples.push({ subject, predicate: `${NS}banContextBehaviorFlag`, object: literal(flag) });
   }
   for (const relatedEventId of boundedList(event.payload?.related_event_ids || [])) {
@@ -529,6 +561,46 @@ function eventTriples(event, pseudonymKey = '') {
     addToken('affectedCommunityToken', 'community', affectedCommunityId);
   }
   return shared;
+}
+
+function sanitizedConversationTriples(draft = {}, review = {}) {
+  const artifactId = String(draft.id || '').slice(0, 160);
+  const subject = `${NS}event/${artifactId}`;
+  const reviewCategory = ['fraud', 'impersonation', 'harmful', 'insufficient'].includes(String(review.category || '').toLowerCase())
+    ? String(review.category).toLowerCase()
+    : 'unknown';
+  const text = String(draft.text || '');
+  const indicatorText = text.replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, ' ');
+  const triples = [
+    { subject, predicate: 'rdf:type', object: `${NS}KnowledgeAsset` },
+    { subject, predicate: `${NS}eventId`, object: literal(artifactId) },
+    { subject, predicate: `${NS}eventType`, object: literal('conversation_artifact') },
+    { subject, predicate: `${NS}publicationStatus`, object: literal('shared_memory') },
+    { subject, predicate: `${NS}lifecycleStage`, object: literal('shared_memory') },
+    { subject, predicate: `${NS}claimLevel`, object: literal('observation') },
+    { subject, predicate: `${NS}confidence`, object: literal(Math.max(0, Math.min(100, Number(draft.confidence) || 0))) },
+    { subject, predicate: `${NS}artifactQuality`, object: literal(Math.max(0, Math.min(100, Number(draft.quality) || 0))) },
+    { subject, predicate: `${NS}scamType`, object: literal(publicScamType(draft.scamType || draft.scam_type)) },
+    { subject, predicate: `${NS}curatorDecision`, object: literal('promote') },
+    { subject, predicate: `${NS}curatorCategory`, object: literal(reviewCategory) },
+    { subject, predicate: `${NS}evidencePolicyVersion`, object: literal('tracabot-evidence-v1') },
+    { subject, predicate: `${NS}redactionLevel`, object: literal('bounded_indicators') },
+    { subject, predicate: `${NS}provenance`, object: literal('scheduled_curator') },
+    { subject, predicate: `${DCTERMS_CREATED}`, object: literal(publicTimestamp(draft.created) || new Date().toISOString()) }
+  ];
+  for (const domain of [...new Set(extractDomains(indicatorText))].slice(0, 10)) {
+    const normalized = normalizeDomain(domain);
+    if (normalized) triples.push({ subject, predicate: `${NS}scamDomain`, object: literal(normalized) });
+  }
+  for (const wallet of [...new Set(extractWallets(indicatorText))].slice(0, 10)) {
+    const normalized = normalizeContextWallet(wallet);
+    if (normalized) triples.push({ subject, predicate: `${NS}wallet`, object: literal(normalized) });
+  }
+  for (const pattern of [...new Set(extractPatterns(indicatorText))].slice(0, 10)) {
+    const normalized = publicEvidencePattern(pattern);
+    if (normalized) triples.push({ subject, predicate: `${NS}scamPattern`, object: literal(normalized) });
+  }
+  return triples;
 }
 
 export class DkgClient {
@@ -619,6 +691,7 @@ export class DkgClient {
   }
 
   async writeEvent(event) {
+    if (sharingDenied(event)) throw new Error('DKG shared write blocked by explicit privacy denial');
     if (this.config.dkgWrites === false) {
       return {
         mode: 'dkg-disabled',
@@ -683,6 +756,12 @@ export class DkgClient {
         { subject, predicate: `${NS}messageText`, object: literal(String(event.payload.message_text || '').slice(0, 500)) },
         { subject, predicate: `${NS}confidence`, object: literal(event.payload.confidence || 0) },
         { subject, predicate: `${NS}scamType`, object: literal(event.payload.scam_type || '') },
+        ...(event.payload?.consent_to_share === true || event.payload?.consent_to_share === false
+          ? [{ subject, predicate: `${NS}consentToShare`, object: literal(String(event.payload.consent_to_share)) }]
+          : []),
+        ...(event.payload?.privacy_opt_out === true || event.payload?.privacy_opt_out === false
+          ? [{ subject, predicate: `${NS}privacyOptOut`, object: literal(String(event.payload.privacy_opt_out)) }]
+          : []),
         { subject, predicate: `${NS}artifactQuality`, object: literal(event.payload.artifact_quality || 0) },
         { subject, predicate: `${NS}expiresAt`, object: literal(event.payload.expires_at || '') },
         { subject, predicate: `<${DCTERMS_CREATED}>`, object: literal(event.timestamp) }
@@ -692,31 +771,99 @@ export class DkgClient {
   }
 
   async pendingConversationArtifacts({ limit = 25 } = {}) {
-    const sparql = `SELECT ?s ?id ?text ?confidence ?quality ?expires ?chat ?user ?username ?created WHERE { GRAPH ?g {
-      ?s <${NS}eventType> "conversation_artifact" ; <${NS}eventId> ?id ; <${NS}messageText> ?text ; <${NS}expiresAt> ?expires .
-      OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}artifactQuality> ?quality . }
-      OPTIONAL { ?s <${NS}telegramChatId> ?chat . } OPTIONAL { ?s <${NS}actorIdentity> ?user . }
-      OPTIONAL { ?s <${NS}username> ?username . } OPTIONAL { ?s <${DCTERMS_CREATED}> ?created . }
-    } } ORDER BY ?expires LIMIT ${Math.min(100, Math.max(1, Number(limit) || 25))}`;
     if (this.config.dkgReads === false) throw new Error('DKG reads disabled; cannot curate Working Memory');
+    const candidateLimit = Math.min(100, Math.max(1, Number(limit) || 25));
+    const bindingLimit = 16;
     const client = await this.client();
-    const response = await client.query(sparql, { contextGraphId: this.config.contextGraph, view: 'working-memory', includeSharedMemory: false });
-    const bindings = response?.result?.bindings || response?.bindings;
-    if (!Array.isArray(bindings)) throw new Error('DKG Working Memory query unavailable; curation stopped');
-    return bindings.filter((row) => cleanValue(row.s).startsWith(`${NS}event/`) && String(cleanValue(row.id)).length > 0).map((row) => ({
-      id: cleanValue(row.id), text: cleanValue(row.text), confidence: numeric(row.confidence), quality: numeric(row.quality),
-      expires: cleanValue(row.expires), chatId: cleanValue(row.chat), userId: cleanValue(row.user),
-      username: cleanValue(row.username), created: cleanValue(row.created)
-    }));
+    const query = async (sparql) => client.query(sparql, {
+      contextGraphId: this.config.contextGraph,
+      view: 'working-memory',
+      includeSharedMemory: false
+    });
+    // Bound the number of candidate artifacts first. Each joined row below is
+    // then fetched per selected artifact so a global row LIMIT cannot hide a
+    // conflicting consent/privacy binding outside the page.
+    const candidateResponse = await query(`SELECT DISTINCT ?id WHERE { GRAPH ?g {
+      ?s <${NS}eventType> "conversation_artifact" ; <${NS}eventId> ?id ; <${NS}messageText> ?text ; <${NS}expiresAt> ?expires .
+    } } LIMIT ${candidateLimit}`);
+    const candidateBindings = candidateResponse?.result?.bindings || candidateResponse?.bindings;
+    if (!Array.isArray(candidateBindings)) throw new Error('DKG Working Memory query unavailable; curation stopped');
+    const candidateIds = [...new Set(candidateBindings.map((row) => cleanValue(row.id)).filter(Boolean))]
+      .slice(0, candidateLimit);
+    const bool = (value) => String(value ?? '') === 'true' ? true : String(value ?? '') === 'false' ? false : null;
+    const drafts = [];
+    for (const id of candidateIds) {
+      let rows;
+      try {
+        const response = await query(`SELECT ?s ?id ?text ?confidence ?quality ?expires ?chat ?user ?username ?scamType ?consent ?privacy ?created WHERE { GRAPH ?g {
+          VALUES ?id { ${literal(id)} }
+          ?s <${NS}eventType> "conversation_artifact" ; <${NS}eventId> ?id ; <${NS}messageText> ?text ; <${NS}expiresAt> ?expires .
+          OPTIONAL { ?s <${NS}confidence> ?confidence . } OPTIONAL { ?s <${NS}artifactQuality> ?quality . }
+          OPTIONAL { ?s <${NS}telegramChatId> ?chat . } OPTIONAL { ?s <${NS}actorIdentity> ?user . }
+          OPTIONAL { ?s <${NS}username> ?username . } OPTIONAL { ?s <${NS}scamType> ?scamType . }
+          OPTIONAL { ?s <${NS}consentToShare> ?consent . } OPTIONAL { ?s <${NS}privacyOptOut> ?privacy . }
+          OPTIONAL { ?s <${DCTERMS_CREATED}> ?created . }
+        } } LIMIT ${bindingLimit + 1}`);
+        const bindings = response?.result?.bindings || response?.bindings;
+        if (!Array.isArray(bindings)) continue;
+        rows = bindings.filter((row) => cleanValue(row.id) === id);
+      } catch {
+        // An unavailable per-artifact authorization read is incomplete; keep
+        // the artifact private instead of promoting on partial data.
+        continue;
+      }
+      // Sentinel row means the bounded authorization page is saturated and we
+      // cannot prove completeness. Drop the candidate rather than first-row-win.
+      if (!rows.length || rows.length > bindingLimit) continue;
+      const distinct = (key) => new Set(rows.map((row) => cleanValue(row[key])).filter(Boolean));
+      if (['text', 'expires', 'chat', 'user', 'username', 'created', 'scamType', 'confidence', 'quality']
+        .some((key) => distinct(key).size > 1)) continue;
+      const consentValues = rows.map((row) => bool(cleanValue(row.consent)));
+      const privacyValues = rows.map((row) => bool(cleanValue(row.privacy)));
+      drafts.push({
+        id,
+        text: cleanValue(rows[0].text),
+        confidence: numeric(rows[0].confidence),
+        quality: numeric(rows[0].quality),
+        expires: cleanValue(rows[0].expires),
+        chatId: cleanValue(rows[0].chat),
+        userId: cleanValue(rows[0].user),
+        username: cleanValue(rows[0].username),
+        scamType: cleanValue(rows[0].scamType),
+        created: cleanValue(rows[0].created),
+        // Denial dominates regardless of binding order; any missing consent
+        // value leaves authorization unknown and therefore non-shareable.
+        consentToShare: consentValues.some((value) => value === false)
+          ? false
+          : consentValues.every((value) => value === true) ? true : null,
+        privacyOptOut: privacyValues.some((value) => value === true)
+      });
+    }
+    return drafts.sort((a, b) => String(a.expires).localeCompare(String(b.expires)));
   }
 
-  async resolveConversationArtifact(id, { share = false } = {}) {
+  async resolveConversationArtifact(id, { share = false, draft = null, review = null } = {}) {
     const client = await this.client();
     const name = `tracabot-draft-${id}`;
     if (share) {
-      if (typeof client.knowledgeAssetFinalize !== 'function' || typeof client.knowledgeAssetShare !== 'function') throw new Error('DKG adapter cannot promote Working Memory asset');
-      await client.knowledgeAssetFinalize(this.config.contextGraph, name);
-      return client.knowledgeAssetShare(this.config.contextGraph, name);
+      if (!draft || !review) throw new Error('Sanitized artifact draft and review are required before sharing');
+      const consent = draft.payload?.consent_to_share ?? draft.consentToShare ?? draft.consent_to_share;
+      const privacyOptOut = draft.payload?.privacy_opt_out ?? draft.privacyOptOut ?? draft.privacy_opt_out;
+      if (consent === false || privacyOptOut === true) throw new Error('DKG shared write blocked by explicit privacy denial');
+      if (consent !== true) throw new Error('DKG shared write blocked: staged artifact has no explicit sharing consent');
+      if (this.config.dkgWrites === false) throw new Error('DKG writes disabled');
+      const sharedName = `tracabot-shared-${id}`;
+      const write = await this.writeThroughMemoryLifecycle(client, sharedName, sanitizedConversationTriples(draft, review));
+      let rawDiscarded = false;
+      if (typeof client.knowledgeAssetDiscard === 'function') {
+        try {
+          await client.knowledgeAssetDiscard(this.config.contextGraph, name);
+          rawDiscarded = true;
+        } catch {
+          // The raw asset remains private Working Memory; never share it.
+        }
+      }
+      return { ...write, sharedName, sanitized: true, rawDiscarded };
     }
     if (typeof client.knowledgeAssetDiscard !== 'function') throw new Error('DKG adapter cannot discard Working Memory asset');
     return client.knowledgeAssetDiscard(this.config.contextGraph, name);
@@ -734,30 +881,6 @@ export class DkgClient {
       { subject, predicate: `${NS}curatorReason`, object: literal(review.reason) },
       { subject, predicate: `${NS}curatorEvidence`, object: literal(review.evidence) }
     ]);
-  }
-
-  async confirmedSwmScamHistory(userId) {
-    if (this.config.dkgReads === false) throw new Error('DKG reads disabled');
-    if (!userId || Buffer.byteLength(this.config.dkgPseudonymKey || '') < 32) throw new Error('Exact actor identity unavailable');
-    const identity = pseudonym(this.pseudonymKey, 'telegram-user', String(userId));
-    const sparql = `SELECT ?g ?s ?type ?verified ?created ?testMode WHERE { GRAPH ?g {
-      ?s <${NS}actorIdentity> ${literal(identity)} ; <${NS}eventType> ?type ; <${NS}adminVerified> ?verified .
-      OPTIONAL { ?s <${DCTERMS_CREATED}> ?created . }
-      OPTIONAL { ?s <${NS}testMode> ?testMode . }
-    } } ORDER BY DESC(?created) LIMIT 51`;
-    const client = await this.client();
-    const response = await client.query(sparql, { contextGraphId: this.config.contextGraph, view: 'shared-working-memory', includeSharedMemory: false });
-    const bindings = response?.result?.bindings || response?.bindings;
-    if (!Array.isArray(bindings)) throw new Error('Shared Working Memory history unavailable');
-    if (bindings.length > 50 || bindings.some((row) => !Number.isFinite(Date.parse(cleanValue(row.created))))) {
-      throw new Error('Shared Working Memory history incomplete; ban blocked');
-    }
-    const decisions = bindings.filter((row) => isProductionBindingForContext(row, this.config.contextGraph) && cleanValue(row.verified) === 'true')
-      .map((row) => ({ eventId: eventIdFromSource(row.s), eventType: cleanValue(row.type), created: cleanValue(row.created) }))
-      .filter((row) => row.eventId && Number.isFinite(Date.parse(row.created)))
-      .sort((a, b) => Date.parse(b.created) - Date.parse(a.created));
-    if (decisions[0]?.eventType === 'review_overturned') return [];
-    return decisions.filter((row) => ['ban_executed', 'review_upheld'].includes(row.eventType)).slice(0, 3);
   }
 
   async writeThroughMemoryLifecycle(client, name, triples) {
@@ -1189,8 +1312,8 @@ export class DkgClient {
       if (!isProductionBindingForContext(binding, this.config.contextGraph)) continue;
       const eventId = eventIdFromSource(binding.s);
       if (!eventId) continue;
-      const confidence = numeric(binding.confidence || '0');
-      const claimLevel = cleanValue(binding.claimLevel);
+      const confidence = Math.max(0, Math.min(100, numeric(binding.confidence || '0')));
+      const claimLevel = publicClaimLevel(binding.claimLevel);
       if (confidence < 70 && !['confirmed_scam', 'high_confidence_flag', 'admin_enforcement'].includes(claimLevel)) continue;
       let record = byEvent.get(eventId);
       if (!record) {
@@ -1199,23 +1322,23 @@ export class DkgClient {
           eventType: 'fraud_campaign',
           claimLevel: claimLevel || (confidence >= 85 ? 'high_confidence_flag' : 'observation'),
           confidence,
-          scamType: cleanValue(binding.scamType) || 'campaign',
-          createdAt: cleanValue(binding.created),
+          scamType: publicScamType(cleanValue(binding.scamType)),
+          createdAt: publicTimestamp(binding.created),
           campaignKey: publicCampaignKey(cleanValue(binding.campaignKey)),
-          eventCount: numeric(binding.campaignEventCount || '0'),
-          communityCount: numeric(binding.campaignCommunityCount || '0'),
+          eventCount: Math.max(0, Math.min(1000000, numeric(binding.campaignEventCount || '0'))),
+          communityCount: Math.max(0, Math.min(1000000, numeric(binding.campaignCommunityCount || '0'))),
           indicators: { domains: [], wallets: [], patterns: [] },
-          actorRef: cleanValue(binding.actorIdentity),
-          communityRef: cleanValue(binding.communityToken),
-          evidenceFingerprint: cleanValue(binding.evidenceFingerprint),
+          actorRef: publicHmacRef(binding.actorIdentity),
+          communityRef: publicHmacRef(binding.communityToken),
+          evidenceFingerprint: publicFingerprint(binding.evidenceFingerprint),
           evidenceRefs: [],
           provenance: { policy: 'tracabot-evidence-v1', layer: 'shared_working_memory', source: 'context_graph' }
         };
         byEvent.set(eventId, record);
       }
-      const domain = cleanValue(binding.domain);
-      const wallet = cleanValue(binding.wallet);
-      const pattern = cleanValue(binding.pattern);
+      const domain = normalizeDomain(cleanValue(binding.domain));
+      const wallet = normalizeContextWallet(cleanValue(binding.wallet));
+      const pattern = publicEvidencePattern(cleanValue(binding.pattern));
       if (domain && !record.indicators.domains.includes(domain)) record.indicators.domains.push(domain);
       if (wallet && !record.indicators.wallets.includes(wallet)) record.indicators.wallets.push(wallet);
       if (pattern && !record.indicators.patterns.includes(pattern)) record.indicators.patterns.push(pattern);

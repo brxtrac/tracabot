@@ -210,7 +210,7 @@ export async function curateWorkingMemory({ dkg = new DkgClient(loadConfig()), l
           }
           if (!dkg.annotateConversationArtifact) throw new Error('DKG cannot attach review provenance');
           await dkg.annotateConversationArtifact(draft.id, row);
-          await dkg.resolveConversationArtifact(draft.id, { share: true });
+          await dkg.resolveConversationArtifact(draft.id, { share: true, draft, review: row });
         }
         ledger.prepare("UPDATE curator_reviews SET status='done', updated_at=? WHERE id=?")
           .run(new Date().toISOString(), draft.id);

@@ -84,9 +84,26 @@ scan - Check a user, wallet, or replied message for scam risk
 report - Report suspicious users, messages, links, wallets, or forwarded DMs
 ban - Admin: optional ban command; normal admin bans are logged automatically
 mute - Admin: mute a replied or mentioned user for a duration
+appeal - Private: appeal your own ban and review your local cases
+appeals - Admin: review pending ban appeals for chats you moderate
+controls - Private: current-admin protection controls and auto-ban overrides
+status - Private: capability, coverage, and mode summary for groups you administer
 ```
 
 8. Invite the bot to the target Telegram group and grant it **admin rights** (at minimum: Delete Messages, Restrict Users, Ban Users). This admin setup is also what enables automatic native ban logging; no per-ban command is required.
+
+9. Choose the message-visibility setting. In BotFather, `/setprivacy` → select the bot → **Disable** to request broader ordinary-message delivery. Existing observer memberships may require removing and re-adding the bot before that setting takes effect, so do not treat it as proof of effective coverage. If privacy stays enabled, the bot still receives commands, mentions, replies, and service messages such as joins, but not every ordinary message. Adding the bot as an administrator also gives it ordinary-message visibility under Telegram's admin semantics. Delete actions require Telegram's explicit `can_delete_messages=true`; an absent or false value is denied (creator is the exception).
+
+Effective mode is detected per group from live `getChatMember`, never from `.env` or a desired policy. Tell the operator plainly:
+
+| Live bot membership | Mode and exact capability | Coverage limits |
+| --- | --- | --- |
+| Administrator/creator | Admin protection. Can capture live `chat_member` bans and enforce only with the exact Restrict/Ban and Delete rights shown by Telegram. | No Recent Actions, pre-install bans, chat history, or unstated reasons. |
+| Administrator without Restrict/Ban | Admin event observation. May receive admin events and delete if permitted, but cannot ban, restrict, unban, or run restriction-based challenges. | Partial enforcement; status shows the missing right. |
+| Ordinary member | Observer. Reviews actual join service messages and visible ordinary messages, logs evidence locally, and cannot ban, restrict, delete, unban, or challenge by any route. | Partial join visibility; no guaranteed ban feed; no historical recovery. |
+| Lookup failed/unknown | Degraded observer. No destructive action. | Status labels degraded and never claims full protection. |
+
+Observer groups are quiet by default: review warnings, pending notices, and challenges do not post automatically. `TRACABOT_OBSERVER_ADVISORIES=false` is the default; setting it true permits at most one bounded, cooldown-limited, evidence-backed advisory per six hours where the group allows bot sends. Advisories carry no target name, private text, or definitive scam label. `/status` and the private `/start` Status button show the live mode and coverage for groups where the caller is a current admin. A BotFather privacy change is reported as `broader delivery configured; effective coverage unverified` until a live group membership/coverage read confirms it; remove and re-add the bot if the change does not take effect.
 
 Store the token securely. It will go into `TELEGRAM_BOT_TOKEN`. Record the BotFather username without the leading `@`; it can go into optional `TRACABOT_BOT_USERNAME` so commands addressed to other bots are ignored from the first update. TRACaBot also resolves its username with Telegram `getMe` during startup.
 
@@ -317,11 +334,13 @@ Submissions are off by default, queued, deduplicated, retried with bounded backo
 
 ### Platform support
 
-Telegram is the only implemented platform. Discord and other adapters are not implemented; a bot token alone never grants message or membership event visibility. Required Telegram setup: add the bot as an administrator with Delete Messages, Restrict/Ban Users, and the ability to see group messages; request `chat_member` updates (the bot does this in polling).
+Telegram is the only implemented platform. Discord and other adapters are not implemented; a bot token alone never grants message or membership event visibility. For admin protection, add the bot as an administrator with explicit Delete Messages and Restrict/Ban Users rights, request `chat_member` updates (the bot does this in polling), and keep those permissions or use BotFather Group Privacy with a re-add if needed for broader ordinary-message delivery. Without admin rights the bot runs as a quiet observer with partial coverage and no enforcement; privacy changes alone are not treated as verified observer coverage.
 
 ### Native admin ban logging (default)
 
 Once the bot is a group administrator and polling, it requests `chat_member` updates. When any admin bans a member through normal Telegram controls, TRACaBot records a live enforcement event with the target, community, observed time, the acting admin when Telegram provides it, and an explicit reason status. No `/ban` command or manual approval is needed.
+
+If the bot is an ordinary member or its permission lookup is unavailable, it is an observer/degraded observer. It never claims a comprehensive ban or join feed, never infers a ban from a generic `left` service message, and never attempts a ban/restrict/delete/unban/challenge. Mode changes from `my_chat_member` are applied immediately, and destructive calls re-check rights before acting so a demoted cached admin state cannot be used.
 
 Be exact about platform limits when explaining this to an operator:
 
@@ -518,6 +537,7 @@ Start diagnostics with `sudo systemctl status tracabot.service` and `sudo journa
 - [ ] DKG + OpenClaw daemon running and reachable
 - [ ] Telegram bot created with correct commands set
 - [ ] Bot invited to group with proper admin rights; native admin bans are auto-logged from `chat_member` updates
+- [ ] Operator understands admin versus observer mode, `/status` capability/coverage reporting, and that observer groups are quiet and cannot enforce
 - [ ] Operator understands that Recent Actions, pre-install bans, and unstated reasons are unavailable
 - [ ] `.env` contains a valid token and at least one admin
 - [ ] Optional `TRACABOT_BOT_USERNAME` matches BotFather username without `@`, or startup `getMe` succeeds

@@ -2,8 +2,10 @@ import { createHash } from 'node:crypto';
 import { analyzeMessage } from './scam-analyzer.js';
 import { extractDomains, extractPatterns, extractWallets, pseudonym } from './dkg-client.js';
 import { reviewBan } from './curator.js';
+import { artifactSharingPolicy } from './artifact-policy.js';
 
 export function artifactFromUpdate(update, config) {
+  if (config.wmArtifacts === false || config.dkgWrites === false) return null;
   const message = update.message || update.channel_post;
   if (!message?.chat?.id || !message.message_id || !message.from?.id || message.from.is_bot) return null;
   const text = String(message.text || message.caption || '').slice(0, 700);
@@ -19,6 +21,7 @@ export function artifactFromUpdate(update, config) {
   const safeText = text.replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[email]')
     .replace(/\+?\d[\d\s().-]{8,}\d/g, '[phone]');
   const id = `tg-${createHash('sha256').update(`${message.chat.id}:${message.message_id}`).digest('hex').slice(0, 24)}`;
+  const sharingAllowed = artifactSharingPolicy({ config, message, update }).allowed;
   return {
     id, event_type: 'conversation_artifact', timestamp: new Date(message.date * 1000 || Date.now()).toISOString(),
     chat: { id: hash('telegram-chat', String(message.chat.id)) },
@@ -26,7 +29,9 @@ export function artifactFromUpdate(update, config) {
     payload: {
       source_message_id: String(message.message_id), message_text: safeText,
       confidence, artifact_quality: Math.min(100, Math.round(confidence + (domains.length + wallets.length + patterns.length ? 15 : 0))),
-      scam_type: risk.scam_type || '', expires_at: new Date(Date.now() + 48 * 3600000).toISOString(),
+      scam_type: risk.scam_type || '', consent_to_share: sharingAllowed,
+      ...(sharingAllowed ? {} : { privacy_opt_out: true }),
+      expires_at: new Date(Date.now() + 48 * 3600000).toISOString(),
       publication_status: 'working_memory', lifecycle_stage: 'working_memory_draft'
     }
   };
@@ -43,55 +48,12 @@ export function highConfidenceAutoBan(message) {
   return walletRequest && link && (pressure || authority);
 }
 
-async function telegramCall(config, method, params, fetcher) {
-  const response = await fetcher(`https://api.telegram.org/bot${config.telegramToken}/${method}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params), signal: AbortSignal.timeout(15000)
-  });
-  if (!response.ok) throw new Error(`Telegram ${method} HTTP ${response.status}`);
-  const payload = await response.json();
-  if (!payload.ok) throw new Error(`Telegram ${method}: ${String(payload.description || 'failed').slice(0, 120)}`);
-  return payload.result;
-}
-
 export async function enforceHighConfidenceAutoBan(message, { config, store, dkg, fetcher = fetch, reviewer = reviewBan }) {
-  if (!highConfidenceAutoBan(message)) return false;
-  if (config.dkgReads === false) return false;
-  if (!dkg?.confirmedSwmScamHistory) return false;
-  let history;
-  try {
-    history = await dkg.confirmedSwmScamHistory(message.from.id);
-    if (!history.length) return false;
-    const decision = await reviewer(message, history);
-    if (decision.action !== 'ban' || typeof decision.evidence !== 'string' || decision.evidence.length < 12
-      || !history.some((row) => row.eventId === decision.historyEventId)
-      || !String(message.text || message.caption || '').toLowerCase().includes(String(decision.evidence || '').toLowerCase())) return false;
-  } catch (error) {
-    console.error(`Auto-ban verification unavailable: ${error instanceof Error ? error.message : String(error)}`);
-    return false;
-  }
-  const chat = message.chat.id;
-  const user = message.from.id;
-  const [target, bot] = await Promise.all([
-    telegramCall(config, 'getChatMember', { chat_id: chat, user_id: user }, fetcher),
-    telegramCall(config, 'getMe', {}, fetcher)
-  ]);
-  if (!bot?.id || String(bot.id) === String(user) || !['member', 'restricted'].includes(target?.status)) return false;
-  const botMember = await telegramCall(config, 'getChatMember', { chat_id: chat, user_id: bot.id }, fetcher);
-  if (botMember?.status !== 'administrator' || botMember.can_restrict_members !== true) return false;
-  const key = `tracabot-auto-ban:${chat}:${user}:${message.message_id}`;
-  const params = { chat_id: chat, user_id: user, revoke_messages: true };
-  const claim = store.beginEffect(key, 'banChatMember', params, { staleAction: 'uncertain' });
-  if (claim.completed) return true;
-  if (claim.inProgress || claim.uncertain) return false;
-  try {
-    const result = await telegramCall(config, 'banChatMember', params, fetcher);
-    store.completeEffect(key, result);
-    store.incrementMetric?.('high_confidence_auto_bans');
-    return true;
-  } catch (error) {
-    store.markEffectUncertain(key, error);
-    throw error;
-  }
+  // Retired destructive legacy path: no model, pattern, or ordinary ban may
+  // authorize a Telegram sanction. Automatic removals use the exact-identity
+  // evidence policy through the main bot runtime.
+  void message; void config; void store; void dkg; void fetcher; void reviewer;
+  return false;
 }
 
 function isTransientPollError(error) {
@@ -147,10 +109,7 @@ export async function pollArtifacts({ config, store, dkg, fetcher = fetch, signa
       if (claim !== 'completed') {
         try {
           const event = artifactFromUpdate(update, config);
-          if (event) await dkg.stageConversationArtifact(event);
-          if (event && config.highConfidenceAutoBan === true && highConfidenceAutoBan(update.message || update.channel_post)) {
-            store.enqueueBanCandidate(update.message || update.channel_post);
-          }
+          if (event?.payload?.consent_to_share === true) await dkg.stageConversationArtifact(event);
           store.completeUpdate(botKey, update.update_id, update.update_id + 1);
         } catch (error) {
           store.failUpdate(botKey, update.update_id, error);
@@ -163,20 +122,13 @@ export async function pollArtifacts({ config, store, dkg, fetcher = fetch, signa
 }
 
 export async function processBanCandidates({ config, store, dkg, fetcher = fetch, reviewer = reviewBan, signal }) {
+  // Retired worker: drain any candidates queued by older deployments without
+  // performing a destructive action. Exact-identity join protection remains in
+  // the main bot runtime.
+  void config; void dkg; void fetcher; void reviewer;
   while (!signal?.aborted) {
-    if (!store.banReviewBudget()) { await new Promise((resolve) => setTimeout(resolve, 30000)); continue; }
     const candidate = store.nextBanCandidate();
     if (!candidate) { await new Promise((resolve) => setTimeout(resolve, 3000)); continue; }
-    try {
-      if (!Number.isFinite(candidate.message.date) || Date.now() - candidate.message.date * 1000 > 30 * 60000) {
-        store.finishBanCandidate(candidate.key, 'Candidate older than 30 minutes');
-        continue;
-      }
-      await enforceHighConfidenceAutoBan(candidate.message, { config, store, dkg, fetcher, reviewer });
-      store.finishBanCandidate(candidate.key);
-    } catch (error) {
-      store.finishBanCandidate(candidate.key, error instanceof Error ? error.message : String(error));
-      console.error('Ban candidate failed:', error);
-    }
+    store.finishBanCandidate(candidate.key, 'legacy_destructive_worker_retired');
   }
 }

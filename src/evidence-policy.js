@@ -11,6 +11,165 @@ export const CLAIM_LEVELS = Object.freeze([
   'retracted'
 ]);
 
+// Only these known product semantics may leave local storage. Arbitrary graph
+// or event text is never used as a public category or indicator.
+export const PUBLIC_SCAM_TYPES = Object.freeze([
+  'unknown',
+  'other',
+  'impersonation',
+  'phishing',
+  'giveaway',
+  'investment_scam',
+  'gambling_promotion',
+  'dm_impersonation',
+  'known_campaign',
+  'admin_enforcement',
+  'admin_action',
+  'onboarding_abuse',
+  'false_positive',
+  'benign_conversation_flow',
+  'education',
+  'fraud',
+  'scam'
+]);
+
+export const PUBLIC_EVIDENCE_PATTERNS = Object.freeze([
+  'fake-airdrop',
+  'wallet-drain',
+  'impersonation',
+  'investment-partnership-lure',
+  'urgency-pressure',
+  'gambling-promotion',
+  'dm-impersonation',
+  'role-impersonation',
+  'solicitation-lure',
+  'screenshot-evidence',
+  'join_challenge_repeat_failure',
+  'onboarding_abuse',
+  'fake-support',
+  'admin_enforcement'
+]);
+
+export const PUBLIC_BAN_CONTEXT_CATEGORIES = Object.freeze([
+  'unknown',
+  'behavior',
+  'spam',
+  'suspected_scam',
+  'suspected_campaign'
+]);
+
+export const PUBLIC_BAN_CONTEXT_SEVERITIES = Object.freeze([
+  'unknown',
+  'low',
+  'medium',
+  'high'
+]);
+
+export const PUBLIC_BEHAVIOR_FLAGS = Object.freeze([
+  'threat',
+  'harassment'
+]);
+
+export const PUBLIC_ENFORCEMENT_ACTIONS = Object.freeze([
+  'unknown',
+  'ban',
+  'restriction',
+  'unban'
+]);
+
+export const PUBLIC_ENFORCEMENT_SOURCES = Object.freeze([
+  'telegram_chat_member',
+  'tracabot_join_protection',
+  'telegram_bot_command',
+  'automated_enforcement'
+]);
+
+export const PUBLIC_PROVENANCE_SOURCES = Object.freeze([
+  'unknown',
+  'telegram',
+  'sangmata',
+  'telegram_report',
+  'telegram_admin_review',
+  'known_campaign_auto_ban',
+  'confirmed_campaign_auto_ban',
+  'manual /ban command',
+  'prior-community warning ban button',
+  'local_admin_review',
+  'silent_join_protection',
+  'chat_member',
+  'telegram_chat_member',
+  'native_chat_member_admin_ban',
+  'native_chat_member_unban',
+  'telegram_private_appeal_overturn',
+  'proactive_scan_curator',
+  'openclaw_monitor_chat_event',
+  'authorized_skill_review',
+  'creator-curator',
+  'authenticated_community_api',
+  'context_graph',
+  'dkg'
+]);
+
+const PUBLIC_SCAM_TYPE_SET = new Set(PUBLIC_SCAM_TYPES);
+const PUBLIC_EVIDENCE_PATTERN_SET = new Set(PUBLIC_EVIDENCE_PATTERNS);
+const PUBLIC_BAN_CONTEXT_CATEGORY_SET = new Set(PUBLIC_BAN_CONTEXT_CATEGORIES);
+const PUBLIC_BAN_CONTEXT_SEVERITY_SET = new Set(PUBLIC_BAN_CONTEXT_SEVERITIES);
+const PUBLIC_BEHAVIOR_FLAG_SET = new Set(PUBLIC_BEHAVIOR_FLAGS);
+const PUBLIC_ENFORCEMENT_ACTION_SET = new Set(PUBLIC_ENFORCEMENT_ACTIONS);
+const PUBLIC_ENFORCEMENT_SOURCE_SET = new Set(PUBLIC_ENFORCEMENT_SOURCES);
+const PUBLIC_PROVENANCE_SOURCE_SET = new Set(PUBLIC_PROVENANCE_SOURCES);
+
+function publicSlug(value = '') {
+  return String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
+}
+
+export function publicScamType(value = '') {
+  const normalized = publicSlug(value);
+  return PUBLIC_SCAM_TYPE_SET.has(normalized) ? normalized : 'unknown';
+}
+
+export function publicEvidencePattern(value = '') {
+  const normalized = publicSlug(value);
+  return PUBLIC_EVIDENCE_PATTERN_SET.has(normalized) ? normalized : '';
+}
+
+export function publicBanContextCategory(value = '') {
+  const normalized = publicSlug(value);
+  return PUBLIC_BAN_CONTEXT_CATEGORY_SET.has(normalized) ? normalized : 'unknown';
+}
+
+export function publicBanContextSeverity(value = '') {
+  const normalized = publicSlug(value);
+  return PUBLIC_BAN_CONTEXT_SEVERITY_SET.has(normalized) ? normalized : 'unknown';
+}
+
+export function publicBehaviorFlags(values = [], limit = 5) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => publicSlug(value))
+    .filter((value) => PUBLIC_BEHAVIOR_FLAG_SET.has(value)))]
+    .slice(0, limit);
+}
+
+export function publicEnforcementAction(value = '') {
+  const normalized = publicSlug(value);
+  return PUBLIC_ENFORCEMENT_ACTION_SET.has(normalized) ? normalized : 'unknown';
+}
+
+export function publicEnforcementSource(value = '') {
+  const normalized = text(value);
+  return PUBLIC_ENFORCEMENT_SOURCE_SET.has(normalized) ? normalized : '';
+}
+
+export function publicProvenanceSource(value = '') {
+  const normalized = text(value) || 'unknown';
+  return PUBLIC_PROVENANCE_SOURCE_SET.has(normalized) ? normalized : 'unknown';
+}
+
+export function publicIsoTimestamp(value = '') {
+  const ms = Date.parse(String(value ?? ''));
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : '';
+}
+
 const PROMOTABLE_EVENT_TYPES = new Set([
   'fraud_finding',
   'fraud_campaign',
@@ -29,6 +188,7 @@ const PUBLIC_EVENT_TYPES = new Set([
   'ban_executed',
   'restrict_executed',
   'review_upheld',
+  'review_overturned',
   'unsafe_chat_event'
 ]);
 
@@ -157,6 +317,103 @@ function sharingDenied(event = {}) {
   return p.consent_to_share === false || p.privacy_opt_out === true;
 }
 
+function lineageRefIds(event = {}, limit = 40) {
+  const p = payload(event);
+  const structural = boundedUnique([
+    p.target_event_id,
+    p.report_event_id,
+    p.source_event_id,
+    ...(p.source_event_ids || [])
+  ], 500).map(refId).filter(Boolean);
+  const corroborating = boundedUnique([
+    ...(p.evidence_root_ids || []),
+    ...(p.related_event_ids || [])
+  ], 500).map(refId).filter(Boolean);
+  const ids = [...new Set([...structural, ...corroborating])];
+  return {
+    refs: ids.slice(0, limit).map((id) => ({ id, structural: structural.includes(id) })),
+    overflow: ids.length > limit
+  };
+}
+
+/**
+ * Bounded downward-lineage audit shared by denial and chat-opt-out checks.
+ * `ok:false` means the lineage could not be fully verified (missing structural
+ * reference, reference/depth/node truncation, or missing source). `denied`
+ * means an event in the downward lineage carries explicit privacy denial.
+ * Upward citations are intentionally excluded so a private appeal that cites a
+ * finding does not taint that finding globally.
+ */
+export function lineagePrivacyAudit(events = [], eventOrId = '', { maxDepth = 8, maxNodes = 64 } = {}) {
+  const list = Array.isArray(events) ? events : [];
+  const byId = new Map(list.map((event) => [String(event?.id || ''), event]));
+  let start = typeof eventOrId === 'string' || typeof eventOrId === 'number'
+    ? byId.get(String(eventOrId))
+    : eventOrId;
+  const startId = String(typeof eventOrId === 'string' || typeof eventOrId === 'number' ? eventOrId : start?.id || '');
+  if (!start && startId) {
+    const matches = list
+      .filter((event) => String(event?.payload?.target_event_id || '') === startId
+        || String(event?.payload?.report_event_id || '') === startId);
+    if (matches.length === 1) start = matches[0];
+  }
+  if (!start) return { ok: false, denied: false, chatIds: [] };
+  const audit = {
+    ok: true,
+    denied: sharingDenied(start),
+    chatIds: []
+  };
+  const addChat = (event = {}) => {
+    const id = event.payload?.target_chat_id || event.chat?.id;
+    if (id !== undefined && id !== null && String(id) !== '') audit.chatIds.push(String(id));
+  };
+  addChat(start);
+  const depthLimit = Math.max(1, Number(maxDepth) || 8);
+  const nodeLimit = Math.max(1, Number(maxNodes) || 64);
+  const seen = new Set([String(start.id || '')].filter(Boolean));
+  const startRefs = lineageRefIds(start);
+  if (startRefs.overflow) audit.ok = false;
+  if (startRefs.refs.some((ref) => ref.structural && !byId.has(ref.id))) audit.ok = false;
+  const queue = startRefs.refs.map((ref) => ({ ...ref, depth: 1 }));
+  while (queue.length) {
+    const { id, depth } = queue.shift();
+    if (!id || seen.has(id)) continue;
+    if (seen.size >= nodeLimit) {
+      audit.ok = false;
+      break;
+    }
+    seen.add(id);
+    const current = byId.get(id);
+    if (!current) continue;
+    addChat(current);
+    if (sharingDenied(current)) audit.denied = true;
+    const refs = lineageRefIds(current);
+    if (refs.overflow) audit.ok = false;
+    // Validate structural existence independently of the visited set: the same
+    // ID may already have been traversed as a corroborating root.
+    if (refs.refs.some((ref) => ref.structural && !byId.has(ref.id))) audit.ok = false;
+    if (depth >= depthLimit) {
+      if (refs.refs.length) audit.ok = false;
+      continue;
+    }
+    for (const next of refs.refs) {
+      if (!seen.has(next.id)) queue.push({ ...next, depth: depth + 1 });
+    }
+  }
+  audit.chatIds = [...new Set(audit.chatIds)];
+  return audit;
+}
+
+/**
+ * True for explicit denial or for any lineage that cannot be fully verified:
+ * missing referenced events, reference/depth/node truncation. Uses the same
+ * conservative traversal as lineagePrivacyAudit.
+ */
+export function sharingDeniedInLineage(events = [], eventOrId = '', options = {}) {
+  const audit = lineagePrivacyAudit(events, eventOrId, options);
+  return !audit.ok || audit.denied;
+}
+
 function modelOnly(event = {}) {
   const p = payload(event);
   const indicators = indicatorSets(event);
@@ -183,7 +440,8 @@ function explicitReview(event = {}) {
 
 function retracted(event = {}, history = []) {
   if (event.event_type === 'review_overturned' || payload(event).retracted === true) return true;
-  const targetIds = new Set([event.id, ...evidenceRootIds(event)].filter(Boolean));
+  const p = payload(event);
+  const targetIds = new Set([event.id, p.target_event_id, p.source_event_id, ...evidenceRootIds(event)].filter(Boolean));
   return history.some((item) => item?.event_type === 'review_overturned'
     && targetIds.has(text(item.payload?.target_event_id)));
 }
@@ -262,7 +520,7 @@ export function evaluateEvidence(event = {}, { history = [], policy = {} } = {})
   if (p.test_mode === true || p.source === 'test-command-loop') reasons.push('test_event');
   if (isRetracted) reasons.push('retracted');
   if (onlyModel) reasons.push('model_only_suspicion');
-  if (sharingDenied(event)) reasons.push('sharing_consent_denied');
+  if (sharingDenied(event) || sharingDeniedInLineage(history, event)) reasons.push('sharing_consent_denied');
   if (['review_upheld', 'review_overturned'].includes(event.event_type) && !eventTargetKey(event)) reasons.push('missing_reviewed_target');
   if (!shareableEnforcement) {
     if (enforcementEvent) {
@@ -334,7 +592,14 @@ export function publicIdFor(event = {}) {
 export function isPublicEvidence(event = {}) {
   if (!PUBLIC_EVENT_TYPES.has(event.event_type)) return false;
   if (event.dkg_error) return false;
-  if (event.dkg) return true;
+  if (event.dkg) {
+    const dkg = event.dkg;
+    if (dkg.mode === 'dkg-disabled' || dkg.swmDegraded === true) return false;
+    if (/^(?:failed|error|rejected)$/i.test(String(dkg.status || ''))) return false;
+    const graph = String(dkg.graph || dkg.ual || '').toLowerCase();
+    if (!graph || graph.includes('_working_memory')) return false;
+    return graph.includes('_shared_memory') || graph.includes('_verifiable_memory');
+  }
   return payload(event).public_visibility === 'public' && event.local_only !== true;
 }
 
@@ -343,8 +608,8 @@ function publicBanContext(p = {}) {
   if (!context || typeof context !== 'object') return null;
   const indicators = context.indicators || {};
   return {
-    category: text(context.category || 'unknown'),
-    severity: text(context.severity || 'unknown'),
+    category: publicBanContextCategory(context.category || 'unknown'),
+    severity: publicBanContextSeverity(context.severity || 'unknown'),
     confidence: Math.max(0, Math.min(100, Number(context.confidence || 0))),
     confirmedScam: false,
     causalLink: 'unverified',
@@ -354,17 +619,18 @@ function publicBanContext(p = {}) {
     textMessageCount: Math.max(0, Number(context.text_message_count || 0)),
     mediaOnly: context.media_only === true,
     partial: context.partial === true,
-    behaviorFlags: boundedUnique(context.behavior_flags || [], 5).map(text),
+    behaviorFlags: publicBehaviorFlags(context.behavior_flags || [], 5),
     indicators: {
       domains: boundedUnique(indicators.domains || [], 10).map(normalizedDomain).filter(Boolean),
       wallets: boundedUnique(indicators.wallets || [], 10).map(normalizedWallet).filter(Boolean),
-      patterns: boundedUnique(indicators.patterns || [], 10).map(normalizedPattern).filter(Boolean)
+      patterns: boundedUnique(indicators.patterns || [], 10).map(publicEvidencePattern).filter(Boolean)
     }
   };
 }
 
 function publicSummary(evaluation, p = {}) {
-  const type = evaluation.indicators.patterns[0] || evaluation.eventType.replace(/_/g, ' ');
+  const type = evaluation.indicators.patterns.map(publicEvidencePattern).find(Boolean)
+    || evaluation.eventType.replace(/_/g, ' ');
   const enforcementClaim = p.claim_level === 'admin_enforcement'
     || evaluation.claimLevel === 'admin_enforcement'
     || ADMIN_ENFORCEMENT_TYPES.has(evaluation.eventType)
@@ -390,6 +656,7 @@ function publicSummary(evaluation, p = {}) {
 
 export function sanitizePublicEvidence(event = {}, { history = [], policy = {}, pseudonymKey = '' } = {}) {
   if (!isPublicEvidence(event)) return null;
+  if (sharingDeniedInLineage(history, event)) return null;
   const evaluation = evaluateEvidence(event, { history, policy });
   const p = payload(event);
   const actorRef = pseudonymKey && eventTargetKey(event)
@@ -407,20 +674,21 @@ export function sanitizePublicEvidence(event = {}, { history = [], policy = {}, 
     eventType: event.event_type,
     claimLevel: evaluation.claimLevel,
     confidence: evaluation.confidence,
-    scamType: text(p.scam_type || 'unknown'),
-    createdAt: text(p.occurred_at || event.timestamp || ''),
+    scamType: publicScamType(p.scam_type),
+    createdAt: publicIsoTimestamp(p.occurred_at || event.timestamp || ''),
     summary: publicSummary(evaluation, p),
     indicators: {
       domains: evaluation.indicators.domains,
       wallets: evaluation.indicators.wallets,
-      patterns: evaluation.indicators.patterns
+      patterns: evaluation.indicators.patterns.map(publicEvidencePattern).filter(Boolean)
     },
     enforcement: enforcementClaim ? {
-      action: p.enforcement_action || (event.event_type === 'restrict_executed' ? 'restriction' : 'ban'),
+      action: publicEnforcementAction(p.enforcement_action
+        || (event.event_type === 'restrict_executed' ? 'restriction' : 'ban')),
       reason: p.reason_provided === true ? 'recorded internally; not published' : 'reason not provided',
       reasonProvided: p.reason_provided === true,
       actorRecorded: p.performed_by_recorded === true || Boolean(p.performed_by?.id || p.performed_by?.username),
-      source: text(p.enforcement_observed_from || ''),
+      source: publicEnforcementSource(p.enforcement_observed_from),
       claimState: evaluation.claimLevel
     } : null,
     banContext: publicBanContext(p),
@@ -434,7 +702,7 @@ export function sanitizePublicEvidence(event = {}, { history = [], policy = {}, 
     provenance: {
       policy: evaluation.policyVersion,
       layer: evaluation.claimLevel === 'confirmed_scam' ? 'verified_memory_candidate' : 'shared_working_memory',
-      source: evaluation.provenance.source
+      source: publicProvenanceSource(evaluation.provenance.source)
     }
   };
 }

@@ -5,7 +5,7 @@ import { EventStore } from './store.js';
 import { loadConfig, validateDkgPseudonymKey } from './config.js';
 import { combineRisk } from './risk-engine.js';
 import { LlmClient } from './llm-client.js';
-import { EVIDENCE_POLICY_VERSION, evaluateEvidence } from './evidence-policy.js';
+import { EVIDENCE_POLICY_VERSION, evaluateEvidence, sharingDeniedInLineage } from './evidence-policy.js';
 import { resolveReviewTarget } from './review-target.js';
 
 function actorAliases(user = {}) {
@@ -236,6 +236,7 @@ export class TracabotSkillService {
       agentDid: this.config.agentDid,
       chat: input.chat || { id: input.chatId || 'openclaw-skill' },
       user: input.actor || { id: input.actorId || 'openclaw-skill', username: input.actorUsername || 'openclaw' },
+      local_only: true,
       payload: {
         appeal_receipt_id: receiptId,
         target_event_id: input.eventId || '',
@@ -245,12 +246,13 @@ export class TracabotSkillService {
         appellant: input.actor || { id: input.actorId || 'openclaw-skill', username: input.actorUsername || 'openclaw' },
         reason: input.reason || 'appeal submitted via OpenClaw skill',
         provenance: 'openclaw_skill_appeal',
+        consent_to_share: false,
+        local_only: true,
         evidence: [`OpenClaw skill appeal receipt ${receiptId}: ${input.reason || 'appeal submitted'}`]
       }
     };
-    event.dkg = await this.dkg.writeEvent(event);
     this.store.append(event);
-    return { tool: 'submit_appeal', eventId: event.id, receiptId, dkg: event.dkg };
+    return { tool: 'submit_appeal', eventId: event.id, receiptId, dkg: null, writesDkg: false };
   }
 
   async reviewEvent(input = {}) {
@@ -262,6 +264,7 @@ export class TracabotSkillService {
     const reviewedTarget = resolved.subject;
     const reviewedTargetKey = resolved.subjectKey;
     const targetChatId = resolved.targetChatId;
+    const sourceDenied = sharingDeniedInLineage(this.store.all(), eventId);
     const reviewChat = input.chat || { id: input.chatId || targetChatId };
     const event = {
       id: randomUUID(),
@@ -270,6 +273,7 @@ export class TracabotSkillService {
       agentDid: this.config.agentDid,
       chat: reviewChat,
       user: input.actor || { id: input.actorId || 'openclaw-skill', username: input.actorUsername || 'openclaw' },
+      ...(sourceDenied ? { local_only: true } : {}),
       payload: {
         target_event_id: resolved.finding.id,
         reviewed_target: reviewedTarget,
@@ -282,14 +286,16 @@ export class TracabotSkillService {
         admin_verified: true,
         local_approval: String(reviewChat.id || '') === String(targetChatId),
         approval_source: 'authorized_skill_review',
+        ...(sourceDenied ? { consent_to_share: false, privacy_opt_out: true } : {}),
         reviewer: { id: input.actorId || '', username: input.actorUsername || 'openclaw' },
         reason: input.reason || `review ${decision} via OpenClaw skill`,
         evidence: [`OpenClaw skill review ${decision}: ${input.reason || ''}`]
       }
     };
-    event.dkg = await this.dkg.writeEvent(event);
+    if (!sourceDenied && this.config.dkgWrites !== false) event.dkg = await this.dkg.writeEvent(event);
+    else event.local_only = true;
     this.store.append(event);
-    return { tool: 'review_event', eventId: event.id, decision, dkg: event.dkg };
+    return { tool: 'review_event', eventId: event.id, decision, dkg: event.dkg || null, writesDkg: Boolean(event.dkg) };
   }
 
   async decideArtefactAction(input = {}) {

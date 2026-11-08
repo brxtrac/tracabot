@@ -2,6 +2,21 @@
 
 TRACaBot now ships a small public reader and a bounded evidence-submission API. It is implemented with the Node standard library and the existing SQLite store and DKG client. It adds no runtime dependency and no hosted service.
 
+## Effective mode and coverage
+
+Mode is resolved per group from live Telegram `getMe`/`getChatMember`, not from configured admin IDs or a desired policy. `my_chat_member` refreshes it on promotion, demotion, restriction, and removal; destructive calls re-check immediately before acting.
+
+| Mode | Can observe | Cannot do |
+| --- | --- | --- |
+| Admin protection | Live `chat_member` ban/join events and native ban context while the bot is an administrator. Enforcement only within the exact Restrict/Ban and Delete rights Telegram reports. | Read Recent Actions, pre-install bans, chat history, or unstated reasons. |
+| Admin event observation (missing Restrict/Ban) | Permitted admin events; delete only if delete right exists. | Ban, restrict, unban, or run restriction-based challenges. |
+| Observer | Actual `new_chat_members` service messages and ordinary messages visible to the bot; local evidence checking and logging. | Ban, restrict, delete, unban, or challenge. It cannot guarantee a comprehensive ban or join feed and cannot recover bans from generic `left` service messages. |
+| Degraded observer | Local logging only when permission lookup fails. | Any destructive action or a claim of full protection. |
+
+Observer groups are quiet by default; automatic review warnings, pending notices, and challenges do not post. `TRACABOT_OBSERVER_ADVISORIES=true` is the only advisory opt-in and permits at most one bounded, cooldown-limited, evidence-backed advisory per six hours when group sends work. Advisories never include target names, private message text, or a definitive scam label. Admin groups keep the existing notification policy. Evidence checking and local logging never depend on notification visibility; graph publication still follows explicit consent and the existing promotion policy.
+
+Ordinary-message coverage follows live Telegram permissions. Administrator status yields all group messages under Telegram's admin semantics. Turning BotFather Group Privacy off is broader delivery configuration for an observer, but it is not proof of effective coverage for an existing membership; Telegram may require removing and re-adding the bot. Status reports `broader delivery configured; effective coverage unverified` until live coverage confirms it, and a removed bot reports no group visibility. Privacy-limited observers receive commands, mentions, replies, and service joins only. Delete actions require an explicit administrator `can_delete_messages=true` (creator is the exception); absent or false denies deletion. Cached context contains only messages actually received, obeys the existing opt-out/time/count/retention limits, and never becomes API history.
+
 ## Silent join protection
 
 The bot runs a deterministic check on a genuine join, even with no LLM configured. It queries by the exact HMAC token derived from the stable Telegram user ID; it never falls back to a username, display name, alias, or fuzzy similarity. The check records a private `join_protection_check` (or `join_protection_degraded` on graph/identity failure). It does not post in the group.
@@ -50,7 +65,7 @@ TRACABOT_CREATOR_SUBMIT_URL=https://creator.example/api/public/evidence
 TRACABOT_CREATOR_SUBMIT_TOKEN=<community-scoped token>
 ```
 
-Submission is opt-in and off by default. Queued submissions are sanitized to a bounded summary, indicators, and the stable platform ID needed for exact matching; they exclude raw message text, screenshots, reporter identity, and local audit notes. The submitter deduplicates by idempotency key and retries with bounded backoff. Opting out stops new sends but cannot unpublish records the creator already accepted. The creator API stages them as untrusted `observation`/`allegation` working memory; only the creator's own review/promotion policy can raise the claim level.
+Submission is opt-in and off by default. Queued submissions are sanitized to a bounded summary, indicators, and the stable platform ID needed for exact matching; they exclude raw message text, screenshots, reporter identity, and local audit notes. The submitter deduplicates by idempotency key and retries with bounded backoff. Opting out stops new sends but cannot unpublish records the creator already accepted. The creator API stages them as untrusted `observation`/`allegation` working memory; only the creator's own review/promotion policy can raise the claim level. Creator status reads and federation submissions require HTTPS outside exact loopback HTTP (`localhost`, `127.0.0.1`, or `::1`), reject URL userinfo, and reject redirects so bearer credentials cannot be forwarded to another origin.
 
 The instance label is provenance metadata only. It is not a DKG subgraph, membership grant, or authority: the installed adapter exposes context graphs, not a portable per-instance subgraph primitive. Do not claim otherwise.
 
@@ -117,7 +132,7 @@ Telegram blocks bot-initiated private messages. A banned user must open the bot'
 - `POST /api/creator/attestations` and the revoke route are authenticated creator-curator writes. `GET /api/creator/attestations/telegram/<id>` is an authenticated, signed, short-lived status read. They do not write to DKG.
 - Private `/appeal` and admins' `/appeals` flows are local-only. Overturn performs Telegram unban with retries; it cannot add a user and does not modify creator attestations.
 - `bin/tracabot-promote.js` and the Telegram proactive scan run the evidence policy and promote qualifying evidence to DKG Shared Working Memory without requiring a human promotion click.
-- Live Telegram admin bans are captured from `chat_member` updates. The bot must be a group administrator and must be polling; Telegram does not expose Recent Actions, pre-install bans, or an unstated admin reason.
+- Live Telegram admin bans are captured from `chat_member` updates only when the bot is a live group administrator and polling. Otherwise the group is an observer with partial service-message/visible-message coverage. Telegram does not expose Recent Actions, pre-install bans, or an unstated admin reason, and observer mode does not infer a ban from a generic `left` service message.
 - `bin/tracabot-membership.js` lets the operator list, approve, or reject pending membership requests.
 
 This repository does **not** deploy a public host, register an on-chain Context Graph, create an MCP server, or fund a DKG wallet. Those remain operator actions. Do not claim they exist until verified.
@@ -156,7 +171,17 @@ The public serializer only returns:
 - normalized domains, wallets, and patterns; URL indicators are reduced to hostnames, so userinfo, ports, paths, query strings, and credentials are never shared;
 - HMAC `actorRef` / stable `targetRef` / `communityRef` when a pseudonym key is configured;
 - an `actorRecorded` boolean for enforcement records; raw admin IDs and usernames stay local and are never copied into promotion payloads or public SWM triples;
-- evidence counts, evidence hashes, timestamps, and provenance labels.
+- evidence counts, evidence hashes, timestamps, and provenance labels;
+- sanitized correction records (`review_overturned`) for shared enforcement or
+  review history. A correction marks the original record retracted, carries only
+  the claim level, action, counts, hashed references, and provenance, and never
+  includes private appeal reasons or raw evidence text.
+
+Remote campaign summaries read from Shared Working Memory are normalized and
+whitelisted before output: domains are reduced to hostnames; only valid wallet
+and pattern shapes are kept; actor and community references must already be
+`hmac:v1:` values; claim levels and fingerprints must match the policy formats.
+Malformed remote strings are dropped rather than returned.
 
 It never returns raw Telegram IDs, usernames, first names, chat titles, chat IDs, message text, reporter data, screenshots, private-message content, or raw evidence strings. Local-only events, failed DKG writes, and `working_memory` events are excluded.
 
@@ -191,6 +216,8 @@ It is idempotent by source event id, effect claim, and evidence fingerprint. A r
 A live native admin ban needs no `/ban` command. The source event carries the target, community, observed time, actor when Telegram supplies it, `enforcement_action: ban`, and `reason_provided: false` with `reason: reason not provided` when applicable. The promoted public record remains `admin_enforcement`, never `confirmed_scam`. The enforcement-only auto-share path fails closed unless all of these are explicit: operator consent (`consent_to_share: true`), verified action provenance (`admin_verified` or `enforcement_verified`), a valid target, and provenance source. High confidence or corroborating evidence roots cannot bypass this gate. An explicit opt-out records `sharing_consent_denied`; enforcement records also record `sharing_consent_missing` when consent is absent.
 
 When the bot already observed messages from the same user and chat before the ban, the source event carries bounded context: up to 8 messages from the previous 60 minutes, text/caption up to the configured cap, and a deterministic category (`unknown`, `behavior`, `spam`, `suspected_scam`, `suspected_campaign`). The label is always `recent pre-ban context; causal link unverified`. Only the sanitized summary is promoted: actual DKG triples include `banContextCategory`, `banContextSeverity`, `banContextConfidence`, `banContextMessageCount`, `banContextCausalLink`, `banContextProvenance`, bounded `banContextDomain`/`banContextWallet`/`banContextPattern` values, and `banContextBehaviorFlag` triage flags such as `threat` or `harassment`. The promotion payload omits raw messages and the DKG client filters private evidence predicates, so raw text, message IDs, chat titles, admin identities, and target identities never enter public SWM. Local ban events keep raw text only inside the 7-day observed-message retention policy; older copies are redacted on store startup and on throttled store activity (at most hourly), including continuously running bots.
+
+Scheduled conversation artefacts follow the same boundary. The raw Working Memory asset remains private and is discarded after review. A separate shared projection contains only the allowlisted scam type, bounded domain/wallet/pattern indicators, claim level `observation`, confidence/quality, curator decision/category, and provenance. It never contains raw message text, email addresses, phone numbers, source message IDs, chat/actor identifiers, or URL paths and query strings.
 
 Tune with:
 

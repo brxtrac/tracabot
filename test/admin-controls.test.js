@@ -423,6 +423,91 @@ test('stale auto-ban retry is rejected after a newer independent ban', async () 
   assert.equal(calls.filter((call) => call.method === 'unbanChatMember').length, before);
 });
 
+test('first automatic-ban override is rejected after a newer independent ban', async () => {
+  const { bot, calls } = makeBot();
+  seedAutoBan(bot, {
+    id: 'auto-first-override-old',
+    userId: 4343,
+    timestamp: '2026-11-07T10:00:00.000Z'
+  });
+  seedAutoBan(bot, {
+    id: 'auto-first-override-newer',
+    userId: 4343,
+    timestamp: '2026-11-07T11:00:00.000Z'
+  });
+  const before = calls.filter((call) => call.method === 'unbanChatMember').length;
+  const result = await bot.overrideAutomaticBan({
+    ban: bot.store.all().find((event) => event.id === 'auto-first-override-old'),
+    admin: { id: 1 },
+    sourceChat: { id: 1, type: 'private' }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'ban_superseded');
+  assert.equal(result.newer_ban_event_id, 'auto-first-override-newer');
+  assert.equal(calls.filter((call) => call.method === 'unbanChatMember').length, before);
+  assert.equal(bot.store.all().some((event) => event.event_type === 'review_overturned'), false);
+  assert.equal(bot.store.all().some((event) => event.event_type === 'auto_ban_override'), false);
+});
+
+test('equal-time independent ban fails closed before a first automatic-ban override', async () => {
+  const { bot, calls } = makeBot();
+  seedAutoBan(bot, {
+    id: 'auto-equal-old',
+    userId: 4344,
+    timestamp: '2026-11-07T10:00:00.000Z'
+  });
+  seedAutoBan(bot, {
+    id: 'auto-equal-distinct',
+    userId: 4344,
+    timestamp: '2026-11-07T10:00:00.000Z'
+  });
+  const before = calls.filter((call) => call.method === 'unbanChatMember').length;
+  const result = await bot.overrideAutomaticBan({
+    ban: bot.store.all().find((event) => event.id === 'auto-equal-old'),
+    admin: { id: 1 },
+    sourceChat: { id: 1, type: 'private' }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'ban_superseded');
+  assert.equal(result.newer_ban_event_id, 'auto-equal-distinct');
+  assert.equal(calls.filter((call) => call.method === 'unbanChatMember').length, before);
+  assert.equal(bot.store.all().some((event) => event.event_type === 'review_overturned'), false);
+});
+
+
+test('native admin ban idempotency keeps distinct same-second transitions and dedupes redelivery after restart', async () => {
+  const { bot } = makeBot({ config: { autoPromoteEvidence: false } });
+  const chat = { id: -100, title: 'Demo Group', type: 'supergroup' };
+  const member = { id: 4545, username: 'target' };
+  const update = (date = 1000) => ({
+    chat,
+    from: { id: 1, username: 'admin' },
+    date,
+    old_chat_member: { status: 'member', user: member },
+    new_chat_member: { status: 'kicked', user: member }
+  });
+  const count = () => bot.store.all().filter((event) => event.event_type === 'ban_executed' && String(event.user?.id) === '4545').length;
+
+  bot.currentUpdateId = 100;
+  await bot.handleNativeAdminBan(update(1000), member, 'member', 'kicked');
+  bot.currentUpdateId = 101;
+  await bot.handleNativeAdminBan(update(1000), member, 'member', 'kicked');
+  assert.equal(count(), 2);
+
+  bot.currentUpdateId = 101;
+  await bot.handleNativeAdminBan(update(1000), member, 'member', 'kicked');
+  assert.equal(count(), 2);
+
+  const restarted = new TelegramShieldBot({
+    config: bot.config,
+    analyzer: LOW_ANALYZER,
+    dkg: bot.dkg,
+    store: bot.store
+  });
+  restarted.currentUpdateId = 101;
+  await restarted.handleNativeAdminBan(update(1000), member, 'member', 'kicked');
+  assert.equal(count(), 2);
+});
 
 test('resume stays bounded by configured chat allowlist and missing bot rights', async () => {
   const bounded = makeBot({ config: { joinAutoRemoveChats: ['-200'] } });

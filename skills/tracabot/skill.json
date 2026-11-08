@@ -42,7 +42,7 @@
     },
     {
       "name": "submit_appeal",
-      "description": "Write an evidence-backed appeal/correction event to DKG Shared Memory.",
+      "description": "Record a local private appeal/correction. It is never written to DKG Shared Memory.",
       "inputSchema": { "type": "object", "required": ["eventId", "reason"], "properties": { "eventId": { "type": "string" }, "reason": { "type": "string" }, "actorId": { "type": "string" }, "actorUsername": { "type": "string" }, "sourceMessageId": { "type": "string" }, "screenshotFileIds": { "type": "array", "items": { "type": "string" } }, "evidenceUrls": { "type": "array", "items": { "type": "string" } } } }
     },
     {
@@ -64,6 +64,6 @@
   "permissions": {
     "network": ["local DKG node", "api.telegram.org when run as Telegram bot"],
     "filesystem": ["local event store"],
-    "dkgWrites": "Evidence-backed events only. Watchlist and digest tools stay local-only."
+    "dkgWrites": "Evidence-backed events only. Watchlist, digest, and private appeal tools stay local-only."
   }
 }

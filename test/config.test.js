@@ -89,6 +89,7 @@ test('loadConfig defaults silent join protection and validates opt-in safeguards
   assert.equal(defaults.joinMinConfirmedRoots, 1);
   assert.deepEqual(defaults.joinTrustedLayers, ['local']);
   assert.deepEqual(defaults.joinTrustedSources, []);
+  assert.deepEqual(defaults.artifactOptOutChats, []);
   assert.equal(defaults.submitSharedEvidence, false);
   const optedIn = loadConfig({
     TRACABOT_INSTANCE_ID: 'instance-one',
@@ -98,6 +99,7 @@ test('loadConfig defaults silent join protection and validates opt-in safeguards
     TRACABOT_JOIN_MIN_CONFIRMED_ROOTS: '2',
     TRACABOT_JOIN_TRUSTED_LAYERS: 'verified-memory,local',
     TRACABOT_JOIN_TRUSTED_SOURCES: 'creator-curator,local_admin_review',
+    TRACABOT_ARTIFACT_OPT_OUT_CHATS: '-100123, -100456',
     TRACABOT_SUBMIT_SHARED_EVIDENCE: 'true',
     TRACABOT_CREATOR_SUBMIT_URL: 'https://creator.example/api/public/evidence',
     TRACABOT_CREATOR_SUBMIT_TOKEN: 'token-at-least-16-chars'
@@ -108,8 +110,10 @@ test('loadConfig defaults silent join protection and validates opt-in safeguards
   assert.equal(optedIn.joinEvidenceMaxAgeDays, 30);
   assert.equal(optedIn.joinMinConfirmedRoots, 2);
   assert.deepEqual(optedIn.joinTrustedSources, ['creator-curator', 'local_admin_review']);
+  assert.deepEqual(optedIn.artifactOptOutChats, ['-100123', '-100456']);
   assert.equal(optedIn.submitSharedEvidence, true);
   assert.throws(() => loadConfig({ TRACABOT_INSTANCE_ID: 'bad id!' }), /TRACABOT_INSTANCE_ID/);
+  assert.throws(() => loadConfig({ TRACABOT_ARTIFACT_OPT_OUT_CHATS: 'all-groups' }), /TRACABOT_ARTIFACT_OPT_OUT_CHATS/);
   assert.throws(() => loadConfig({ TRACABOT_JOIN_EVIDENCE_MAX_AGE_DAYS: '0' }), /TRACABOT_JOIN_EVIDENCE_MAX_AGE_DAYS/);
   assert.throws(() => loadConfig({ TRACABOT_JOIN_AUTO_REMOVE_CHATS: 'all-groups' }), /TRACABOT_JOIN_AUTO_REMOVE_CHATS/);
   assert.throws(() => loadConfig({ TRACABOT_JOIN_MIN_CONFIRMED_ROOTS: '6' }), /TRACABOT_JOIN_MIN_CONFIRMED_ROOTS/);
@@ -298,6 +302,25 @@ test('loadConfig parses creator-curator and appeal limits', () => {
   assert.throws(() => loadConfig({ TRACABOT_CREATOR_CURATOR_TOKEN: 'short' }), /TRACABOT_CREATOR_CURATOR_TOKEN/);
   assert.throws(() => loadConfig({ TRACABOT_APPEAL_MAX_PER_HOUR: '0' }), /TRACABOT_APPEAL_MAX_PER_HOUR/);
   assert.throws(() => loadConfig({ TRACABOT_CREATOR_CURATOR_READ_RATE_LIMIT_PER_HOUR: '0' }), /TRACABOT_CREATOR_CURATOR_READ_RATE_LIMIT_PER_HOUR/);
+
+  const secureOptions = {
+    TRACABOT_CREATOR_CURATOR_PUBLIC_KEY: publicKey,
+    TRACABOT_CREATOR_CURATOR_READ_TOKEN: 'creator-read-token-123456'
+  };
+  assert.throws(() => loadConfig({ ...secureOptions, TRACABOT_CREATOR_CURATOR_URL: 'http://creator.example' }), /HTTPS outside exact loopback/);
+  assert.throws(() => loadConfig({ ...secureOptions, TRACABOT_CREATOR_CURATOR_URL: 'https://user:pass@creator.example' }), /credentials/);
+  assert.throws(() => loadConfig({ TRACABOT_CREATOR_SUBMIT_URL: 'http://creator.example/api' }), /HTTPS outside exact loopback/);
+  assert.throws(() => loadConfig({ TRACABOT_CREATOR_SUBMIT_URL: 'https://user:pass@creator.example/api' }), /credentials/);
+  assert.equal(loadConfig({ ...secureOptions, TRACABOT_CREATOR_CURATOR_URL: 'http://127.0.0.1:8787' }).creatorCuratorUrl, 'http://127.0.0.1:8787');
+  assert.equal(loadConfig({ ...secureOptions, TRACABOT_CREATOR_CURATOR_URL: 'http://[::1]:8787' }).creatorCuratorUrl, 'http://[::1]:8787');
+  assert.equal(loadConfig({ TRACABOT_CREATOR_SUBMIT_URL: 'http://127.0.0.1:8787/api/public/evidence' }).creatorSubmitUrl, 'http://127.0.0.1:8787/api/public/evidence');
+  assert.throws(() => loadConfig({ TRACABOT_CREATOR_SUBMIT_URL: 'http://127.0.0.2:8787/api' }), /HTTPS outside exact loopback/);
+});
+
+test('loadConfig keeps observer advisories off by default and parses explicit opt-in', () => {
+  assert.equal(loadConfig({}).observerAdvisories, false);
+  assert.equal(loadConfig({ TRACABOT_OBSERVER_ADVISORIES: 'true' }).observerAdvisories, true);
+  assert.throws(() => loadConfig({ TRACABOT_OBSERVER_ADVISORIES: 'maybe' }), /Invalid boolean/);
 });
 
 test('loadConfig parses pending review notification policy', () => {

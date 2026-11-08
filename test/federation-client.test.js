@@ -119,6 +119,35 @@ test('backlog drains oldest-first without starving older pending submissions', a
   assert.equal(calls.length, 15);
 });
 
+test('federation flush rejects redirects and insecure non-loopback transport without sending bearer auth', async () => {
+  const store = makeStore();
+  const cfg = config();
+  queueFederationSubmission({ store, promotedEvent: promotedEvent(), sourceEvent: sourceEvent(), config: cfg });
+  const calls = [];
+  const redirectFetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: false, status: 307, headers: { get: () => 'https://other.example/collect' } };
+  };
+  const redirected = await flushFederationQueue({ store, config: cfg, fetchImpl: redirectFetch });
+  assert.equal(redirected.failed, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.redirect, 'manual');
+  assert.match(store.all().find((event) => event.event_type === FEDERATION_FAILED_TYPE).payload.error, /redirects are not allowed/);
+
+  const secondStore = makeStore();
+  const insecureCfg = config({ creatorSubmitUrl: 'http://creator.example/api/public/evidence' });
+  queueFederationSubmission({ store: secondStore, promotedEvent: promotedEvent(), sourceEvent: sourceEvent(), config: insecureCfg });
+  let insecureCalls = 0;
+  const insecure = await flushFederationQueue({
+    store: secondStore,
+    config: insecureCfg,
+    fetchImpl: async () => { insecureCalls += 1; throw new Error('must not send'); }
+  });
+  assert.equal(insecure.failed, 1);
+  assert.equal(insecureCalls, 0);
+  assert.match(secondStore.all().find((event) => event.event_type === FEDERATION_FAILED_TYPE).payload.error, /HTTPS outside exact loopback/);
+});
+
 test('federation failure is bounded, recorded, and retried after backoff', async () => {
   const store = makeStore();
   const cfg = config();

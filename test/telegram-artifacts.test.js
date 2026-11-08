@@ -1,13 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { artifactFromUpdate, enforceHighConfidenceAutoBan, highConfidenceAutoBan, pollArtifacts } from '../src/telegram-artifacts.js';
-import { DkgClient } from '../src/dkg-client.js';
+import { artifactFromUpdate, enforceHighConfidenceAutoBan, highConfidenceAutoBan, pollArtifacts, processBanCandidates } from '../src/telegram-artifacts.js';
 import { EventStore } from '../src/store.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const config = { telegramToken: 'test', dkgWrites: true, dkgPseudonymKey: 'x'.repeat(32) };
+const config = { telegramToken: 'test', dkgWrites: true, dkgPseudonymKey: 'x'.repeat(32), autoPromoteEvidence: true };
 const update = { update_id: 12, message: { message_id: 9, date: 1780000000, chat: { id: -1001 }, from: { id: 47 }, text: 'Urgent: verify your wallet at https://scam.example now' } };
 
 test('captures relevant message with stable ID and pseudonymous identities', () => {
@@ -17,6 +16,40 @@ test('captures relevant message with stable ID and pseudonymous identities', () 
   assert.match(event.user.id, /^hmac:v1:/);
   assert.equal(artifactFromUpdate(update, config).id, event.id);
   assert.equal(artifactFromUpdate({ message: { ...update.message, text: 'hello' } }, config), null);
+});
+
+test('artifact producer derives sharing authorization from settings and opt-outs', () => {
+  const enabled = { ...config, autoPromoteEvidence: true, wmArtifacts: true, channelMemory: true };
+  const group = artifactFromUpdate(update, enabled);
+  assert.equal(group.payload.consent_to_share, true);
+  assert.equal(group.payload.privacy_opt_out, undefined);
+
+  for (const [overrides, expected] of [
+    [{ autoPromoteEvidence: false }, false],
+    [{ artifactOptOutChats: ['-1001'] }, false]
+  ]) {
+    const event = artifactFromUpdate(update, { ...enabled, ...overrides });
+    assert.equal(event.payload.consent_to_share, expected);
+    assert.equal(event.payload.privacy_opt_out, true);
+  }
+  const messageOptOut = artifactFromUpdate({
+    ...update,
+    message: { ...update.message, consent_to_share: false }
+  }, enabled);
+  assert.equal(messageOptOut.payload.consent_to_share, false);
+
+  const privacyOptOut = artifactFromUpdate({
+    ...update,
+    message: { ...update.message, privacy_opt_out: true }
+  }, enabled);
+  assert.equal(privacyOptOut.payload.consent_to_share, false);
+
+  assert.equal(artifactFromUpdate(update, { ...enabled, wmArtifacts: false }), null);
+
+  const channel = { update_id: 13, channel_post: { ...update.message, chat: { id: -2002, type: 'channel' } } };
+  assert.equal(artifactFromUpdate(channel, { ...enabled, channelMemory: false }).payload.consent_to_share, false);
+  assert.equal(artifactFromUpdate(channel, { ...enabled, channelMemory: true }).payload.consent_to_share, true);
+  assert.equal(artifactFromUpdate(update, { ...enabled, channelMemory: false }).payload.consent_to_share, true);
 });
 
 test('transient getUpdates reset stays in poll loop; fatal and once-mode still throw', async () => {
@@ -46,6 +79,21 @@ test('transient getUpdates reset stays in poll loop; fatal and once-mode still t
   }), /Telegram HTTP 401/);
 });
 
+test('polling does not stage an artifact denied by sharing policy', async () => {
+  const calls = [];
+  const store = {
+    pollingOffset: () => 12, claimUpdate: () => 'claimed',
+    completeUpdate: () => calls.push('complete'), failUpdate: () => calls.push('fail')
+  };
+  let stages = 0;
+  await pollArtifacts({ config: { ...config, autoPromoteEvidence: false }, store,
+    dkg: { stageConversationArtifact: async () => { stages += 1; } },
+    fetcher: async () => ({ ok: true, json: async () => ({ ok: true, result: [update] }) }), once: true
+  });
+  assert.equal(stages, 0);
+  assert.deepEqual(calls, ['complete']);
+});
+
 test('failed DKG write leaves update unacknowledged for retry', async () => {
   const calls = [];
   const store = {
@@ -67,68 +115,61 @@ test('auto-ban requires concrete wallet lure, link, pressure, and group sender',
   assert.equal(highConfidenceAutoBan({ ...message, sender_chat: { id: 4 } }), false);
 });
 
-test('protected admin and bot without ban rights are never banned; eligible user banned once', async () => {
+test('legacy high-confidence ban worker never sanctions on forged, stale, retracted, or model-approved history', async () => {
   const message = { ...update.message, chat: { id: -1001, type: 'supergroup' } };
-  const calls = [];
-  let targetStatus = 'member';
-  let botCanBan = true;
-  const fetcher = async (url, init) => {
-    const method = url.split('/').at(-1);
-    calls.push(method);
-    const params = JSON.parse(init.body);
-    const result = method === 'getMe' ? { id: 99 } : method === 'getChatMember'
-      ? params.user_id === 99 ? { status: 'administrator', can_restrict_members: botCanBan } : { status: targetStatus }
-      : true;
-    return { ok: true, json: async () => ({ ok: true, result }) };
-  };
+  let fetchCalls = 0;
+  let effectClaims = 0;
+  const fetcher = async () => { fetchCalls++; throw new Error('Telegram must not be called'); };
   const store = {
-    beginEffect: () => ({ completed: false }), completeEffect: () => calls.push('completed'),
-    markEffectUncertain: () => calls.push('uncertain')
+    beginEffect: () => { effectClaims++; throw new Error('ban must not be claimed'); },
+    completeEffect: () => { throw new Error('ban must not complete'); }
   };
-  const dkg = { confirmedSwmScamHistory: async () => [{ eventId: 'prior-ban', eventType: 'ban_executed' }] };
-  const reviewer = async () => ({ action: 'ban', historyEventId: 'prior-ban', evidence: 'verify your wallet' });
-  targetStatus = 'administrator';
-  assert.equal(await enforceHighConfidenceAutoBan(message, { config, store, dkg, reviewer, fetcher }), false);
-  targetStatus = 'member'; botCanBan = false;
-  assert.equal(await enforceHighConfidenceAutoBan(message, { config, store, dkg, reviewer, fetcher }), false);
-  botCanBan = true;
-  assert.equal(await enforceHighConfidenceAutoBan(message, { config, store, dkg, reviewer, fetcher }), true);
-  assert.equal(calls.filter((name) => name === 'banChatMember').length, 1);
-});
-
-test('ban blocked without exact SWM history, on curator hold, and on mismatched evidence', async () => {
-  const message = { ...update.message, chat: { id: -1001, type: 'supergroup' } };
-  let calls = 0;
-  const fetcher = async () => { calls++; throw new Error('Telegram must not be called'); };
-  const store = { beginEffect: () => { throw new Error('ban must not be claimed'); } };
-  const dkg = { confirmedSwmScamHistory: async () => [] };
-  assert.equal(await enforceHighConfidenceAutoBan(message, { config, store, dkg, fetcher }), false);
-  dkg.confirmedSwmScamHistory = async () => [{ eventId: 'prior', eventType: 'ban_executed' }];
-  for (const response of [{ action: 'hold' }, { action: 'ban', historyEventId: 'wrong', evidence: 'verify your wallet' }, { action: 'ban', historyEventId: 'prior', evidence: 'invented quote' }]) {
-    assert.equal(await enforceHighConfidenceAutoBan(message, { config, store, dkg, fetcher, reviewer: async () => response }), false);
+  const histories = [
+    [],
+    [{ eventId: 'ordinary-ban', eventType: 'ban_executed', created: '2026-01-01T00:00:00Z' }],
+    [{ eventId: 'stale-ban', eventType: 'ban_executed', created: '2020-01-01T00:00:00Z' }],
+    [{ eventId: 'retracted-ban', eventType: 'review_overturned', created: '2026-01-02T00:00:00Z' }]
+  ];
+  for (const history of histories) {
+    const dkg = { confirmedSwmScamHistory: async () => history };
+    const reviewer = async () => ({ action: 'ban', historyEventId: history[0]?.eventId || 'none', evidence: 'verify your wallet' });
+    assert.equal(await enforceHighConfidenceAutoBan(message, { config: { ...config, highConfidenceAutoBan: true }, store, dkg, reviewer, fetcher }), false);
   }
-  assert.equal(calls, 0);
+  const rejected = { confirmedSwmScamHistory: async () => { throw new Error('graph rejected'); } };
+  assert.equal(await enforceHighConfidenceAutoBan(message, { config, store, dkg: rejected, fetcher }), false);
+  assert.equal(fetchCalls, 0);
+  assert.equal(effectClaims, 0);
 });
 
-test('SWM history requires exact actor, verified scam decision, and no later clear', async () => {
-  let query;
-  const graph = 'owner/tracabot';
-  const uri = `did:dkg:context-graph:${graph}/_shared_memory/example`;
-  const row = (id, type, date) => ({ g: uri, s: `https://tracabot.org/ontology#event/${id}`, type, verified: 'true', created: date });
-  let bindings = [row('ban-1', 'ban_executed', '2026-01-01T00:00:00Z')];
-  const dkg = new DkgClient({ contextGraph: graph, dkgPseudonymKey: 'x'.repeat(32) }, { adapterClient: {
-    async query(sparql, options) { query = { sparql, options }; return { result: { bindings } }; }
-  } });
-  assert.equal((await dkg.confirmedSwmScamHistory('47')).length, 1);
-  assert.equal(query.options.view, 'shared-working-memory');
-  assert.match(query.sparql, /actorIdentity/);
-  bindings = [row('ban-1', 'ban_executed', '2026-01-01T00:00:00Z'), row('clear-2', 'review_overturned', '2026-01-02T00:00:00Z')];
-  assert.deepEqual(await dkg.confirmedSwmScamHistory('47'), []);
-  bindings = [row('ban-1', 'ban_executed', '2026-01-01T00:00:00Z'), { ...row('ban-2', 'ban_executed', '2026-01-03T00:00:00Z'), verified: 'false' }];
-  assert.deepEqual((await dkg.confirmedSwmScamHistory('47')).map((entry) => entry.eventId), ['ban-1']);
+test('retired ban worker drains queued candidates without Telegram, DKG, or reviewer action', async () => {
+  const controller = new AbortController();
+  let candidateRead = false;
+  let fetchCalls = 0;
+  const store = {
+    nextBanCandidate() {
+      if (candidateRead) return null;
+      candidateRead = true;
+      return { key: 'legacy-candidate', message: { text: 'urgent verify wallet https://scam.example', from: { id: 47 }, chat: { id: -1001 } } };
+    },
+    finishBanCandidate(key, error) {
+      assert.equal(key, 'legacy-candidate');
+      assert.equal(error, 'legacy_destructive_worker_retired');
+      controller.abort();
+    }
+  };
+  await processBanCandidates({
+    config: { ...config, highConfidenceAutoBan: true },
+    store,
+    dkg: { confirmedSwmScamHistory: async () => { throw new Error('must not read history'); } },
+    fetcher: async () => { fetchCalls++; throw new Error('must not call Telegram'); },
+    reviewer: async () => { throw new Error('must not call reviewer'); },
+    signal: controller.signal
+  });
+  assert.equal(candidateRead, true);
+  assert.equal(fetchCalls, 0);
 });
 
-test('polling queues ban candidates without calling reviewer and acknowledges update', async () => {
+test('polling stages artifacts but never queues retired ban candidates', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'tracabot-ban-'));
   try {
     const store = new EventStore(join(dir, 'events.sqlite'));
@@ -138,6 +179,6 @@ test('polling queues ban candidates without calling reviewer and acknowledges up
       dkg: { stageConversationArtifact: async () => { calls++; } }, once: true,
       fetcher: async () => ({ ok: true, json: async () => ({ ok: true, result: [{ update_id: 12, message }] }) }) });
     assert.equal(calls, 1);
-    assert.equal(store.nextBanCandidate().message.from.id, 47);
+    assert.equal(store.nextBanCandidate(), null);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

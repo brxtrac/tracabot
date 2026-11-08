@@ -48,6 +48,7 @@
 <p>Banned members can start a private chat and send <code>/appeal</code>. The bot shows only that user’s own locally stored cases. Only actual admins of the affected group can uphold or overturn; Telegram does not allow the bot to send the first private message.</p>
 <p>Current group admins can open private <code>/start</code> for Protection controls, Status, Recent automatic bans, and Appeals. Pausing future automatic join removals is per group and separate from reversing a specific ban through a group-scoped local correction and safe unban retry. Configured bot owners without live group admin status get no group details.</p>
         <p class="fine">Insufficient evidence, admin bans, behavior flags, display-name matches, campaign association, model output, graph outages, and missing rights fail closed to a private flag. Telegram is the only implemented platform; Discord is not implemented.</p>
+        <p class="fine">Mode is resolved live per group. A bot that is not an administrator is an observer: it can review actual join service messages and visible messages, but it cannot ban, restrict, delete, unban, or challenge by any route, cannot guarantee a complete ban/join feed, and never infers a ban from a generic leave message. Observer groups are quiet by default; the only advisory opt-in is bounded and evidence-backed. A BotFather privacy change may require removing and re-adding the bot before it affects delivery, so status reports broader delivery as configured but unverified.</p>
       </div>
       <dl class="facts">
         <div><dt>Join check</dt><dd>always on (when DKG configured)</dd></div>
@@ -67,7 +68,7 @@
         </div>
         <span class="status-pill" id="api-status">checking reader API</span>
       </div>
-      <p class="fine">Native ban logging needs only the first requirement: add TRACaBot to the Telegram group as an admin and keep one bot process running. Bans performed through normal Telegram admin controls are recorded from live <code>chat_member</code> updates. When the bot already saw recent messages from the same user in the same chat, it may attach a bounded context summary labeled <code>recent pre-ban context; causal link unverified</code>; that summary is not the ban reason. Telegram bots cannot read Recent Actions, the admin log, pre-install bans, or a reason the banning admin did not supply; those gaps are labeled, never filled in.</p>
+      <p class="fine">Native ban logging needs only the first requirement: add TRACaBot to the Telegram group as an admin and keep one bot process running. Bans performed through normal Telegram admin controls are recorded from live <code>chat_member</code> updates. When the bot already saw recent messages from the same user in the same chat, it may attach a bounded context summary labeled <code>recent pre-ban context; causal link unverified</code>; that summary is not the ban reason. Telegram bots cannot read Recent Actions, the admin log, pre-install bans, or a reason the banning admin did not supply; those gaps are labeled, never filled in. Without administrator rights the bot is an observer with partial service-message/visible-message coverage and no enforcement; it never claims a comprehensive ban feed.</p>
       <ol class="steps">
         <li>
           <div><span class="step-no">01</span><h3>Read the public ledger</h3></div>

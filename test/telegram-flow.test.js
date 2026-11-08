@@ -120,6 +120,10 @@ function makeBot({ canBan, trustedUserIds = [1], analyzer: analyzerOverride = nu
       channelMemory: true,
       channelMemoryMinConfidence: 80,
       channelMemoryMaxTextChars: 1000,
+      wmArtifacts: true,
+      dkgWrites: true,
+      autoPromoteEvidence: true,
+      artifactOptOutChats: [],
       ...configOverrides
     },
     analyzer: analyzerOverride || analyzer,
@@ -664,9 +668,278 @@ test('committed false-positive artifact carries receipt before Shared Memory wri
   await bot.handleMessage({ chat, from: { id: 1, username: 'admin' }, message_id: 35, text: '@tracethembot @guerodelosbajos is not a scammer; SynthID discussion, not impersonation' });
   const artifact = dkgWrites.find((event) => event.event_type === 'conversation_artifact' && event.payload.artifact_kind === 'false_positive_signal');
   assert.ok(artifact);
+  assert.equal(artifact.payload.consent_to_share, true);
+  assert.equal(artifact.payload.privacy_opt_out, false);
   assert.match(artifact.payload.commit_receipt_id, /^commit:/);
   assert.equal(artifact.payload.commit_policy, 'human_or_admin_verified');
   assert.equal(artifact.payload.lifecycle_stage, 'shared_memory');
+});
+
+test('rejected review with a denied source keeps the correction artifact local-only', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: true });
+  const stages = [];
+  bot.dkg.stageConversationArtifact = async (event) => { stages.push(event); return { ok: true }; };
+  const chat = { id: -100, title: 'demo', type: 'supergroup' };
+  bot.store.append({
+    id: 'evt-fp-denied-source',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 86, username: 'guerodelosbajos', is_bot: false },
+    payload: { confidence: 90, scam_type: 'impersonation', privacy_opt_out: true, evidence: ['private appeal material'] }
+  });
+  await bot.handleMessage({ chat, from: { id: 1, username: 'admin' }, message_id: 36, text: '@tracethembot @guerodelosbajos is not a scammer; admin correction' });
+  await new Promise((resolve) => setImmediate(resolve));
+  const artifact = bot.store.all().find((event) => event.event_type === 'conversation_artifact' && event.payload.artifact_kind === 'false_positive_signal');
+  assert.ok(artifact);
+  assert.equal(artifact.payload.consent_to_share, false);
+  assert.equal(artifact.payload.privacy_opt_out, true);
+  assert.equal(artifact.payload.lifecycle_stage, 'working_memory_draft');
+  assert.equal(artifact.payload.commit_receipt_id, '');
+  assert.equal(dkgWrites.some((event) => event.event_type === 'conversation_artifact'), false);
+  assert.equal(stages.length, 0);
+});
+
+test('forceDkg artifact honors a source chat opt-out and never reaches DKG', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: true, configOverrides: { artifactOptOutChats: ['-100'] } });
+  const stages = [];
+  bot.dkg.stageConversationArtifact = async (event) => { stages.push(event); return { ok: true }; };
+  bot.store.append({
+    id: 'evt-source-opted-out',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat: { id: -100, type: 'supergroup' },
+    user: { id: 86, username: 'target', is_bot: false },
+    payload: { confidence: 90, scam_type: 'impersonation' }
+  });
+  const artifact = await bot.recordConversationArtifact(
+    { chat: { id: 1, type: 'private' }, from: { id: 1, username: 'admin' }, message_id: 37 },
+    {
+      risk: { confidence: 80, local_confidence: 80, scam_type: 'false_positive' },
+      text: 'admin correction', artifactKind: 'false_positive_signal',
+      sourceEventIds: ['evt-source-opted-out'], forceDkg: true
+    }
+  );
+  assert.equal(artifact.payload.consent_to_share, false);
+  assert.equal(artifact.payload.privacy_opt_out, true);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'conversation_artifact'), false);
+  assert.equal(stages.length, 0);
+});
+
+test('main poller accepts channel_post and stages one consenting artifact', async () => {
+  const { bot } = makeBot({
+    canBan: false,
+    analyzer: () => ({ is_scam: true, confidence: 88, scam_type: 'phishing', evidence: ['wallet lure'], recommended_action: 'warn' }),
+    dkgIntel: { riskScore: 70, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] },
+    configOverrides: { actionThreshold: 99 }
+  });
+  const stages = [];
+  bot.dkg.stageConversationArtifact = async (event) => { stages.push(event); return { ok: true }; };
+  const originalCall = bot.call;
+  let updatePayload = null;
+  bot.call = async (method, payload) => {
+    if (method === 'getUpdates') {
+      updatePayload = payload;
+      return [{ update_id: 7, channel_post: {
+        message_id: 50, date: Math.floor(Date.now() / 1000),
+        chat: { id: -200, type: 'channel', title: 'public chan' },
+        text: 'Urgent verify your wallet at https://scam.example now'
+      } }];
+    }
+    return originalCall(method, payload);
+  };
+  await bot.pollOnce();
+  assert.ok(updatePayload.allowed_updates.includes('channel_post'));
+  assert.equal(stages.length, 1);
+  assert.equal(stages[0].event_type, 'conversation_artifact');
+  assert.equal(stages[0].payload.consent_to_share, true);
+  assert.equal(stages[0].chat?.type, 'channel');
+});
+
+test('forceDkg correction honors a root chat opt-out reached through a wrapper', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: true, configOverrides: { artifactOptOutChats: ['-200'] } });
+  const stages = [];
+  bot.dkg.stageConversationArtifact = async (event) => { stages.push(event); return { ok: true }; };
+  bot.store.append({
+    id: 'root-opted-out', event_type: 'risk_review_needed', timestamp: new Date().toISOString(),
+    chat: { id: -200, type: 'supergroup' }, user: { id: 86 },
+    payload: { confidence: 90, scam_type: 'impersonation' }
+  });
+  bot.store.append({
+    id: 'wrapper-review', event_type: 'review_overturned', timestamp: new Date().toISOString(),
+    chat: { id: -300, type: 'supergroup' }, user: { id: 1 },
+    payload: { target_event_id: 'root-opted-out', confidence: 80, evidence: ['wrapper'] }
+  });
+  const artifact = await bot.recordConversationArtifact(
+    { chat: { id: 1, type: 'private' }, from: { id: 1, username: 'admin' }, message_id: 52 },
+    {
+      risk: { confidence: 80, local_confidence: 80, scam_type: 'false_positive' },
+      text: 'admin correction', artifactKind: 'false_positive_signal',
+      sourceEventIds: ['wrapper-review'], forceDkg: true
+    }
+  );
+  assert.equal(artifact.payload.consent_to_share, false);
+  assert.equal(artifact.payload.privacy_opt_out, true);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'conversation_artifact'), false);
+  assert.equal(stages.length, 0);
+});
+
+test('forceDkg correction permits a wrapper whose root is not opted out', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: true, configOverrides: { artifactOptOutChats: ['-999'] } });
+  bot.store.append({
+    id: 'root-permitted', event_type: 'risk_review_needed', timestamp: new Date().toISOString(),
+    chat: { id: -200, type: 'supergroup' }, user: { id: 86 },
+    payload: { confidence: 90, scam_type: 'impersonation' }
+  });
+  bot.store.append({
+    id: 'wrapper-permitted', event_type: 'review_overturned', timestamp: new Date().toISOString(),
+    chat: { id: -300, type: 'supergroup' }, user: { id: 1 },
+    payload: { target_event_id: 'root-permitted', confidence: 80, evidence: ['wrapper'] }
+  });
+  const artifact = await bot.recordConversationArtifact(
+    { chat: { id: 1, type: 'private' }, from: { id: 1, username: 'admin' }, message_id: 53 },
+    {
+      risk: { confidence: 80, local_confidence: 80, scam_type: 'false_positive' },
+      text: 'admin correction', artifactKind: 'false_positive_signal',
+      sourceEventIds: ['wrapper-permitted'], forceDkg: true
+    }
+  );
+  assert.equal(artifact.payload.consent_to_share, true);
+  assert.equal(artifact.payload.privacy_opt_out, false);
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'conversation_artifact').length, 1);
+});
+
+test('upward private appeal citation does not taint an unrelated permitted root', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: true });
+  bot.store.append({
+    id: 'root-unrelated', event_type: 'risk_review_needed', timestamp: new Date().toISOString(),
+    chat: { id: -200, type: 'supergroup' }, user: { id: 86 },
+    payload: { confidence: 90, scam_type: 'impersonation' }
+  });
+  bot.store.append({
+    id: 'private-appeal', event_type: 'appeal_submitted', timestamp: new Date().toISOString(),
+    chat: { id: 1, type: 'private' }, user: { id: 87 },
+    payload: { target_event_id: 'root-unrelated', privacy_opt_out: true }
+  });
+  const artifact = await bot.recordConversationArtifact(
+    { chat: { id: 1, type: 'private' }, from: { id: 1, username: 'admin' }, message_id: 54 },
+    {
+      risk: { confidence: 80, local_confidence: 80, scam_type: 'false_positive' },
+      text: 'admin correction', artifactKind: 'false_positive_signal',
+      sourceEventIds: ['root-unrelated'], forceDkg: true
+    }
+  );
+  assert.equal(artifact.payload.consent_to_share, true);
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'conversation_artifact').length, 1);
+});
+
+function channelObservationFixture({ configOverrides = {}, text = 'From Zero to $685K profit I joined Alpha Trading (https://t.me/alpha_trading_circle) 16 months ago and within the past 3 months I earned $685,000 thanks to the coaching Mr Theo provides.' } = {}) {
+  const { bot, dkgWrites } = makeBot({
+    canBan: false,
+    analyzer: analyzeMessage,
+    dkgIntel: { riskScore: 0, reportsAcrossCommunities: 0, wallets: [], domains: [], patterns: [], evidence: [] },
+    configOverrides: { actionThreshold: 99, ...configOverrides }
+  });
+  const stages = [];
+  bot.dkg.stageConversationArtifact = async (event) => { stages.push(event); return { ok: true }; };
+  const originalCall = bot.call;
+  let updates = [{
+    update_id: 91,
+    channel_post: {
+      message_id: 60, date: Math.floor(Date.now() / 1000),
+      chat: { id: -200, type: 'channel', title: 'public chan' },
+      text
+    }
+  }];
+  bot.call = async (method, payload) => {
+    if (method === 'getUpdates') {
+      const result = updates;
+      updates = [];
+      return result;
+    }
+    return originalCall(method, payload);
+  };
+  return { bot, dkgWrites, stages };
+}
+
+test('main pollOnce publishes one channel observation for a permitted high-confidence channel post', async () => {
+  const { bot, dkgWrites } = channelObservationFixture();
+  await bot.pollOnce();
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'channel_observation').length, 1);
+});
+
+test('main pollOnce publishes no channel observation for an opted-out channel', async () => {
+  const { bot, dkgWrites, stages } = channelObservationFixture({ configOverrides: { artifactOptOutChats: ['-200'] } });
+  await bot.pollOnce();
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'channel_observation').length, 0);
+  assert.equal(stages.length, 0);
+  const local = bot.store.all().find((event) => event.event_type === 'channel_observation');
+  assert.equal(local.payload.consent_to_share, false);
+  assert.equal(local.payload.privacy_opt_out, true);
+});
+
+test('main pollOnce publishes no channel observation when automatic promotion is disabled', async () => {
+  const { bot, dkgWrites } = channelObservationFixture({ configOverrides: { autoPromoteEvidence: false } });
+  await bot.pollOnce();
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'channel_observation').length, 0);
+});
+
+test('main pollOnce publishes no channel observation for explicit message denial', async () => {
+  const { bot, dkgWrites } = channelObservationFixture();
+  bot.call = async (method) => {
+    if (method === 'getUpdates') return [{
+      update_id: 92,
+      channel_post: {
+        message_id: 61, date: Math.floor(Date.now() / 1000),
+        chat: { id: -200, type: 'channel', title: 'public chan' },
+        text: 'From Zero to $685K profit I joined Alpha Trading (https://t.me/alpha_trading_circle) 16 months ago.',
+        consent_to_share: false
+      }
+    }];
+    return { ok: true };
+  };
+  await bot.pollOnce();
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'channel_observation').length, 0);
+});
+
+test('channel observation retries with the same update deduplicate the shared publication', async () => {
+  const { bot, dkgWrites } = channelObservationFixture();
+  bot.currentUpdateId = 93;
+  const message = {
+    message_id: 62, date: Math.floor(Date.now() / 1000),
+    chat: { id: -200, type: 'channel', title: 'public chan' },
+    text: 'From Zero to $685K profit I joined Alpha Trading (https://t.me/alpha_trading_circle) 16 months ago.'
+  };
+  const risk = { confidence: 90, local_confidence: 90, is_scam: true, scam_type: 'investment_scam', domains: [], wallets: [], patterns: [], evidence: ['Investment-profit testimonial lure'] };
+  await bot.recordChannelObservation(message, risk);
+  await bot.recordChannelObservation(message, risk);
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'channel_observation').length, 1);
+});
+
+test('getChatAdministrators failure does not bypass an opted-out channel gate', async () => {
+  const { bot, dkgWrites } = channelObservationFixture({ configOverrides: { artifactOptOutChats: ['-200'] } });
+  const originalCall = bot.call;
+  bot.call = async (method, payload) => {
+    if (method === 'getChatAdministrators') throw new Error('admin lookup unavailable');
+    return originalCall(method, payload);
+  };
+  await bot.pollOnce();
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'channel_observation').length, 0);
+});
+
+test('main artifact policy keeps ordinary denied config as a private WM draft', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: false, configOverrides: { autoPromoteEvidence: false } });
+  const stages = [];
+  bot.dkg.stageConversationArtifact = async (event) => { stages.push(event); return { ok: true }; };
+  const artifact = await bot.recordConversationArtifact(
+    { chat: { id: -100, type: 'supergroup' }, from: { id: 42 }, message_id: 51, text: 'verify wallet at https://scam.example' },
+    { risk: { confidence: 88, local_confidence: 88, scam_type: 'phishing' }, text: 'verify wallet at https://scam.example', artifactKind: 'tactic_candidate' }
+  );
+  assert.equal(artifact.payload.consent_to_share, false);
+  assert.equal(artifact.payload.privacy_opt_out, true);
+  assert.equal(artifact.payload.lifecycle_stage, 'working_memory_draft');
+  assert.equal(dkgWrites.some((event) => event.event_type === 'conversation_artifact'), false);
+  assert.equal(stages.length, 0);
 });
 
 test('ordinary scam discussion does not trigger conversational reply', async () => {
@@ -963,6 +1236,7 @@ test('native admin unban records a correction and retracts the shared claim', as
   assert.equal(evaluation.claimLevel, 'retracted');
   assert.equal(evaluation.retracted, true);
 
+  bot.currentUpdateId = 779;
   await bot.handleChatMemberUpdate({
     chat,
     from: { id: 1, username: 'admin' },
@@ -1201,7 +1475,7 @@ test('polling requests chat member updates for joins', async () => {
   const { bot, calls } = makeBot({ canBan: true });
   await bot.pollOnce();
   const poll = calls.find((call) => call.method === 'getUpdates');
-  assert.deepEqual(poll.payload.allowed_updates, ['message', 'callback_query', 'chat_member', 'my_chat_member']);
+  assert.deepEqual(poll.payload.allowed_updates, ['message', 'channel_post', 'callback_query', 'chat_member', 'my_chat_member']);
 });
 
 test('polling HTTP timeout exceeds Telegram long poll with minimum timeout config', async () => {
@@ -1543,6 +1817,8 @@ test('record awaits pending-review notification and reuses stable effect on repl
   let release;
   bot.call = async (method, payload) => {
     calls.push({ method, payload });
+    if (method === 'getMe') return { id: 999, username: 'tracethembot' };
+    if (method === 'getChatMember') return { status: 'administrator', can_restrict_members: true, can_delete_messages: true };
     if (method === 'sendMessage') await new Promise((resolve) => { release = resolve; });
     return { message_id: 101, ...payload };
   };
@@ -1593,6 +1869,93 @@ test('explicit writeDkg cannot bypass consent or privacy denial', async () => {
   assert.equal(dkgWrites[0].payload.consent_to_share, true);
 });
 
+test('review of a private source finding stays local and cannot be shared', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: true });
+  const chat = { id: -100, type: 'supergroup', title: 'demo' };
+  const finding = {
+    id: 'private-review-source',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 4242, username: 'accused' },
+    payload: {
+      target: { id: 4242, username: 'accused' },
+      target_key: 'id:4242',
+      target_chat_id: chat.id,
+      confidence: 90,
+      recommended_action: 'admin_review',
+      consent_to_share: false,
+      evidence: ['private source evidence']
+    }
+  };
+  bot.store.append(finding);
+  await bot.recordReviewDecisionForEvents(
+    { chat, from: { id: 1, username: 'admin' }, message_id: 93 },
+    [finding],
+    'confirm',
+    'admin confirmed private source',
+    { target: finding.payload.target, reviewChatId: chat.id }
+  );
+  const review = bot.store.all().find((event) => event.event_type === 'review_upheld' && event.payload?.target_event_id === finding.id);
+  assert.ok(review);
+  assert.equal(review.local_only, true);
+  assert.equal(review.payload.consent_to_share, false);
+  assert.equal(review.payload.privacy_opt_out, true);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'review_upheld'), false);
+});
+
+
+test('review lineage inherits denial from an intermediate wrapper or root and controls still share', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: true });
+  const chat = { id: -100, type: 'supergroup', title: 'demo' };
+  const root = (id, consent) => ({
+    id,
+    event_type: 'fraud_finding',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 4242, username: 'accused' },
+    payload: { target: { id: 4242 }, target_key: 'id:4242', target_chat_id: chat.id, confidence: 90, consent_to_share: consent, evidence: ['root evidence'] }
+  });
+  const wrapper = (id, targetId) => ({
+    id,
+    event_type: 'review_upheld',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 1, username: 'admin' },
+    payload: { target_event_id: targetId, reviewed_target: { id: 4242 }, reviewed_target_key: 'id:4242', target_chat_id: chat.id, review_decision: 'upheld', admin_verified: true, evidence: ['wrapper evidence'] }
+  });
+  const pending = (id, rootIds) => ({
+    id,
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 4242, username: 'accused' },
+    payload: { target: { id: 4242 }, target_key: 'id:4242', target_chat_id: chat.id, confidence: 90, evidence_root_ids: rootIds, evidence: ['pending evidence'] }
+  });
+  const message = { chat, from: { id: 1, username: 'admin' }, message_id: 94 };
+
+  bot.store.append(root('lineage-root-denied', false));
+  bot.store.append(wrapper('lineage-wrapper-denied', 'lineage-root-denied'));
+  const denied = pending('lineage-pending-denied', ['lineage-wrapper-denied']);
+  bot.store.append(denied);
+  await bot.recordReviewDecisionForEvents(message, [denied], 'confirm', 'denied lineage', { target: denied.payload.target, reviewChatId: chat.id });
+  const deniedReview = bot.store.all().find((event) => event.event_type === 'review_upheld' && event.payload?.target_event_id === denied.id);
+  assert.ok(deniedReview);
+  assert.equal(deniedReview.local_only, true);
+  assert.equal(deniedReview.payload.consent_to_share, false);
+  assert.equal(deniedReview.payload.privacy_opt_out, true);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'review_upheld'), false);
+
+  bot.store.append(root('lineage-root-open', true));
+  bot.store.append(wrapper('lineage-wrapper-open', 'lineage-root-open'));
+  const allowed = pending('lineage-pending-open', ['lineage-wrapper-open']);
+  bot.store.append(allowed);
+  await bot.recordReviewDecisionForEvents(message, [allowed], 'confirm', 'open lineage', { target: allowed.payload.target, reviewChatId: chat.id });
+  const allowedReview = bot.store.all().find((event) => event.event_type === 'review_upheld' && event.payload?.target_event_id === allowed.id);
+  assert.ok(allowedReview);
+  assert.equal(allowedReview.local_only, undefined);
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'review_upheld').length, 1);
+});
 
 test('failed pending-review notification does not consume its cooldown', async () => {
   const { bot } = makeBot({ canBan: true });
@@ -1606,8 +1969,12 @@ test('failed pending-review notification does not consume its cooldown', async (
   };
   let attempts = 0;
   bot.call = async (method, payload) => {
-    attempts += 1;
-    if (attempts === 1) throw new Error('temporary Telegram failure');
+    if (method === 'getMe') return { id: 999, username: 'tracethembot' };
+    if (method === 'getChatMember') return { status: 'administrator', can_restrict_members: true, can_delete_messages: true };
+    if (method === 'sendMessage') {
+      attempts += 1;
+      if (attempts === 1) throw new Error('temporary Telegram failure');
+    }
     return { message_id: 10, ...payload };
   };
 
@@ -2692,7 +3059,8 @@ test('telegram command descriptions match the public bot command list', () => {
     { command: 'mute', description: 'Admin: mute a replied or mentioned user for a duration' },
     { command: 'appeal', description: 'Private: appeal your own ban and review your local cases' },
     { command: 'appeals', description: 'Admin: review pending ban appeals for chats you moderate' },
-    { command: 'controls', description: 'Private: current-admin protection controls and auto-ban overrides' }
+    { command: 'controls', description: 'Private: current-admin protection controls and auto-ban overrides' },
+    { command: 'status', description: 'Private: capability, coverage, and mode summary for groups you administer' }
   ]);
 });
 
@@ -4943,12 +5311,14 @@ test('non-admin review correction is logged as appeal', async () => {
 
   await bot.executeAgentAction('appeal', { event_id: 'evt-rage-review', reason: '@r4ge13 is not a scammer' }, { chat, from: { id: 2, username: 'member' }, message_id: 31, text: '@tracethembot @r4ge13 is not a scammer' }, false);
 
-  const appeal = dkgWrites.find((event) => event.event_type === 'appeal_submitted');
+  const appeal = bot.store.all().find((event) => event.event_type === 'appeal_submitted');
   assert.equal(appeal.payload.target_event_id, 'evt-rage-review');
   assert.equal(appeal.payload.detection_method, 'llm_context_reply_to_flag');
   assert.match(appeal.payload.appeal_receipt_id, /^appeal-/);
   assert.equal(appeal.payload.source_message_id, 31);
   assert.equal(appeal.payload.provenance, 'telegram_appeal');
+  assert.equal(appeal.local_only, true);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'appeal_submitted'), false);
   assert.ok(calls.some((call) => String(call.payload.text || '').includes('Appeal recorded')));
 });
 
@@ -5049,9 +5419,11 @@ test('LLM classifies non-admin alert reply dispute as appeal', async () => {
 
   await bot.handleMessage({ chat, from: { id: 2, username: 'member' }, message_id: 907, text: 'This is not a scam', reply_to_message: { chat, message_id: 906, from: { id: 999, username: 'tracethembot', is_bot: true }, text: 'TRACaBot flagged @coineazy for admin review.' } });
 
-  const appeal = dkgWrites.find((event) => event.event_type === 'appeal_submitted');
+  const appeal = bot.store.all().find((event) => event.event_type === 'appeal_submitted');
   assert.equal(appeal.payload.target_event_id, 'evt-appeal-llm');
   assert.equal(appeal.payload.detection_method, 'llm_alert_reply_classifier');
+  assert.equal(appeal.local_only, true);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'appeal_submitted'), false);
   assert.ok(calls.some((call) => String(call.payload.text || '').includes('Appeal logged')));
 });
 
