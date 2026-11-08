@@ -34,7 +34,7 @@ OpenClaw skill tools are also available: `scan_target`, `monitor_chat_event`, `s
 - Adapter status: the current DKG/OpenClaw adapter exposes `createAssertion`, `writeAssertion`, and `promoteAssertion` for Working Memory to Shared Working Memory flow; `share` remains supported as a compatibility fallback.
 - Section 5 scope: TRACaBot reads from and writes to DKG v10 Shared Memory through a supported public interface boundary and connects that memory to an OpenClaw-compatible agent workflow for LLM-Wiki/autoresearch-style collaborative knowledge.
 - Exceptions respected: not Verified-Memory-only, no endorsement/voting UI, no Conviction/staking UX, no DKG v9 dependency, no Curator bypass, no internal DKG v10 package imports, no DKG node source patching, and no daemon-side code loading.
-- Governance loop: Explain Event in the `/start` menu, natural-language admin review replies, non-admin appeal logging, and OpenClaw `explain_event` / `submit_appeal` / `review_event` tools make decisions explainable and correctable while preserving an auditable DKG trail instead of silently rewriting moderation history.
+- Governance loop: Explain Event in the `/start` menu, natural-language admin review replies, non-admin appeal logging, and OpenClaw `explain_event` / `submit_appeal` / `review_event` tools make decisions explainable and correctable. Private appeals stay local-only; review decisions retain an auditable DKG trail instead of silently rewriting moderation history.
 
 ## Verification
 

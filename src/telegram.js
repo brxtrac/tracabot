@@ -21,13 +21,20 @@ import { extractDomains, extractPatterns, extractWallets } from './dkg-client.js
 import { buildAgentIntentPrompt, buildAlertReplyClassifierPrompt, buildGeneralPrompt, buildSafetyPrompt, fallbackSafetyReply, isOnTopicDirectAddress, isSafetyQuestion, offTopicRedirect, sanitizeGeneralReply, sanitizeSafetyReply, shouldConversationallyReply } from './conversation.js';
 import { redactedOpenClawStatus } from './openclaw-config.js';
 import { TracabotSkillService } from './skill-service.js';
-import { evaluateEvidence, EVIDENCE_POLICY_VERSION } from './evidence-policy.js';
+import { evaluateEvidence, EVIDENCE_POLICY_VERSION, sharingDeniedInLineage } from './evidence-policy.js';
 import { promoteEligibleEvidence } from './evidence-promoter.js';
 import { analyzeBanContext, BAN_CONTEXT_LIMITS, emptyBanContext } from './ban-context.js';
 import { evaluateJoinProtection, PROTECTION_POLICY_VERSION, protectionSummary } from './protection-policy.js';
 import { fetchCreatorAttestation } from './creator-attestation.js';
 import { flushFederationQueue } from './federation-client.js';
 import { resolveReviewTarget } from './review-target.js';
+import {
+  GROUP_MODE_ADMIN,
+  GROUP_MODE_OBSERVER,
+  groupCapabilityStatusLabel,
+  isDestructiveTelegramMethod,
+  resolveGroupCapabilities
+} from './group-capabilities.js';
 
 export const CAMPAIGN_POLICIES = Object.freeze([
   Object.freeze({
@@ -46,7 +53,8 @@ export const TELEGRAM_COMMANDS = [
   { command: 'mute', description: 'Admin: mute a replied or mentioned user for a duration' },
   { command: 'appeal', description: 'Private: appeal your own ban and review your local cases' },
   { command: 'appeals', description: 'Admin: review pending ban appeals for chats you moderate' },
-  { command: 'controls', description: 'Private: current-admin protection controls and auto-ban overrides' }
+  { command: 'controls', description: 'Private: current-admin protection controls and auto-ban overrides' },
+  { command: 'status', description: 'Private: capability, coverage, and mode summary for groups you administer' }
 ];
 
 const MAX_TEXT_CHARS = 4096;
@@ -63,6 +71,7 @@ const OBSERVED_CONTEXT_TTL_MS = 24 * 60 * 60 * 1000;
 const MEMBERSHIP_EPISODE_DEDUPE_MS = 2 * 60 * 1000;
 const RECENT_JOIN_RENAME_WINDOW_MS = 30 * 60 * 1000;
 const ADMIN_CACHE_TTL_MS = 10 * 60 * 1000;
+const OBSERVER_ADVISORY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const SOLVED_JOIN_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 const DKG_UAL_RE = /^did:dkg:[^\s<>"']{8,}$/i;
 const DM_REPORT_RE = /\b(?:dm|direct message|private message|inbox|pm)\b/i;
@@ -588,7 +597,7 @@ function hasEvidenceForDkg(eventType = '', payload = {}) {
   if (['risk_check', 'risk_query', 'scam_detection'].includes(eventType)) return false;
   if (['watch_started', 'watch_ended', 'reporter_reputation_update'].includes(eventType)) return false;
   if (eventType.startsWith('join_challenge_') && eventType !== 'join_challenge_repeat_failure') return false;
-  if (['ban_executed', 'restrict_executed', 'fraud_finding', 'report_submitted', 'dm_scam_report', 'fraud_campaign', 'join_challenge_repeat_failure', 'channel_observation', 'conversation_artifact', 'appeal_submitted', 'review_upheld', 'review_overturned', 'proactive_cross_group_warning'].includes(eventType)) return true;
+  if (['ban_executed', 'restrict_executed', 'fraud_finding', 'report_submitted', 'dm_scam_report', 'fraud_campaign', 'join_challenge_repeat_failure', 'channel_observation', 'conversation_artifact', 'review_upheld', 'review_overturned', 'proactive_cross_group_warning'].includes(eventType)) return true;
   if (['risk_review_needed', 'risk_action_suppressed', 'report_review_needed'].includes(eventType)) {
     return Number(payload.confidence || 0) >= 60 || Boolean(payload.dkg_evidence?.length || payload.wallets?.length || payload.domains?.length || payload.patterns?.length);
   }
@@ -626,6 +635,12 @@ export class TelegramShieldBot {
     this.offset = this.store.pollingOffset?.(this.botKey) ?? 0;
     this.currentUpdateId = null;
     this.botId = null;
+    this.botProfile = null;
+    this.groupCapabilities = new Map(); // chatId -> resolved bot mode/rights cache
+    this.groupCapabilityInflight = new Map();
+    this.groupCapabilityGeneration = new Map(); // invalidated by my_chat_member
+    this.groupCapabilityReadSeq = new Map(); // latest-read-wins guard
+    this.lastObserverAdvisoryAt = new Map();
     this.observedUsers = new Map();
     this.chatAdmins = new Map();
     this.joinChallenges = new Map();
@@ -783,6 +798,9 @@ export class TelegramShieldBot {
   }
 
   async callEffect(method, payload, effectKey = '') {
+    if (isDestructiveTelegramMethod(method)) {
+      await this.assertGroupOperationAllowed(payload?.chat_id, method);
+    }
     if ((this.currentUpdateId === null && !effectKey) || !this.store.beginEffect) return this.call(method, payload);
     const stablePayload = canonicalJson(payload);
     const semanticKey = effectKey || `${this.currentUpdateId}:${method}:${createHash('sha256').update(stablePayload).digest('hex')}`;
@@ -879,9 +897,9 @@ export class TelegramShieldBot {
     return this.sendCommandReply(chatId, text, { ...extra, reply_markup: inlineKeyboard(rows) });
   }
 
-  cleanupMenuTrigger(message = {}) {
+  async cleanupMenuTrigger(message = {}) {
     if (message.chat?.type === 'private' || !message.chat?.id || !message.message_id) return;
-    this.deleteMessage(message.chat.id, message.message_id).catch(() => null);
+    await this.deleteMessage(message.chat.id, message.message_id).catch(() => null);
   }
 
   commandResponseOptions(message = {}, extra = {}) {
@@ -891,13 +909,13 @@ export class TelegramShieldBot {
 
   async sendCleanCommandReply(message = {}, text = '', extra = {}) {
     const sent = await this.sendCommandReply(message.chat.id, text, this.commandResponseOptions(message, extra));
-    this.cleanupMenuTrigger(message);
+    await this.cleanupMenuTrigger(message);
     return sent;
   }
 
   async sendCleanInteractiveCommandReply(message = {}, text = '', rows = [], extra = {}) {
     const sent = await this.sendInteractiveReply(message.chat.id, text, rows, this.commandResponseOptions(message, extra));
-    this.cleanupMenuTrigger(message);
+    await this.cleanupMenuTrigger(message);
     return sent;
   }
 
@@ -906,7 +924,7 @@ export class TelegramShieldBot {
       const reply = await this.generalConversationReply({ ...message, text: message.text || 'Open the Tracabot protection menu.' }).catch(() => '');
       if (reply && reply.length > 5) return reply;
     }
-    return 'I’m here to help protect the group. Add TRACaBot as a group admin and keep it running: bans made with normal Telegram admin controls are logged automatically. Use /scan or /report for checks, and /ban or /mute only when you need the bot to act.';
+    return 'I’m here to help protect the group. Add TRACaBot as a group admin and keep it running: bans made with normal Telegram admin controls are logged automatically. Without admin rights I stay in quiet observer mode with partial coverage. Use /scan or /report for checks, and /ban or /mute only when you need the bot to act.';
   }
 
   async sendMenu(message = {}, extra = {}) {
@@ -916,7 +934,7 @@ export class TelegramShieldBot {
     const isPrivateChat = message.chat?.type === 'private' || Number(chatId) > 0;
     const replyContext = isPrivateChat ? { reply_to_message_id: message.message_id } : {};
     const sent = await this.sendInteractiveReply(chatId, text, this.dashboardKeyboard(requester), { ...replyContext, ...extra });
-    this.cleanupMenuTrigger(message);
+    await this.cleanupMenuTrigger(message);
     return sent;
   }
 
@@ -1047,15 +1065,161 @@ export class TelegramShieldBot {
     return '';
   }
 
+  async getBotProfile({ force = false } = {}) {
+    if (this.botProfile && !force) return this.botProfile;
+    const me = await this.call('getMe', {});
+    if (!me?.id) throw new Error('Telegram getMe returned no bot id');
+    this.botId = me.id;
+    const actualUsername = normalizeBotUsername(me.username || 'tracethembot');
+    this.botUsernameCache = normalizeBotUsername(this.config.botUsername || '') || actualUsername;
+    this.botProfile = {
+      id: me.id,
+      username: actualUsername,
+      can_read_all_group_messages: typeof me.can_read_all_group_messages === 'boolean'
+        ? me.can_read_all_group_messages
+        : undefined,
+      can_join_groups: typeof me.can_join_groups === 'boolean' ? me.can_join_groups : undefined
+    };
+    return this.botProfile;
+  }
+
   async botUsername() {
     if (this.botUsernameCache) return this.botUsernameCache;
-    const me = await this.call('getMe', {});
-    this.botUsernameCache = normalizeBotUsername(me.username || 'tracethembot');
-    return this.botUsernameCache;
+    const profile = await this.getBotProfile();
+    return profile.username;
   }
 
   ownBotUsername() {
     return this.botUsernameCache || normalizeBotUsername(this.config.botUsername || '');
+  }
+
+  /**
+   * Single source of truth for per-group effective mode and rights. Uses the
+   * existing Telegram getChatMember/getMe calls; it is not a second admin list
+   * cache. Unknown or failed lookups resolve to degraded observer.
+   */
+  invalidateGroupCapabilityReads(chatId = '') {
+    const key = String(chatId || '');
+    if (!key) return 0;
+    const next = (this.groupCapabilityGeneration.get(key) || 0) + 1;
+    this.groupCapabilityGeneration.set(key, next);
+    this.groupCapabilityInflight.delete(key);
+    return next;
+  }
+
+  async getGroupCapabilities(chatId, { force = false } = {}) {
+    const key = String(chatId || '');
+    if (!key) {
+      return resolveGroupCapabilities({ chatId: key, error: 'missing_chat', source: 'none' });
+    }
+    const cached = this.groupCapabilities.get(key);
+    const generation = this.groupCapabilityGeneration.get(key) || 0;
+    if (!force && cached && Date.now() - cached.checkedAt < ADMIN_CACHE_TTL_MS) return cached;
+    const inflight = this.groupCapabilityInflight.get(key);
+    if (inflight && inflight.generation === generation) return inflight.promise;
+    const readSeq = (this.groupCapabilityReadSeq.get(key) || 0) + 1;
+    this.groupCapabilityReadSeq.set(key, readSeq);
+    const entry = { generation, readSeq };
+    entry.promise = (async () => {
+      try {
+        let profile = null;
+        let member = null;
+        let error = '';
+        try {
+          profile = await this.getBotProfile();
+        } catch (lookupError) {
+          error = lookupError instanceof Error ? lookupError.message : String(lookupError);
+        }
+        if (!error) {
+          try {
+            member = await this.call('getChatMember', { chat_id: chatId, user_id: profile.id });
+          } catch (lookupError) {
+            error = lookupError instanceof Error ? lookupError.message : String(lookupError);
+          }
+        }
+        const currentGeneration = this.groupCapabilityGeneration.get(key) || 0;
+        if (currentGeneration !== generation) {
+          // A my_chat_member update superseded this read. Return the event's
+          // current state; never overwrite it with the older lookup.
+          const current = this.groupCapabilities.get(key);
+          if (current) return current;
+          return resolveGroupCapabilities({ chatId: key, error: 'capability_read_superseded', source: 'stale' });
+        }
+        if ((this.groupCapabilityReadSeq.get(key) || 0) !== readSeq) {
+          // A newer live read started. Its result must win; do not authorize a
+          // destructive caller from this older completion.
+          return resolveGroupCapabilities({ chatId: key, error: 'capability_read_superseded', source: 'stale' });
+        }
+        const capabilities = resolveGroupCapabilities({
+          chatId: key,
+          member,
+          botProfile: profile,
+          error,
+          source: 'getChatMember'
+        });
+        this.groupCapabilities.set(key, capabilities);
+        return capabilities;
+      } finally {
+        if (this.groupCapabilityInflight.get(key) === entry) this.groupCapabilityInflight.delete(key);
+      }
+    })();
+    this.groupCapabilityInflight.set(key, entry);
+    return entry.promise;
+  }
+
+  setGroupCapabilitiesFromMember(chatId, member, { source = 'my_chat_member' } = {}) {
+    const key = String(chatId || '');
+    if (!key) return null;
+    const capabilities = resolveGroupCapabilities({
+      chatId: key,
+      member,
+      botProfile: this.botProfile,
+      source
+    });
+    // Invalidate any older in-flight getChatMember read before publishing the
+    // event state. This prevents a stale admin result from overwriting a
+    // demotion/removal.
+    this.invalidateGroupCapabilityReads(key);
+    this.groupCapabilities.set(key, capabilities);
+    if (!capabilities.canRunJoinChallenge) {
+      this.disableGroupOperations(key);
+    }
+    return capabilities;
+  }
+
+  disableGroupOperations(chatId = '') {
+    const prefix = `${String(chatId || '')}:`;
+    for (const key of [...this.joinChallenges.keys()]) {
+      if (!key.startsWith(prefix)) continue;
+      this.clearJoinChallengeTimer(key);
+      this.joinChallenges.delete(key);
+      this.solvedJoinChallenges.delete(key);
+    }
+  }
+
+  async assertGroupOperationAllowed(chatId, method = '') {
+    const key = String(chatId || '');
+    if (!key || Number(key) > 0) return null; // private chats are not group moderation scope
+    const capabilities = await this.getGroupCapabilities(key, { force: true });
+    if (!capabilities.botOperationsEnabled) {
+      throw new Error(`TRACaBot cannot ${method}: bot is not an active member of this group`);
+    }
+    if (method === 'deleteMessage' && !capabilities.canDeleteMessages) {
+      throw new Error('TRACaBot cannot deleteMessage: Telegram delete permission unavailable');
+    }
+    if (['banChatMember', 'restrictChatMember', 'unbanChatMember'].includes(method) && !capabilities.canRestrictMembers) {
+      throw new Error(`TRACaBot cannot ${method}: Telegram restrict/ban permission unavailable`);
+    }
+    return capabilities;
+  }
+
+  async unbanMember(chatId, userId, { effectKey = '', onlyIfBanned = true } = {}) {
+    await this.assertGroupOperationAllowed(chatId, 'unbanChatMember');
+    const payload = { chat_id: chatId, user_id: Number(userId) || userId };
+    if (onlyIfBanned) payload.only_if_banned = true;
+    return effectKey
+      ? this.callEffect('unbanChatMember', payload, effectKey)
+      : this.call('unbanChatMember', payload);
   }
 
   async deleteMessage(chatId, messageId) {
@@ -1065,18 +1229,12 @@ export class TelegramShieldBot {
 
   async getBotId() {
     if (this.botId) return this.botId;
-    const me = await this.call('getMe', {});
-    this.botId = me.id;
-    return this.botId;
+    const profile = await this.getBotProfile();
+    return profile.id;
   }
 
   async hasBanRights(chatId) {
-    try {
-      const member = await this.call('getChatMember', { chat_id: chatId, user_id: await this.getBotId() });
-      return member.status === 'administrator' && member.can_restrict_members === true;
-    } catch {
-      return false;
-    }
+    return (await this.getGroupCapabilities(chatId, { force: true })).canRestrictMembers;
   }
 
   async hasRestrictRights(chatId) {
@@ -1084,12 +1242,7 @@ export class TelegramShieldBot {
   }
 
   async hasDeleteRights(chatId) {
-    try {
-      const member = await this.call('getChatMember', { chat_id: chatId, user_id: await this.getBotId() });
-      return member.status === 'administrator' && member.can_delete_messages !== false;
-    } catch {
-      return false;
-    }
+    return (await this.getGroupCapabilities(chatId, { force: true })).canDeleteMessages;
   }
 
   async dkgReachable() {
@@ -1445,6 +1598,8 @@ export class TelegramShieldBot {
   }
 
   async alertAdmins(message, risk, event) {
+    const capabilities = await this.automaticNotificationCapabilities(message.chat?.id).catch(() => null);
+    if (this.isObserverMode(capabilities)) return null;
     const backed = canAutonomouslyEscalate(risk);
     const target = actorFromMessage(message);
 
@@ -1475,6 +1630,7 @@ export class TelegramShieldBot {
         // Telegram only allows DM after an admin starts the bot.
       }
     }
+    return sent;
   }
 
   formatHelp() {
@@ -1495,6 +1651,7 @@ export class TelegramShieldBot {
       'Native admin logging',
       '',
       'Add TRACaBot to the group as an admin and keep it running. When any admin bans a member with normal Telegram controls, TRACaBot records the live ban, the admin actor when Telegram provides it, the target, and the time. No /ban command is required.',
+      'Effective mode is detected per group from live Telegram membership rights, never from configuration. Admin protection can observe live chat_member bans and use permitted enforcement. Observer mode is partial: it can review actual join service messages and visible messages, but it cannot ban, restrict, delete, unban, challenge, or guarantee a comprehensive ban/join feed.',
       'Telegram does not give bots access to Recent Actions, admin logs, or bans that happened before installation. Unstated ban reasons are labeled “reason not provided”. A recorded ban is enforcement evidence, not proof of a scam.',
       'When available, TRACaBot also attaches up to 8 recently observed messages from the same user in the same chat (default 60 minutes). They are labeled “recent pre-ban context; causal link unverified” and are never treated as the ban reason or proof of guilt.',
       '',
@@ -1513,6 +1670,9 @@ export class TelegramShieldBot {
       '/appeal - private only; list your own ban cases or submit one with /appeal <case> <reason>.',
       '/appeals - private admin review; only current admins of the affected group see pending appeals.',
       '/controls - private only; current-admin keyboard to pause future join removals, resume, and review/override recent automatic join bans.',
+      '/status - private only; effective mode, exact Telegram rights, message visibility, and explicit coverage limits for groups where you are a current admin.',
+      '',
+      'Observer groups are quiet by default. TRACaBot still checks evidence and logs locally, but it does not post automatic review warnings or run challenges. The operator can explicitly opt in to bounded, evidence-backed observer advisories; they are never a confirmed scam label.',
       '',
       'Compatibility commands (not required for protection)',
       '',
@@ -1524,22 +1684,31 @@ export class TelegramShieldBot {
 
   async formatStatus(message) {
     const chatId = message.chat.id;
-    const [dkgOk, dkgRuntime, canBan, canDelete] = await Promise.all([
+    const [dkgOk, dkgRuntime, capabilities] = await Promise.all([
       this.dkgReachable(),
       this.dkg.runtimeStatus(),
-      this.hasBanRights(chatId),
-      this.hasDeleteRights(chatId)
+      this.getGroupCapabilities(chatId, { force: true }).catch(() => null)
     ]);
+    const canBan = capabilities?.canRestrictMembers === true;
+    const canDelete = capabilities?.canDeleteMessages === true;
     const openclaw = redactedOpenClawStatus(this.config);
     const caps = dkgRuntime.capabilities || {};
     const llm = this.llm?.status?.() || { enabled: false, provider: this.config.llmProvider || 'auto', model: this.config.llmModel || '' };
+    const mode = capabilities ? groupCapabilityStatusLabel(capabilities) : '⚠️ Degraded / permission lookup unavailable';
+    const coverage = capabilities?.coverage || {};
     return [
       '🩺 Tracabot status',
+      '',
+      `• Effective mode: ${mode}`,
+      `• Telegram rights: restrict/ban ${canBan ? '✅' : '❌'}, delete ${canDelete ? '✅' : '❌'}`,
+      `• Ban/join event coverage: ${coverage.banCapture === 'live_chat_member' ? '✅ live admin chat_member' : (coverage.banCapture === 'unknown' ? '⚠️ unknown/degraded' : '❌ observer; not comprehensive')}`,
+      `• Ordinary message visibility: ${capabilities?.ordinaryMessageVisibility === 'all' ? '✅ all group messages' : capabilities?.ordinaryMessageVisibility === 'broader_delivery_unverified' ? '⚠️ broader delivery configured; effective coverage unverified' : capabilities?.ordinaryMessageVisibility === 'limited' ? '⚠️ privacy-limited' : capabilities?.ordinaryMessageVisibility === 'none' ? '❌ no group visibility (bot removed)' : '⚠️ unknown'}`,
+      '• Historical bans/Recent Actions: ❌ never available to bots',
       '',
       'Telegram',
       `• Delete messages: ${canDelete ? '✅ yes' : '❌ no'}`,
       `• Restrict / ban: ${canBan ? '✅ yes' : '❌ no'}`,
-      `• Native admin ban log: ${canBan ? '✅ on' : '⚠️ needs bot admin rights'}`,
+      `• Native admin ban log: ${coverage.banCapture === 'live_chat_member' ? '✅ live chat_member' : '⚠️ not guaranteed in observer/degraded mode'}`,
       `• Automatic evidence sharing: ${this.config.autoPromoteEvidence === false || this.config.dkgWrites === false ? '⚪ local only' : '✅ on'}`,
       '',
       'Protection',
@@ -1587,6 +1756,8 @@ export class TelegramShieldBot {
       '🩺 TRACaBot owner health',
       '',
       `• Telegram: ${bot?.id ? `✅ @${bot.username || 'bot'}` : '❌ unavailable'}`,
+      `• Telegram privacy: ${typeof bot?.can_read_all_group_messages === 'boolean' ? (bot.can_read_all_group_messages ? '⚪ all group messages' : '⚠️ privacy-limited') : '⚠️ unknown'}`,
+      `• Group modes: resolved per live getChatMember; observer groups are quiet and cannot enforce.`,
       `• Poll offset: ${this.offset}`,
       `• Updates completed/failed: ${metrics.telegram_updates_completed || 0}/${metrics.telegram_updates_failed || 0}`,
       `• Telegram API calls/errors: ${metrics.telegram_api_calls || 0}/${metrics.telegram_api_errors || 0}`,
@@ -1675,7 +1846,8 @@ export class TelegramShieldBot {
       }
       return existingEvent;
     }
-    const shouldWriteDkg = !sharingDenied(decoratedPayload)
+    const shouldWriteDkg = this.config.dkgWrites !== false
+      && !sharingDenied(decoratedPayload)
       && (writeDkg ?? (!this.config.testMode && hasEvidenceForDkg(eventType, decoratedPayload)));
     if (shouldWriteDkg) {
       const dkgStarted = Date.now();
@@ -1725,11 +1897,58 @@ export class TelegramShieldBot {
     return event;
   }
 
+  async automaticNotificationCapabilities(chatId = '') {
+    try {
+      return await this.getGroupCapabilities(chatId);
+    } catch {
+      return null;
+    }
+  }
+
+  isObserverMode(capabilities = {}) {
+    return Boolean(capabilities && capabilities.mode === GROUP_MODE_OBSERVER);
+  }
+
+  async maybeSendObserverAdvisory(event = {}, chatId = '', capabilities = {}) {
+    if (this.config.observerAdvisories !== true) return null;
+    const confidence = Number(event.payload?.confidence ?? event.payload?.current_risk?.confidence ?? 0);
+    const evidence = Array.isArray(event.payload?.evidence) ? event.payload.evidence.filter(Boolean) : [];
+    if (!evidence.length || confidence < Number(this.config.warnThreshold || 60)) return null;
+    if (capabilities.canPostMessages === false) return null;
+    const cooldownKey = `observer-advisory:${chatId}`;
+    if (this.store.claimCooldown && !this.store.claimCooldown(cooldownKey, OBSERVER_ADVISORY_COOLDOWN_MS)) return null;
+    const last = this.lastObserverAdvisoryAt.get(chatId) || 0;
+    if (!this.store.claimCooldown && Date.now() - last < OBSERVER_ADVISORY_COOLDOWN_MS) return null;
+    const reservedAt = Date.now();
+    this.lastObserverAdvisoryAt.set(chatId, reservedAt);
+    const text = [
+      '🛡️ TRACaBot observer note',
+      '',
+      'A possible risk signal was observed in a message visible to this bot. This group has not granted TRACaBot admin event access, so coverage is partial and no Telegram action was taken.',
+      'This is not a confirmed scam finding. Admins can open a private chat with the bot for capability and coverage details.'
+    ].join('\n');
+    try {
+      const sent = await this.callEffect('sendMessage', { chat_id: chatId, text }, `observer-advisory:${event.id || reservedAt}`);
+      this.store.completeCooldown?.(cooldownKey);
+      this.rememberBotReply(chatId, sent, text, {});
+      return sent;
+    } catch {
+      // Group send may be denied. Never break polling or the evidence log.
+      if (this.lastObserverAdvisoryAt.get(chatId) === reservedAt) this.lastObserverAdvisoryAt.delete(chatId);
+      this.store.releaseCooldown?.(cooldownKey);
+      return null;
+    }
+  }
+
   async maybeNotifyPendingReview(event = {}) {
     const chatId = eventChatKey(event);
     if (!chatId || !this.chatPendingReviewNotificationsEnabled(chatId)) return null;
-    const intervalMs = this.chatPendingReviewNotificationIntervalHours(chatId) * 60 * 60 * 1000;
     if (this.isReviewHiddenForChat(event, chatId)) return null;
+    const capabilities = await this.automaticNotificationCapabilities(chatId);
+    if (this.isObserverMode(capabilities)) {
+      return this.maybeSendObserverAdvisory(event, chatId, capabilities);
+    }
+    const intervalMs = this.chatPendingReviewNotificationIntervalHours(chatId) * 60 * 60 * 1000;
     const cooldownKey = `pending-review-notice:${chatId}`;
     if (this.store.claimCooldown && !this.store.claimCooldown(cooldownKey, intervalMs)) return null;
     const last = this.lastPendingReviewNoticeAt.get(chatId) || 0;
@@ -2696,7 +2915,7 @@ export class TelegramShieldBot {
         implicit_detection: true,
         detection_method: 'numbered_review_list_reply',
         evidence: [`non-admin review-list reply logged as appeal for ${reviewedEvent.id}: ${reason}`]
-      }));
+      }), { writeDkg: false });
       await this.sendCommandReply(message.chat.id, `📝 Appeal logged for ${userMention(reviewedTarget)}. Receipt: ${escapeHtml(event.payload.appeal_receipt_id)}. Admins can confirm or reject the scam flag.`, { reply_to_message_id: message.message_id, parse_mode: 'HTML' });
       return true;
     }
@@ -2760,8 +2979,10 @@ export class TelegramShieldBot {
       ? [...new Set(extraPayload.review_batch_event_ids)].sort()
       : [...unique.keys()].sort();
     const reviewBatchCutoff = extraPayload.review_batch_cutoff || new Date().toISOString();
+    const reviewHistory = this.store.all();
     const artifactWrites = await Promise.all([...unique.values()].map(async (reviewedEvent) => {
       const reviewedTarget = reviewedEvent?.payload?.reviewed_target || reviewedEvent?.user || reviewedEvent?.payload?.target || target || {};
+      const sourceDenied = sharingDeniedInLineage(reviewHistory, reviewedEvent);
       const targetChatId = eventChatKey(reviewedEvent);
       const actualReviewChatId = chatKey(reviewChatId || message.chat?.id || '');
       const sameChannelReview = !targetChatId || !actualReviewChatId || sameChat(targetChatId, actualReviewChatId);
@@ -2785,6 +3006,7 @@ export class TelegramShieldBot {
         approval_source: 'telegram_admin_review',
         ...this.reviewTrustPayload(reviewer),
         ...extraPayload,
+        ...(sourceDenied ? { consent_to_share: false, privacy_opt_out: true } : {}),
         review_batch_event_ids: reviewBatchEventIds,
         review_batch_cutoff: reviewBatchCutoff,
         false_positive_reason: decision === 'reject' ? reason : '',
@@ -3333,7 +3555,7 @@ export class TelegramShieldBot {
         llm_confidence: classified.confidence,
         original_flag_event: targetEvent.id,
         evidence: [`LLM classified non-admin alert reply as appeal for ${targetEvent.id}: ${reason}`]
-      }));
+      }), { writeDkg: false });
       await this.sendCommandReply(chatId, classified.user_reply ? `${escapeHtml(classified.user_reply)}\nReceipt: ${escapeHtml(event.payload.appeal_receipt_id)}` : `📝 Appeal logged for ${userMention(reviewedTarget)}. Receipt: ${escapeHtml(event.payload.appeal_receipt_id)}. Admins can confirm or reject the scam flag.`, { ...replyOptions, parse_mode: 'HTML' });
       return true;
     }
@@ -3527,7 +3749,7 @@ export class TelegramShieldBot {
           implicit_detection: true,
           detection_method: 'llm_context_reply_to_flag',
           original_flag_event: targetEventId
-        }));
+        }), { writeDkg: false });
         await this.sendEphemeral(chatId, `Appeal recorded for event ${shortId(targetEventId)}. Receipt: ${event.payload.appeal_receipt_id}. Admins will review.`, replyOptions);
         return { handled: true };
       }
@@ -4329,7 +4551,10 @@ export class TelegramShieldBot {
       if (!this.banEventTargets(event, targetId)) return false;
       const eventChatId = event.payload?.target_chat_id || event.chat?.id || '';
       if (!sameChat(eventChatId, caseChatId)) return false;
-      return this.eventTimeMs(event) > caseTime;
+      // Equal timestamps are ambiguous but conservative: a distinct ban at the
+      // same second blocks an old unban/retry. True redelivery is deduped by
+      // the stable native update/transition id, not by timestamp alone.
+      return this.eventTimeMs(event) >= caseTime;
     }) || null;
   }
 
@@ -4517,7 +4742,8 @@ export class TelegramShieldBot {
       const allowedChats = this.config.joinAutoRemoveChats || [];
       const chatAllowed = !allowedChats.length || allowedChats.map(String).includes(group.id);
       const state = paused ? '⏸️ Paused by admin' : (policyEnabled && chatAllowed ? '▶️ Running' : '⚪ Configured off');
-      lines.push(`• ${group.title || group.id} — ${state}`);
+      const capabilities = await this.getGroupCapabilities(group.id, { force: true }).catch(() => null);
+      lines.push(`• ${group.title || group.id} — ${state} · ${capabilities ? groupCapabilityStatusLabel(capabilities) : '⚠️ degraded'}`);
       rows.push([button(`${paused ? '▶️ Resume' : '⏸️ Pause'} future join removals · ${(group.title || group.id).slice(0, 24)}`, callbackData('controls-join-toggle', userId, group.id, paused ? 'off' : 'on'))]);
       for (const ban of this.recentAutoBansForChat(group.id, 3)) recent.push({ ban, group });
     }
@@ -4554,14 +4780,15 @@ export class TelegramShieldBot {
       const policyEnabled = this.config.joinAutoRemove === true;
       const allowedChats = this.config.joinAutoRemoveChats || [];
       const chatAllowed = !allowedChats.length || allowedChats.map(String).includes(group.id);
-      const [canBan, canDelete] = await Promise.all([
-        this.hasBanRights(group.id).catch(() => false),
-        this.hasDeleteRights(group.id).catch(() => false)
-      ]);
+      const capabilities = await this.getGroupCapabilities(group.id, { force: true }).catch(() => null);
       const state = paused ? '⏸️ Paused by admin' : (policyEnabled && chatAllowed ? '▶️ Running' : '⚪ Configured off');
+      const coverage = capabilities?.coverage || {};
       lines.push(`• ${group.title || group.id} — ${state}`);
+      lines.push(`  Mode: ${capabilities ? groupCapabilityStatusLabel(capabilities) : '⚠️ Degraded / permission lookup unavailable'}`);
       lines.push(`  Auto-remove config: ${policyEnabled ? (chatAllowed ? 'on for this group' : 'off for this group') : 'off'}; trusted layers: ${trustedLayers}`);
-      lines.push(`  Bot rights: ban ${canBan ? '✅' : '❌'}, delete ${canDelete ? '✅' : '❌'}; pause is separate from unban`);
+      lines.push(`  Bot rights: restrict/ban ${capabilities?.canRestrictMembers ? '✅' : '❌'}, delete ${capabilities?.canDeleteMessages ? '✅' : '❌'}; pause is separate from unban`);
+      lines.push(`  Coverage: ban feed ${coverage.banCapture === 'live_chat_member' ? 'live admin' : (coverage.banCapture === 'unknown' ? 'unknown/degraded' : 'none')}; joins ${coverage.joins === 'live_chat_member_and_service' ? 'live chat_member + service messages' : (coverage.joins === 'service_messages_only' ? 'service messages only (partial)' : (coverage.joins === 'unknown' ? 'unknown/degraded' : 'none'))}`);
+      lines.push(`  Messages: ${capabilities?.ordinaryMessageVisibility === 'all' ? 'all group messages' : capabilities?.ordinaryMessageVisibility === 'broader_delivery_unverified' ? 'broader delivery configured; effective coverage unverified (leave/re-add may be required)' : capabilities?.ordinaryMessageVisibility === 'limited' ? 'privacy-limited visibility' : capabilities?.ordinaryMessageVisibility === 'none' ? 'none (bot removed)' : 'unknown'}; history: never available`);
     }
     return { text: lines.join('\n'), rows: this.controlFooterRows(userId, 'status'), groups };
   }
@@ -4601,6 +4828,16 @@ export class TelegramShieldBot {
       return;
     }
     const view = await this.controlsView(message.from?.id || message.from?.username || '');
+    await this.sendInteractiveReply(message.chat.id, view.text, view.rows, { reply_to_message_id: message.message_id });
+  }
+
+  async handleStatusCommand(message = {}) {
+    const isPrivate = message.chat?.type === 'private' || Number(message.chat?.id || 0) > 0;
+    if (!isPrivate) {
+      await this.sendCleanCommandReply(message, 'Capability status is private. Open a private chat with this bot and send /status. Group admins can also open Status from the bot menu.');
+      return;
+    }
+    const view = await this.protectionStatusView(message.from?.id || message.from?.username || '');
     await this.sendInteractiveReply(message.chat.id, view.text, view.rows, { reply_to_message_id: message.message_id });
   }
 
@@ -4664,6 +4901,10 @@ export class TelegramShieldBot {
     }
     const target = ban.payload?.target || ban.user || {};
     if (!target.id) return { ok: false, error: 'missing_target' };
+    const newerBan = this.newerIndependentBanFor({ ban, userId: target.id, chatId });
+    if (newerBan) {
+      return { ok: false, error: 'ban_superseded', newer_ban_event_id: newerBan.id, ban };
+    }
     const source = 'telegram_admin_auto_ban_override';
     const resolutionChat = { id: sourceChat.id || `auto:${ban.id}`, type: sourceChat.type || 'private', title: sourceChat.title || 'auto-ban override' };
     const adminMessage = { chat: resolutionChat, from: admin, message_id: sourceChat.message_id };
@@ -4961,6 +5202,16 @@ export class TelegramShieldBot {
     const banChatId = String(ban.chat?.id || appeal.payload?.target_chat_id || '');
     if (!banChatId) return { ok: false, error: 'ban_chat_unavailable' };
     if (!await this.isAppealAdminForChat(admin.id, banChatId)) return { ok: false, error: 'not_chat_admin' };
+    const newerBan = decision === 'overturn'
+      ? this.newerIndependentBanFor({
+        ban,
+        userId: appeal.payload?.appealant_id || ban.payload?.target?.id || ban.user?.id,
+        chatId: banChatId
+      })
+      : null;
+    if (newerBan) {
+      return { ok: false, error: 'ban_superseded', newer_ban_event_id: newerBan.id, ban };
+    }
     const resolution = decision === 'overturn' ? 'overturn' : 'uphold';
     const resolutionReason = boundedText(reason || (resolution === 'overturn' ? 'group admin overturned the ban from a private appeal' : 'group admin upheld the ban from a private appeal'), 500);
     const resolutionChat = { id: sourceChat.id || `appeal:${appealRef}`, type: sourceChat.type || 'private', title: sourceChat.title || 'appeal review' };
@@ -5183,10 +5434,10 @@ export class TelegramShieldBot {
       const isPrivateChat = message.chat?.type === 'private' || Number(chatId) > 0;
       const replyContext = isPrivateChat ? { reply_to_message_id: message.message_id } : {};
       const helpText = isPrivateChat
-        ? [this.formatHelp(), '', 'Banned from a group that uses TRACaBot? Send /appeal here to list your own locally stored ban cases. Telegram only lets the bot message you after you start this private chat; the bot cannot send the first DM.', 'Group admins: use Protection controls, Status, Recent automatic bans, or Appeals below. Only current admins of the affected group see its details; bot owners do not bypass group administration.'].join('\n')
+        ? [this.formatHelp(), '', 'Banned from a group that uses TRACaBot? Send /appeal here to list your own locally stored ban cases. Telegram only lets the bot message you after you start this private chat; the bot cannot send the first DM.', 'Group admins: use Protection controls, Status, Recent automatic bans, or Appeals below. /status shows effective mode, rights, and coverage limits; only current admins of the affected group see its details, and bot owners do not bypass group administration.'].join('\n')
         : this.formatHelp();
       await this.sendInteractiveReply(chatId, helpText, this.dashboardKeyboard(message.from?.id || message.from?.username || '', { includeControls: isPrivateChat }), replyContext);
-      this.cleanupMenuTrigger(message);
+      await this.cleanupMenuTrigger(message);
       return;
     }
     if (isCommand(text, 'health', botUsername)) {
@@ -5203,6 +5454,10 @@ export class TelegramShieldBot {
     }
     if (isCommand(text, 'controls', botUsername)) {
       await this.handleControlsCommand(message);
+      return;
+    }
+    if (isCommand(text, 'status', botUsername)) {
+      await this.handleStatusCommand(message);
       return;
     }
     if (isCommand(text, 'appeals', botUsername)) {
@@ -5239,6 +5494,7 @@ export class TelegramShieldBot {
         appeal_already_resolved: 'That appeal is already resolved.',
         ban_not_found: 'The local ban record is unavailable.',
         ban_chat_unavailable: 'The affected group is unavailable.',
+        ban_superseded: 'A newer ban for this user in this group supersedes this appeal. Review the newer case instead.',
         not_chat_admin: 'Only an actual admin of the affected group can resolve this appeal.'
       };
       await this.sendCleanCommandReply(message, result.ok
@@ -5349,7 +5605,10 @@ export class TelegramShieldBot {
           reason,
           evidence: [...risk.evidence, 'manual /ban requested but bot lacks Telegram ban rights']
         });
-        await this.alertAdmins({ ...message, from: replyUser, text: context }, risk, event);
+        const alert = await this.alertAdmins({ ...message, from: replyUser, text: context }, risk, event);
+        if (!alert) {
+          await this.sendCleanCommandReply(message, '⚠️ TRACaBot is in observer mode for this group and cannot ban. Add the bot as a Telegram admin with Restrict/Ban permission, then retry. The request was logged locally.');
+        }
         return;
       }
       const effectPrefix = `manual-ban:${chatId}:${message.message_id}:${replyUser.id}`;
@@ -5521,6 +5780,7 @@ export class TelegramShieldBot {
       challenge.restricted = true;
       const username = await this.botUsername().catch(() => 'tracethembot');
       this.botUsernameCache = username;
+      if (!await this.challengeGroupSendAllowed(chatId)) throw new Error('capability_lost_before_prompt');
       const sent = await this.send(chatId, await this.challengeText(chatId, member), { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: this.joinChallengeKeyboard(chatId, member, challenge) });
       challenge.messageId = sent?.message_id || '';
     } catch (error) {
@@ -5563,6 +5823,29 @@ export class TelegramShieldBot {
     }, delay + graceMs);
     timer.unref?.();
     this.joinChallengeTimers.set(key, timer);
+  }
+
+  async challengeGroupSendAllowed(chatId = '') {
+    const key = String(chatId || '');
+    if (!key || Number(key) > 0) return false;
+    const capabilities = await this.getGroupCapabilities(key, { force: true }).catch(() => null);
+    return Boolean(capabilities
+      && capabilities.botOperationsEnabled
+      && capabilities.mode === GROUP_MODE_ADMIN
+      && capabilities.canRunJoinChallenge
+      && capabilities.canPostMessages);
+  }
+
+  async deactivateJoinChallenge(challenge, { dm = false, replyChatId = '' } = {}) {
+    if (!challenge?.chat?.id || !challenge?.user?.id) return false;
+    const key = this.challengeKey(challenge.chat.id, challenge.user.id);
+    this.joinChallenges.delete(key);
+    this.clearJoinChallengeTimer(key);
+    this.solvedJoinChallenges.delete(key);
+    if (dm && replyChatId) {
+      await this.send(replyChatId, 'Verification is paused because TRACaBot no longer has admin restriction rights in that group. A current group admin can restart verification.', { private: true }).catch(() => null);
+    }
+    return true;
   }
 
   async deleteJoinChallengePrompt(challenge) {
@@ -5643,7 +5926,7 @@ export class TelegramShieldBot {
     }
     if (action === 'kick') {
       await this.ban(challenge.chat.id, challenge.user.id)
-        .then(() => this.call('unbanChatMember', { chat_id: challenge.chat.id, user_id: challenge.user.id, only_if_banned: true }))
+        .then(() => this.unbanMember(challenge.chat.id, challenge.user.id, { onlyIfBanned: true }))
         .catch(() => null);
       return true;
     }
@@ -5656,6 +5939,10 @@ export class TelegramShieldBot {
   }
 
   async maybeFailJoinChallenge(message, challenge, options = {}) {
+    const capabilities = await this.getGroupCapabilities(challenge.chat.id, { force: true }).catch(() => null);
+    if (!capabilities?.canRunJoinChallenge) {
+      return this.deactivateJoinChallenge(challenge, { dm: options.dm === true, replyChatId: options.sourceChatId || '' });
+    }
     const maxAttempts = this.config.joinChallengeMaxAttempts || 3;
     if (challenge.attempts < maxAttempts) return false;
     const chatId = challenge.chat.id;
@@ -5676,8 +5963,10 @@ export class TelegramShieldBot {
     }, { writeDkg: false });
     await this.maybeRecordJoinChallengeRepeatFailure({ ...message, chat: challenge.chat, from: challenge.user }, event);
     await this.deleteJoinChallengePrompt(challenge);
-    await this.sendEphemeral(chatId, `${userMention(challenge.user)} did not complete DKG verification after ${challenge.attempts} attempts.`, { parse_mode: 'HTML', autoDelete: true }, this.config.successMessageTtlSeconds || 45).catch(() => null);
     if (options.dm && options.sourceChatId) await this.send(options.sourceChatId, 'Verification failed too many times. Ask a group admin to reset your access.', { private: true }).catch(() => null);
+    if (await this.challengeGroupSendAllowed(chatId)) {
+      await this.sendEphemeral(chatId, `${userMention(challenge.user)} did not complete DKG verification after ${challenge.attempts} attempts.`, { parse_mode: 'HTML', autoDelete: true }, this.config.successMessageTtlSeconds || 45).catch(() => null);
+    }
     return true;
   }
 
@@ -5685,6 +5974,10 @@ export class TelegramShieldBot {
     const text = String(message.text || '').trim();
     const chatId = message.chat.id;
     const replyChatId = options.sourceChatId || chatId;
+    const capabilities = await this.getGroupCapabilities(chatId, { force: true }).catch(() => null);
+    if (!capabilities?.canRunJoinChallenge) {
+      return this.deactivateJoinChallenge(challenge, { dm: options.dm === true, replyChatId: options.dm ? replyChatId : '' });
+    }
     const key = this.challengeKey(chatId, message.from.id);
     const shouldRemindInGroup = !options.dm && !challenge.groupReminderSent;
     if (!options.dm) {
@@ -5707,7 +6000,9 @@ export class TelegramShieldBot {
         challenge.groupReminderSent = true;
         const username = await this.botUsername().catch(() => 'tracethembot');
         const dmLink = `https://t.me/${username}?start=${verifyStartPayload(chatId, message.from.id)}`;
-        await this.sendEphemeral(replyChatId, `${userMention(message.from)}, verification only works in DM. Use your verification link: ${dmLink}`, { reply_to_message_id: challenge.messageId || message.message_id, parse_mode: 'HTML', disable_web_page_preview: true, autoDelete: true }, this.config.challengeMessageTtlSeconds || 120);
+        if (await this.challengeGroupSendAllowed(chatId)) {
+          await this.sendEphemeral(replyChatId, `${userMention(message.from)}, verification only works in DM. Use your verification link: ${dmLink}`, { reply_to_message_id: challenge.messageId || message.message_id, parse_mode: 'HTML', disable_web_page_preview: true, autoDelete: true }, this.config.challengeMessageTtlSeconds || 120);
+        }
       }
       return true;
     }
@@ -5736,7 +6031,7 @@ export class TelegramShieldBot {
         if (await this.maybeFailJoinChallenge(message, challenge, options)) return true;
         const invalidText = `${options.dm ? '' : `${userMention(message.from)}, `}that answer did not match this DKG challenge. Open the Knowledge Asset again and answer: ${escapeHtml(challenge.qa?.question || 'the posted question')}`;
         if (options.dm) await this.send(replyChatId, invalidText, { disable_web_page_preview: true, private: true, parse_mode: 'HTML' });
-        else if (shouldRemindInGroup) {
+        else if (shouldRemindInGroup && await this.challengeGroupSendAllowed(chatId)) {
           challenge.groupReminderSent = true;
           await this.sendEphemeral(replyChatId, invalidText, { reply_to_message_id: challenge.messageId || message.message_id, parse_mode: 'HTML', disable_web_page_preview: true, autoDelete: true }, this.config.challengeMessageTtlSeconds || 120);
         }
@@ -5760,7 +6055,7 @@ export class TelegramShieldBot {
       if (await this.maybeFailJoinChallenge(message, challenge, options)) return true;
       const reminderText = `${options.dm ? '' : `${userMention(message.from)}, `}paste a Knowledge Asset address that starts with did:dkg: to complete verification.`;
       if (options.dm) await this.send(replyChatId, reminderText, { private: true });
-      else if (shouldRemindInGroup) {
+      else if (shouldRemindInGroup && await this.challengeGroupSendAllowed(chatId)) {
         challenge.groupReminderSent = true;
         await this.sendEphemeral(replyChatId, reminderText, { reply_to_message_id: challenge.messageId || message.message_id, parse_mode: 'HTML', autoDelete: true }, this.config.challengeMessageTtlSeconds || 120);
       }
@@ -5785,7 +6080,7 @@ export class TelegramShieldBot {
       if (await this.maybeFailJoinChallenge(message, challenge, options)) return true;
       const invalidText = `${options.dm ? '' : `${userMention(message.from)}, `}I could not validate that Knowledge Asset address. Try another one from https://dkg.origintrail.io/.`;
       if (options.dm) await this.send(replyChatId, invalidText, { disable_web_page_preview: true, private: true });
-      else if (shouldRemindInGroup) {
+      else if (shouldRemindInGroup && await this.challengeGroupSendAllowed(chatId)) {
         challenge.groupReminderSent = true;
         await this.sendEphemeral(replyChatId, invalidText, { reply_to_message_id: message.message_id, parse_mode: 'HTML', disable_web_page_preview: true, autoDelete: true }, this.config.challengeMessageTtlSeconds || 120);
       }
@@ -5835,6 +6130,10 @@ export class TelegramShieldBot {
   async completeJoinChallenge(message, challenge, options = {}, result = {}) {
     const chatId = message.chat.id;
     const replyChatId = options.sourceChatId || chatId;
+    const capabilities = await this.getGroupCapabilities(chatId, { force: true }).catch(() => null);
+    if (!capabilities?.canRunJoinChallenge) {
+      return this.deactivateJoinChallenge(challenge, { dm: options.dm === true, replyChatId: options.dm ? replyChatId : '' });
+    }
     const key = this.challengeKey(chatId, message.from.id);
     this.joinChallenges.delete(key);
     this.clearJoinChallengeTimer(key);
@@ -5864,8 +6163,10 @@ export class TelegramShieldBot {
       await this.send(replyChatId, `✅ You’re in.${memoryEducation}${ualEducation}${accessText}`, { disable_web_page_preview: true });
     }
     const successText = `✅ Memory-verified: ${userMention(message.from)}\n\nYou are now protected by TRACaBot shared memory against repeat scams and impersonators.`;
-    if (options.dm) await this.sendEphemeral(chatId, successText, { parse_mode: 'HTML' }, this.config.successMessageTtlSeconds || 45);
-    else await this.sendEphemeral(chatId, successText, { reply_to_message_id: message.message_id, parse_mode: 'HTML' }, this.config.successMessageTtlSeconds || 45);
+    if (await this.challengeGroupSendAllowed(chatId)) {
+      if (options.dm) await this.sendEphemeral(chatId, successText, { parse_mode: 'HTML' }, this.config.successMessageTtlSeconds || 45);
+      else await this.sendEphemeral(chatId, successText, { reply_to_message_id: message.message_id, parse_mode: 'HTML' }, this.config.successMessageTtlSeconds || 45);
+    }
     return true;
   }
 
@@ -5902,7 +6203,7 @@ export class TelegramShieldBot {
         return true;
       }
       await this.answerCallback(query.id);
-      await this.call('deleteMessage', { chat_id: chatId, message_id: message.message_id }).catch(async () => {
+      await this.deleteMessage(chatId, message.message_id).catch(async () => {
         await this.editInteractiveMessage(chatId, message.message_id, 'Closed.', [], {});
       });
       return true;
@@ -5916,6 +6217,7 @@ export class TelegramShieldBot {
         appeal_already_resolved: 'That appeal is already resolved.',
         ban_not_found: 'The local ban record is unavailable.',
         ban_chat_unavailable: 'The affected group is unavailable.',
+        ban_superseded: 'A newer ban for this user in this group supersedes this appeal. Review the newer case instead.',
         not_chat_admin: 'Only an actual admin of the affected group can resolve this appeal.'
       };
       const text = result.ok
@@ -5993,7 +6295,9 @@ export class TelegramShieldBot {
         if (!result.ok) {
           const messageText = result.error === 'not_chat_admin'
             ? 'Only a current admin of the affected group can override this ban.'
-            : 'Automatic join ban could not be overridden.';
+            : result.error === 'ban_superseded'
+              ? 'A newer ban for this user in this group supersedes this automatic ban. Review the newer case instead.'
+              : 'Automatic join ban could not be overridden.';
           await this.answerCallback(query.id, messageText, true);
           return true;
         }
@@ -7075,11 +7379,76 @@ export class TelegramShieldBot {
     }
   }
 
+  async handleMyChatMemberUpdate(chatMemberUpdate = {}) {
+    const chat = chatMemberUpdate.chat || {};
+    const chatId = String(chat.id || '');
+    if (!chatId) return null;
+    const oldStatus = String(chatMemberUpdate.old_chat_member?.status || '');
+    const newStatus = String(chatMemberUpdate.new_chat_member?.status || '');
+    const botUser = chatMemberUpdate.new_chat_member?.user || chatMemberUpdate.old_chat_member?.user || {};
+    if (botUser.id) {
+      this.botId = botUser.id;
+      if (botUser.username) this.botUsernameCache = normalizeBotUsername(botUser.username);
+    }
+    if (!this.botProfile) {
+      await this.getBotProfile().catch(() => null);
+    }
+    const capabilities = this.setGroupCapabilitiesFromMember(chatId, chatMemberUpdate.new_chat_member, { source: 'my_chat_member' });
+    const changed = oldStatus !== newStatus
+      || Boolean(chatMemberUpdate.new_chat_member?.can_restrict_members) !== Boolean(chatMemberUpdate.old_chat_member?.can_restrict_members)
+      || Boolean(chatMemberUpdate.new_chat_member?.can_delete_messages) !== Boolean(chatMemberUpdate.old_chat_member?.can_delete_messages);
+    if (changed) {
+      await this.record('bot_group_membership_changed', {
+        chat,
+        from: botUser,
+        date: chatMemberUpdate.date,
+        message_id: chatMemberUpdate.message_id
+      }, {
+        previous_status: oldStatus || 'unknown',
+        new_status: newStatus || 'unknown',
+        effective_mode: capabilities?.mode || GROUP_MODE_OBSERVER,
+        degraded: capabilities?.degraded === true,
+        can_restrict_members: capabilities?.canRestrictMembers === true,
+        can_delete_messages: capabilities?.canDeleteMessages === true,
+        bot_removed: capabilities?.removed === true,
+        evidence: [
+          `Live my_chat_member update changed the bot membership to ${newStatus || 'unknown'}.`,
+          capabilities?.isAdmin
+            ? 'Admin protection capabilities were refreshed from Telegram.'
+            : 'Observer mode; no destructive group action is permitted.'
+        ]
+      }, {
+        writeDkg: false,
+        idempotencyKey: `bot-membership:${chatId}:${this.currentUpdateId ?? ''}:${oldStatus}:${newStatus}:${capabilities?.canRestrictMembers ? 'r' : '-'}:${capabilities?.canDeleteMessages ? 'd' : '-'}`
+      });
+    }
+    return capabilities;
+  }
+
   async handleChatMemberUpdate(chatMemberUpdate) {
     const oldStatus = chatMemberUpdate.old_chat_member?.status || '';
     const newStatus = chatMemberUpdate.new_chat_member?.status || '';
     const member = chatMemberUpdate.new_chat_member?.user;
     if (!member || member.is_bot) return;
+    const capabilities = await this.getGroupCapabilities(chatMemberUpdate.chat?.id).catch(() => null);
+    if (capabilities && !capabilities.degraded && !capabilities.canObserveChatMember) {
+      // Telegram only delivers chat_member updates to group admins. If a live
+      // lookup proves observer mode, do not create a phantom full ban feed.
+      await this.record('chat_member_observation_unavailable', {
+        chat: chatMemberUpdate.chat,
+        from: chatMemberUpdate.from || member,
+        date: chatMemberUpdate.date
+      }, {
+        target: member,
+        effective_mode: GROUP_MODE_OBSERVER,
+        reason: 'bot_not_admin',
+        evidence: ['Observer mode cannot receive or guarantee chat_member ban/join history; service messages remain partial.']
+      }, {
+        writeDkg: false,
+        idempotencyKey: `chat-member-unavailable:${chatMemberUpdate.chat?.id || ''}:${this.currentUpdateId ?? ''}:${member.id}:${oldStatus}:${newStatus}`
+      });
+      return;
+    }
     const key = this.challengeKey(chatMemberUpdate.chat?.id, member.id);
     if (newStatus === 'kicked' && oldStatus !== 'kicked') {
       await this.handleNativeAdminBan(chatMemberUpdate, member, oldStatus, newStatus);
@@ -7163,6 +7532,7 @@ export class TelegramShieldBot {
   async handleNativeAdminBan(chatMemberUpdate, member, oldStatus, newStatus) {
     const actor = await this.nativeAdminActor(chatMemberUpdate);
     if (!actor) return null;
+    const capabilities = await this.getGroupCapabilities(chatMemberUpdate.chat?.id).catch(() => null);
     const flag = Number(chatMemberUpdate.date || 0);
     const actionAtMs = flag > 0 ? flag * 1000 : Date.now();
     const occurredAt = new Date(actionAtMs).toISOString();
@@ -7200,6 +7570,9 @@ export class TelegramShieldBot {
       new_status: newStatus,
       occurred_at: occurredAt,
       telegram_update_id: this.currentUpdateId,
+      bot_mode: capabilities?.mode || GROUP_MODE_OBSERVER,
+      bot_capabilities_degraded: capabilities?.degraded === true,
+      ban_capture_coverage: capabilities?.coverage?.banCapture || 'unknown',
       campaign_root_eligible: false,
       patterns: [],
       domains: [],
@@ -7208,11 +7581,14 @@ export class TelegramShieldBot {
         'Telegram chat_member update observed a live ban transition by a community administrator',
         'Reason not provided through the Telegram Bot API',
         'Live membership update only; Telegram Recent Actions and pre-install history are not available to bots',
+        capabilities?.canObserveBanEvents
+          ? 'Bot is a live group administrator; this ban record comes from the permitted chat_member feed.'
+          : 'Bot capability lookup was unavailable or degraded; ban logging coverage is not guaranteed.',
         contextLine
       ]
     }, {
       writeDkg: false,
-      idempotencyKey: `native-admin-ban:${chatMemberUpdate.chat?.id || ''}:${member.id}:${flag || this.currentUpdateId || ''}`
+      idempotencyKey: `native-admin-ban:${chatMemberUpdate.chat?.id || ''}:${member.id}:${flag || ''}:${this.currentUpdateId ?? ''}:${oldStatus}:${newStatus}:${actor.id || actor.username || ''}`
     });
     this.scheduleEvidencePromotion();
     return event;
@@ -7229,6 +7605,7 @@ export class TelegramShieldBot {
       && sameActorTarget(event.user || event.payload?.target || {}, target));
     if (!ban) return null;
     if (history.some((event) => event.event_type === 'review_overturned' && event.payload?.target_event_id === ban.id)) return null;
+    const sourceDenied = sharingDenied(ban.payload || {});
     const flag = Number(chatMemberUpdate.date || 0);
     const occurredAt = flag > 0 ? new Date(flag * 1000).toISOString() : new Date().toISOString();
     const event = await this.record('review_overturned', {
@@ -7248,7 +7625,9 @@ export class TelegramShieldBot {
       retracted: true,
       reviewed_target: member,
       reviewed_target_key: targetKey(member),
-      consent_to_share: this.config.autoPromoteEvidence !== false && this.config.dkgWrites !== false,
+      ...(sourceDenied
+        ? { consent_to_share: false, privacy_opt_out: true }
+        : { consent_to_share: this.config.autoPromoteEvidence !== false && this.config.dkgWrites !== false }),
       performed_by: { id: actor.id, username: actor.username || '', is_bot: actor.is_bot === true },
       performed_by_key: actorKey(actor),
       occurred_at: occurredAt,
@@ -7258,7 +7637,7 @@ export class TelegramShieldBot {
         'The original enforcement record is retained; the shared claim is marked retracted'
       ]
     }, {
-      writeDkg: this.config.autoPromoteEvidence !== false && this.config.dkgWrites !== false,
+      writeDkg: !sourceDenied && this.config.autoPromoteEvidence !== false && this.config.dkgWrites !== false,
       idempotencyKey: `native-admin-unban:${chatMemberUpdate.chat?.id || ''}:${member.id}:${ban.id}`
     });
     this.closeMembershipEpisode(chatMemberUpdate.chat?.id, member.id, { eventDate: chatMemberUpdate.date, updateId: this.currentUpdateId });
@@ -7275,7 +7654,7 @@ export class TelegramShieldBot {
       const message = { chat: challenge.chat, from: challenge.user, text: 'join challenge expired' };
       if (await this.hasRestrictRights(challenge.chat.id)) {
         if (this.config.joinChallengeAction === 'ban') await this.ban(challenge.chat.id, challenge.user.id).catch(() => null);
-        else if (this.config.joinChallengeAction === 'kick') await this.ban(challenge.chat.id, challenge.user.id).then(() => this.call('unbanChatMember', { chat_id: challenge.chat.id, user_id: challenge.user.id, only_if_banned: true })).catch(() => null);
+        else if (this.config.joinChallengeAction === 'kick') await this.ban(challenge.chat.id, challenge.user.id).then(() => this.unbanMember(challenge.chat.id, challenge.user.id, { onlyIfBanned: true })).catch(() => null);
       }
       const event = await this.record('join_challenge_expired', message, {
         target: challenge.user,
@@ -7287,7 +7666,9 @@ export class TelegramShieldBot {
       }, { writeDkg: false });
       await this.maybeRecordJoinChallengeRepeatFailure(message, event);
       await this.deleteJoinChallengePrompt(challenge);
-      await this.sendEphemeral(challenge.chat.id, `${userMention(challenge.user)} did not complete DKG verification in time.`, { parse_mode: 'HTML', autoDelete: true }, this.config.successMessageTtlSeconds || 45).catch(() => null);
+      if (await this.challengeGroupSendAllowed(challenge.chat.id)) {
+        await this.sendEphemeral(challenge.chat.id, `${userMention(challenge.user)} did not complete DKG verification in time.`, { parse_mode: 'HTML', autoDelete: true }, this.config.successMessageTtlSeconds || 45).catch(() => null);
+      }
     }
   }
 
@@ -7375,6 +7756,7 @@ export class TelegramShieldBot {
         if (update.callback_query) await this.handleCallbackQuery(update.callback_query);
         else if (update.message) await this.handleMessage(update.message);
         else if (update.chat_member) await this.handleChatMemberUpdate(update.chat_member);
+        else if (update.my_chat_member) await this.handleMyChatMemberUpdate(update.my_chat_member);
         const nextOffset = update.update_id + 1;
         this.store.completeUpdate?.(this.botKey, update.update_id, nextOffset);
         this.offset = nextOffset;
@@ -7432,6 +7814,8 @@ export class TelegramShieldBot {
       if (Date.now() - last < interval) continue;
       const chatId = Number(chatIdStr);
       if (!this.chatConversationalEnabled(chatId)) continue;
+      const capabilities = await this.automaticNotificationCapabilities(chatId);
+      if (this.isObserverMode(capabilities)) continue;
 
       this.sendTyping(chatId).catch(() => {});
 
@@ -7495,7 +7879,7 @@ export class TelegramShieldBot {
   async run({ signal } = {}) {
     if (!this.config.telegramToken) throw new Error('TELEGRAM_BOT_TOKEN is required');
     if (signal?.aborted) return;
-    await this.botUsername().catch(() => '');
+    await this.getBotProfile().catch(() => null);
     if (signal?.aborted) return;
     try {
       await this.dkg.ensureContextGraph();

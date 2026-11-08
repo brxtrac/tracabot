@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createPublicKey } from 'node:crypto';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
+import { validateServiceUrl } from './secure-transport.js';
 
 const CONTEXT_GRAPH_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}(?:\/[a-zA-Z0-9][a-zA-Z0-9_-]{0,63})?$/;
 const ON_CHAIN_CONTEXT_GRAPH_ID_RE = /^\d+$/;
@@ -62,13 +63,13 @@ function parseChallengeBank(value = '') {
   }
 }
 
-function parseChatIdList(value = '') {
+function parseChatIdList(value = '', label = 'TRACABOT_JOIN_AUTO_REMOVE_CHATS') {
   const items = String(value || '')
     .split(/[\s,]+/)
     .map((item) => item.trim())
     .filter(Boolean);
   const invalid = items.filter((item) => !/^-?\d{4,24}$/.test(item));
-  if (invalid.length) throw new Error(`TRACABOT_JOIN_AUTO_REMOVE_CHATS must contain numeric Telegram chat IDs; got ${invalid.join(', ')}`);
+  if (invalid.length) throw new Error(`${label} must contain numeric Telegram chat IDs; got ${invalid.join(', ')}`);
   return [...new Set(items)];
 }
 
@@ -184,6 +185,7 @@ export function loadConfig(env = process.env) {
   const channelMemoryMaxTextChars = Number(env.TRACABOT_CHANNEL_MEMORY_MAX_TEXT_CHARS || 1000);
   const wmArtifactMinConfidence = Number(env.TRACABOT_WM_ARTIFACT_MIN_CONFIDENCE || 40);
   const wmArtifactMaxTextChars = Number(env.TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS || 700);
+  const artifactOptOutChats = parseChatIdList(env.TRACABOT_ARTIFACT_OPT_OUT_CHATS || '', 'TRACABOT_ARTIFACT_OPT_OUT_CHATS');
   const banContextMaxMessages = Number(env.TRACABOT_BAN_CONTEXT_MAX_MESSAGES || 8);
   const banContextMaxAgeMinutes = Number(env.TRACABOT_BAN_CONTEXT_MAX_AGE_MINUTES || 60);
   const banContextMaxTextChars = Number(env.TRACABOT_BAN_CONTEXT_MAX_TEXT_CHARS || 1000);
@@ -205,12 +207,9 @@ export function loadConfig(env = process.env) {
   const joinTrustedLayers = parseTrustedLayers(env.TRACABOT_JOIN_TRUSTED_LAYERS || '');
   const joinTrustedSources = parseTrustedSources(env.TRACABOT_JOIN_TRUSTED_SOURCES || '');
   const submitSharedEvidence = parseBoolean(env.TRACABOT_SUBMIT_SHARED_EVIDENCE, false);
+  const observerAdvisories = parseBoolean(env.TRACABOT_OBSERVER_ADVISORIES, false);
   const creatorSubmitUrl = String(env.TRACABOT_CREATOR_SUBMIT_URL || '').trim();
-  if (creatorSubmitUrl) {
-    let parsed;
-    try { parsed = new URL(creatorSubmitUrl); } catch { throw new Error('TRACABOT_CREATOR_SUBMIT_URL must be a valid http(s) URL'); }
-    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('TRACABOT_CREATOR_SUBMIT_URL must use http or https');
-  }
+  if (creatorSubmitUrl) validateServiceUrl(creatorSubmitUrl, 'TRACABOT_CREATOR_SUBMIT_URL');
   const creatorSubmitToken = String(env.TRACABOT_CREATOR_SUBMIT_TOKEN || '').trim();
   if (creatorSubmitToken && creatorSubmitToken.length < 16) {
     throw new Error('TRACABOT_CREATOR_SUBMIT_TOKEN must be at least 16 characters when configured');
@@ -219,11 +218,7 @@ export function loadConfig(env = process.env) {
     throw new Error('TRACABOT_SUBMIT_SHARED_EVIDENCE=true requires TRACABOT_CREATOR_SUBMIT_URL and TRACABOT_CREATOR_SUBMIT_TOKEN');
   }
   const creatorCuratorUrl = String(env.TRACABOT_CREATOR_CURATOR_URL || '').trim().replace(/\/+$/, '');
-  if (creatorCuratorUrl) {
-    let parsed;
-    try { parsed = new URL(creatorCuratorUrl); } catch { throw new Error('TRACABOT_CREATOR_CURATOR_URL must be a valid http(s) URL'); }
-    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('TRACABOT_CREATOR_CURATOR_URL must use http or https');
-  }
+  if (creatorCuratorUrl) validateServiceUrl(creatorCuratorUrl, 'TRACABOT_CREATOR_CURATOR_URL');
   const creatorCuratorPublicKey = String(env.TRACABOT_CREATOR_CURATOR_PUBLIC_KEY || '').trim()
     || readOptionalFile(env.TRACABOT_CREATOR_CURATOR_PUBLIC_KEY_PATH);
   if (creatorCuratorUrl && !creatorCuratorPublicKey) {
@@ -419,6 +414,8 @@ export function loadConfig(env = process.env) {
     autoRestrict: parseBoolean(env.TRACABOT_AUTO_RESTRICT, false),
     autoBan: parseBoolean(env.TRACABOT_AUTO_BAN, false),
     knownCampaignAutoBan,
+    // Deprecated compatibility flag. The legacy model-approved ban worker is
+    // retired and never performs a sanction.
     highConfidenceAutoBan: parseBoolean(env.TRACABOT_HIGH_CONFIDENCE_AUTO_BAN, false),
     knownCampaignMinBanRoots,
     knownCampaignPatterns,
@@ -482,6 +479,7 @@ export function loadConfig(env = process.env) {
     joinTrustedLayers,
     joinTrustedSources,
     submitSharedEvidence,
+    observerAdvisories,
     creatorSubmitUrl,
     creatorSubmitToken,
     creatorCuratorUrl,
@@ -516,6 +514,7 @@ export function loadConfig(env = process.env) {
     wmArtifactRedact: parseBoolean(env.TRACABOT_WM_ARTIFACT_REDACT, true),
     wmArtifactMinConfidence,
     wmArtifactMaxTextChars,
+    artifactOptOutChats,
     pendingReviewNotifications: parseBoolean(env.TRACABOT_PENDING_REVIEW_NOTIFICATIONS, true),
     pendingReviewNotificationIntervalHours,
     dailySafeTipIntervalHours: Number(env.TRACABOT_DAILY_SAFE_TIP_INTERVAL_HOURS ?? 0),

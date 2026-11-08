@@ -62,7 +62,7 @@ test('skill service watchlist and digest stay local', () => {
   assert.equal(digest.totalEvents, 1);
 });
 
-test('skill service appeal and review write DKG evidence', async () => {
+test('skill service keeps appeals local and writes review decisions to DKG', async () => {
   const { service, dkgWrites } = makeService();
   service.store.append({
     id: 'evt-1',
@@ -78,12 +78,111 @@ test('skill service appeal and review write DKG evidence', async () => {
   const review = await service.reviewEvent({ eventId: 'evt-1', decision: 'overturn', reason: 'appeal accepted', actorUsername: 'admin', writeToken: 'test-write-token' });
   assert.equal(appeal.tool, 'submit_appeal');
   assert.match(appeal.receiptId, /^appeal-/);
+  assert.equal(appeal.writesDkg, false);
   assert.equal(review.decision, 'overturned');
-  assert.ok(dkgWrites.some((event) => event.event_type === 'appeal_submitted'));
-  assert.match(dkgWrites.find((event) => event.event_type === 'appeal_submitted').payload.appeal_receipt_id, /^appeal-/);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'appeal_submitted'), false);
+  const storedAppeal = service.store.all().find((event) => event.id === appeal.eventId);
+  assert.equal(storedAppeal.local_only, true);
+  assert.equal(storedAppeal.payload.consent_to_share, false);
   assert.ok(dkgWrites.some((event) => event.event_type === 'review_overturned'));
   assert.equal(dkgWrites.find((event) => event.event_type === 'review_overturned').payload.admin_verified, true);
   assert.equal(dkgWrites.find((event) => event.event_type === 'review_overturned').payload.reviewed_target.id, '4242');
+});
+
+test('skill review cannot launder an explicit privacy denial from its source finding', async () => {
+  const { service, dkgWrites } = makeService();
+  service.store.append({
+    id: 'private-source-finding',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat: { id: -100, title: 'demo', type: 'supergroup' },
+    user: { id: '4242' },
+    payload: {
+      target: { id: '4242' },
+      target_key: 'id:4242',
+      target_chat_id: '-100',
+      confidence: 90,
+      consent_to_share: false,
+      evidence: ['private source evidence']
+    }
+  });
+  const review = await service.reviewEvent({
+    eventId: 'private-source-finding',
+    decision: 'overturn',
+    reason: 'private correction',
+    actorId: '1',
+    chatId: '-100',
+    writeToken: 'test-write-token'
+  });
+  assert.equal(review.writesDkg, false);
+  assert.equal(review.dkg, null);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'review_overturned'), false);
+  const stored = service.store.all().find((event) => event.id === review.eventId);
+  assert.equal(stored.local_only, true);
+  assert.equal(stored.payload.consent_to_share, false);
+  assert.equal(stored.payload.privacy_opt_out, true);
+});
+
+test('skill review inherits denial from an intermediate wrapper or root across the resolved lineage', async () => {
+  const { service, dkgWrites } = makeService();
+  const finding = (id, consent) => ({
+    id,
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat: { id: -100, title: 'demo', type: 'supergroup' },
+    user: { id: '4242' },
+    payload: {
+      target: { id: '4242' },
+      target_key: 'id:4242',
+      target_chat_id: '-100',
+      confidence: 90,
+      consent_to_share: consent,
+      evidence: ['lineage evidence']
+    }
+  });
+  const wrapper = (id, targetId) => ({
+    id,
+    event_type: 'review_upheld',
+    timestamp: new Date().toISOString(),
+    chat: { id: -100, title: 'demo', type: 'supergroup' },
+    user: { id: '1', username: 'moderator' },
+    payload: {
+      target_event_id: targetId,
+      reviewed_target: { id: '4242' },
+      reviewed_target_key: 'id:4242',
+      target_chat_id: '-100',
+      review_decision: 'upheld',
+      admin_verified: true,
+      evidence: ['lineage wrapper']
+    }
+  });
+  service.store.append(finding('lineage-root-denied', false));
+  service.store.append(wrapper('lineage-wrapper-denied', 'lineage-root-denied'));
+
+  const viaWrapper = await service.reviewEvent({
+    eventId: 'lineage-wrapper-denied', decision: 'upheld', actorId: '1', chatId: '-100', writeToken: 'test-write-token'
+  });
+  const viaRoot = await service.reviewEvent({
+    eventId: 'lineage-root-denied', decision: 'upheld', actorId: '1', chatId: '-100', writeToken: 'test-write-token'
+  });
+  assert.equal(viaWrapper.writesDkg, false);
+  assert.equal(viaRoot.writesDkg, false);
+  assert.equal(dkgWrites.length, 0);
+  for (const review of [viaWrapper, viaRoot]) {
+    const stored = service.store.all().find((event) => event.id === review.eventId);
+    assert.equal(stored.local_only, true);
+    assert.equal(stored.payload.consent_to_share, false);
+    assert.equal(stored.payload.privacy_opt_out, true);
+  }
+
+  service.store.append(finding('lineage-root-open', true));
+  service.store.append(wrapper('lineage-wrapper-open', 'lineage-root-open'));
+  const allowed = await service.reviewEvent({
+    eventId: 'lineage-wrapper-open', decision: 'upheld', actorId: '1', chatId: '-100', writeToken: 'test-write-token'
+  });
+  assert.equal(allowed.writesDkg, true);
+  assert.equal(dkgWrites.length, 1);
+  assert.equal(dkgWrites[0].event_type, 'review_upheld');
 });
 
 test('skill review resolves the referenced subject and cannot approve an unrelated or missing finding', async () => {

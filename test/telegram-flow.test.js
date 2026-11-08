@@ -963,6 +963,7 @@ test('native admin unban records a correction and retracts the shared claim', as
   assert.equal(evaluation.claimLevel, 'retracted');
   assert.equal(evaluation.retracted, true);
 
+  bot.currentUpdateId = 779;
   await bot.handleChatMemberUpdate({
     chat,
     from: { id: 1, username: 'admin' },
@@ -1543,6 +1544,8 @@ test('record awaits pending-review notification and reuses stable effect on repl
   let release;
   bot.call = async (method, payload) => {
     calls.push({ method, payload });
+    if (method === 'getMe') return { id: 999, username: 'tracethembot' };
+    if (method === 'getChatMember') return { status: 'administrator', can_restrict_members: true, can_delete_messages: true };
     if (method === 'sendMessage') await new Promise((resolve) => { release = resolve; });
     return { message_id: 101, ...payload };
   };
@@ -1593,6 +1596,93 @@ test('explicit writeDkg cannot bypass consent or privacy denial', async () => {
   assert.equal(dkgWrites[0].payload.consent_to_share, true);
 });
 
+test('review of a private source finding stays local and cannot be shared', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: true });
+  const chat = { id: -100, type: 'supergroup', title: 'demo' };
+  const finding = {
+    id: 'private-review-source',
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 4242, username: 'accused' },
+    payload: {
+      target: { id: 4242, username: 'accused' },
+      target_key: 'id:4242',
+      target_chat_id: chat.id,
+      confidence: 90,
+      recommended_action: 'admin_review',
+      consent_to_share: false,
+      evidence: ['private source evidence']
+    }
+  };
+  bot.store.append(finding);
+  await bot.recordReviewDecisionForEvents(
+    { chat, from: { id: 1, username: 'admin' }, message_id: 93 },
+    [finding],
+    'confirm',
+    'admin confirmed private source',
+    { target: finding.payload.target, reviewChatId: chat.id }
+  );
+  const review = bot.store.all().find((event) => event.event_type === 'review_upheld' && event.payload?.target_event_id === finding.id);
+  assert.ok(review);
+  assert.equal(review.local_only, true);
+  assert.equal(review.payload.consent_to_share, false);
+  assert.equal(review.payload.privacy_opt_out, true);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'review_upheld'), false);
+});
+
+
+test('review lineage inherits denial from an intermediate wrapper or root and controls still share', async () => {
+  const { bot, dkgWrites } = makeBot({ canBan: true });
+  const chat = { id: -100, type: 'supergroup', title: 'demo' };
+  const root = (id, consent) => ({
+    id,
+    event_type: 'fraud_finding',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 4242, username: 'accused' },
+    payload: { target: { id: 4242 }, target_key: 'id:4242', target_chat_id: chat.id, confidence: 90, consent_to_share: consent, evidence: ['root evidence'] }
+  });
+  const wrapper = (id, targetId) => ({
+    id,
+    event_type: 'review_upheld',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 1, username: 'admin' },
+    payload: { target_event_id: targetId, reviewed_target: { id: 4242 }, reviewed_target_key: 'id:4242', target_chat_id: chat.id, review_decision: 'upheld', admin_verified: true, evidence: ['wrapper evidence'] }
+  });
+  const pending = (id, rootIds) => ({
+    id,
+    event_type: 'risk_review_needed',
+    timestamp: new Date().toISOString(),
+    chat,
+    user: { id: 4242, username: 'accused' },
+    payload: { target: { id: 4242 }, target_key: 'id:4242', target_chat_id: chat.id, confidence: 90, evidence_root_ids: rootIds, evidence: ['pending evidence'] }
+  });
+  const message = { chat, from: { id: 1, username: 'admin' }, message_id: 94 };
+
+  bot.store.append(root('lineage-root-denied', false));
+  bot.store.append(wrapper('lineage-wrapper-denied', 'lineage-root-denied'));
+  const denied = pending('lineage-pending-denied', ['lineage-wrapper-denied']);
+  bot.store.append(denied);
+  await bot.recordReviewDecisionForEvents(message, [denied], 'confirm', 'denied lineage', { target: denied.payload.target, reviewChatId: chat.id });
+  const deniedReview = bot.store.all().find((event) => event.event_type === 'review_upheld' && event.payload?.target_event_id === denied.id);
+  assert.ok(deniedReview);
+  assert.equal(deniedReview.local_only, true);
+  assert.equal(deniedReview.payload.consent_to_share, false);
+  assert.equal(deniedReview.payload.privacy_opt_out, true);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'review_upheld'), false);
+
+  bot.store.append(root('lineage-root-open', true));
+  bot.store.append(wrapper('lineage-wrapper-open', 'lineage-root-open'));
+  const allowed = pending('lineage-pending-open', ['lineage-wrapper-open']);
+  bot.store.append(allowed);
+  await bot.recordReviewDecisionForEvents(message, [allowed], 'confirm', 'open lineage', { target: allowed.payload.target, reviewChatId: chat.id });
+  const allowedReview = bot.store.all().find((event) => event.event_type === 'review_upheld' && event.payload?.target_event_id === allowed.id);
+  assert.ok(allowedReview);
+  assert.equal(allowedReview.local_only, undefined);
+  assert.equal(dkgWrites.filter((event) => event.event_type === 'review_upheld').length, 1);
+});
 
 test('failed pending-review notification does not consume its cooldown', async () => {
   const { bot } = makeBot({ canBan: true });
@@ -1606,8 +1696,12 @@ test('failed pending-review notification does not consume its cooldown', async (
   };
   let attempts = 0;
   bot.call = async (method, payload) => {
-    attempts += 1;
-    if (attempts === 1) throw new Error('temporary Telegram failure');
+    if (method === 'getMe') return { id: 999, username: 'tracethembot' };
+    if (method === 'getChatMember') return { status: 'administrator', can_restrict_members: true, can_delete_messages: true };
+    if (method === 'sendMessage') {
+      attempts += 1;
+      if (attempts === 1) throw new Error('temporary Telegram failure');
+    }
     return { message_id: 10, ...payload };
   };
 
@@ -2692,7 +2786,8 @@ test('telegram command descriptions match the public bot command list', () => {
     { command: 'mute', description: 'Admin: mute a replied or mentioned user for a duration' },
     { command: 'appeal', description: 'Private: appeal your own ban and review your local cases' },
     { command: 'appeals', description: 'Admin: review pending ban appeals for chats you moderate' },
-    { command: 'controls', description: 'Private: current-admin protection controls and auto-ban overrides' }
+    { command: 'controls', description: 'Private: current-admin protection controls and auto-ban overrides' },
+    { command: 'status', description: 'Private: capability, coverage, and mode summary for groups you administer' }
   ]);
 });
 
@@ -4943,12 +5038,14 @@ test('non-admin review correction is logged as appeal', async () => {
 
   await bot.executeAgentAction('appeal', { event_id: 'evt-rage-review', reason: '@r4ge13 is not a scammer' }, { chat, from: { id: 2, username: 'member' }, message_id: 31, text: '@tracethembot @r4ge13 is not a scammer' }, false);
 
-  const appeal = dkgWrites.find((event) => event.event_type === 'appeal_submitted');
+  const appeal = bot.store.all().find((event) => event.event_type === 'appeal_submitted');
   assert.equal(appeal.payload.target_event_id, 'evt-rage-review');
   assert.equal(appeal.payload.detection_method, 'llm_context_reply_to_flag');
   assert.match(appeal.payload.appeal_receipt_id, /^appeal-/);
   assert.equal(appeal.payload.source_message_id, 31);
   assert.equal(appeal.payload.provenance, 'telegram_appeal');
+  assert.equal(appeal.local_only, true);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'appeal_submitted'), false);
   assert.ok(calls.some((call) => String(call.payload.text || '').includes('Appeal recorded')));
 });
 
@@ -5049,9 +5146,11 @@ test('LLM classifies non-admin alert reply dispute as appeal', async () => {
 
   await bot.handleMessage({ chat, from: { id: 2, username: 'member' }, message_id: 907, text: 'This is not a scam', reply_to_message: { chat, message_id: 906, from: { id: 999, username: 'tracethembot', is_bot: true }, text: 'TRACaBot flagged @coineazy for admin review.' } });
 
-  const appeal = dkgWrites.find((event) => event.event_type === 'appeal_submitted');
+  const appeal = bot.store.all().find((event) => event.event_type === 'appeal_submitted');
   assert.equal(appeal.payload.target_event_id, 'evt-appeal-llm');
   assert.equal(appeal.payload.detection_method, 'llm_alert_reply_classifier');
+  assert.equal(appeal.local_only, true);
+  assert.equal(dkgWrites.some((event) => event.event_type === 'appeal_submitted'), false);
   assert.ok(calls.some((call) => String(call.payload.text || '').includes('Appeal logged')));
 });
 

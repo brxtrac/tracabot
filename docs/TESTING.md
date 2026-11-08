@@ -21,7 +21,7 @@ npm pack --dry-run
 
 Expected result:
 
-- All tests pass, including join-protection decisions (allow/flag/remove, graph outage, stale/retracted, admin/bot protection, missing rights, duplicate replay), optional LLM-free operation, creator submission opt-in/retry/dedupe, public API privacy, and exact-identity DKG lookup.
+- All tests pass, including join-protection decisions (allow/flag/remove, graph outage, stale/retracted, admin/bot protection, missing rights, duplicate replay), per-group admin/observer mode isolation and refresh, observer quiet/advisory behavior, optional LLM-free operation, creator submission opt-in/retry/dedupe, public API privacy, and exact-identity DKG lookup.
 - Production audit reports `0` vulnerabilities.
 - Package preview includes `bin`, `src`, `skills`, `docs`, `README.md`, `SECURITY.md`, and `LICENSE`.
 - No live public graph write, deployment, or real user removal is performed by the suite.
@@ -66,7 +66,7 @@ Expected behavior:
 - `scan_target` returns risk without Telegram enforcement.
 - `monitor_chat_event` can write evidence-backed Shared Memory events when configured with DKG access.
 - `get_digest`, `get_watchlist`, and `query_campaigns` read local operational memory.
-- `submit_appeal` and `review_event` write correction/review artifacts when DKG is configured.
+- `submit_appeal` records a local-only private appeal/correction; `review_event` writes correction/review artifacts when DKG is configured.
 
 ## OpenClaw Learning Loop
 
@@ -197,7 +197,7 @@ Native admin logging requires the bot to be a group administrator and the only p
 Run the isolated tests before the full suite:
 
 ```bash
-node --test test/creator-curator.test.js test/appeals.test.js test/join-protection.test.js
+node --test test/creator-curator.test.js test/appeals.test.js test/join-protection.test.js test/group-capabilities.test.js
 npm test
 npm run test:commands
 git diff --check

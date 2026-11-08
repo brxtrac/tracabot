@@ -69,11 +69,13 @@ TRACABOT_CREATOR_CURATOR_WRITE_RATE_LIMIT_PER_HOUR=30
 
 The consumer verifies the key ID, signature, issuer, exact Telegram platform/user ID, fraud/scam classification, `confirmed_scam` claim level, confidence threshold, independent roots, issue/expiry, and current active status. Creator API read and write limits are independent per source address; auth is checked before rate limiting, signing, or store reads, and a read token never grants write access. A revoked, expired, unsigned, stale, or unreachable status fails closed. A local group-admin overturn never rewrites the creator record; it records a local correction and queues a curator reconsideration request.
 
+Creator status and federation submission URLs must use HTTPS outside exact loopback HTTP (`localhost`, `127.0.0.1`, or `::1`). URL userinfo is rejected, and bearer-authenticated requests reject redirects rather than forwarding the Authorization header to another origin.
+
 ## Ban Appeals
 
 A banned user can start a private chat with the bot and send `/appeal`. The bot looks up only that account’s own locally stored ban cases, so a user can appeal even if the bot could not DM them at ban time. Telegram does not allow a bot to initiate the first private message; the user must start the chat. Community guidance is available in `/start` and `/appeal`; groups never receive the private appeal text.
 
-Submissions are bounded, deduplicated per case, rate limited per user, and stored local-only. Only an actual admin of the affected group can resolve an appeal from private chat or the group; configured bot owners do not inherit group jurisdiction. Uphold keeps the local ban and closes the case; a second appeal of a finally upheld case is rejected rather than left pending. Overturn or a native admin unban records a group-scoped local override and, for appeals, queues a creator-curator reconsideration request. A later same-lineage wrapper cannot restore removal; only an active, fresh, unretracted, independent authenticated approval clears the override. Overturn performs an idempotent `unbanChatMember` with retries and visible failures. Retries reconcile the current member state or use new attempt keys after a timeout/5xx, so an uncertain call is not permanently stuck. Unban only permits return; it cannot add a user. See `docs/PUBLIC_GRAPH.md` and `docs/TESTING.md`.
+Submissions are bounded, deduplicated per case, rate limited per user, and stored local-only. Implicit appeals inferred from group replies use the same local-only path and are never queued for DKG sharing. Only an actual admin of the affected group can resolve an appeal from private chat or the group; configured bot owners do not inherit group jurisdiction. Uphold keeps the local ban and closes the case; a second appeal of a finally upheld case is rejected rather than left pending. Overturn or a native admin unban records a group-scoped local override and, for appeals, queues a creator-curator reconsideration request. A later same-lineage wrapper cannot restore removal; only an active, fresh, unretracted, independent authenticated approval clears the override. Overturn performs an idempotent `unbanChatMember` with retries and visible failures. An old appeal or old auto-ban override cannot lift a newer independent ban in the same group. Retries reconcile the current member state or use new attempt keys after a timeout/5xx, so an uncertain call is not permanently stuck. Unban only permits return; it cannot add a user. See `docs/PUBLIC_GRAPH.md` and `docs/TESTING.md`.
 
 ## Creator-Hosted Graph And Opt-In Federation
 
@@ -85,7 +87,7 @@ Instance scoping uses the actual DKG context graph plus `communityId`, `communit
 
 ## Supported Platforms
 
-- **Telegram:** fully operational, including live `chat_member` joins, native admin bans, joins, and optional join challenges.
+- **Telegram:** fully operational, including live `chat_member` joins and native admin bans when the bot is an admin; otherwise a quieter observer mode with explicit partial-coverage limits. Optional join challenges require admin restrict rights.
 - **Discord and other platforms:** not implemented in this repository. No adapter, token flow, event permission model, or enforcement path is claimed.
 
 Platform-neutral evidence types are deliberately small and only exist where the Telegram adapter uses them. A new platform adapter must supply its own stable platform-scoped identity, event visibility, admin-rights checks, and enforcement implementation.
@@ -125,6 +127,7 @@ Telegram is one of the most active social surfaces for many Web3 and AI communit
 - `/appeal` is private-chat only. It lists the caller’s own locally stored ban cases and accepts `/appeal <case code> <reason>`. The bot cannot send the first DM.
 - `/appeals` works in private chat for admins of affected groups. Group use only returns private-chat guidance because appeal details are not posted to the group. The `/start` Appeals button opens the same live admin-scoped view.
 - `/controls` is the private admin keyboard for groups where you are a current Telegram admin. It pauses/resumes future automatic join removals, shows recent automatic join bans, and supports selection → confirmation → **Override / allow return**. A failed unban exposes **Retry unban**. Pausing future removals is separate from reversing a specific ban; resume cannot enable a policy configured off or bypass missing bot rights or trusted-layer bounds. Only current group admins see a group's controls, bans, or appeals; configured bot owners do not bypass group administration.
+- `/status` is private-chat only. For groups where the caller is a current Telegram admin, it reports the live effective mode, exact restrict/delete rights, ordinary-message visibility, and explicit coverage limits (including observer partial coverage and degraded lookup). It never exposes another group's admin scope to a non-admin or owner.
 
 Compatibility commands remain available but are not the primary protection path: `/report` queues legacy manual review evidence, `/ban` optionally performs an admin ban with a supplied reason, and `/mute` temporarily restricts a replied or mentioned user. Automatic exact-identity join protection and native Telegram admin-ban logging do not require these commands.
 
@@ -144,7 +147,8 @@ Community members can use TRACaBot without needing admin permissions:
 
 Admins keep enforcement guarded and auditable:
 
-- Add TRACaBot to the group as an admin and keep one bot process running. Bans performed by any admin through normal Telegram controls are logged automatically from live `chat_member` updates. No per-ban command is required.
+- Add TRACaBot to the group as an admin and keep one bot process running. Bans performed by any admin through normal Telegram controls are logged automatically from live `chat_member` updates. No per-ban command is required. If the bot is only a member, it runs in observer mode: evidence checks and local logs continue, but ban logging and enforcement coverage are partial and not guaranteed.
+- Use `/status` in private chat, or the **Status** button, for a live capability summary. It shows the effective mode, exact restrict/delete rights, privacy-limited versus all-message visibility, and explicit coverage gaps for groups where you are a current Telegram admin.
 - Use `/ban` only when you want the bot to perform the ban or attach an explicit reason. It is optional and still requires bot ban rights.
 - Resolve private appeals from `/appeals` in the bot’s private chat. Only actual admins of the affected group can uphold or overturn. Overturn records a local correction and retries unban; it does not change the creator-curator global record.
 - Use `/controls` in the bot’s private chat, or the **Protection controls**, **Status**, and **Recent automatic bans** buttons in private `/start`, for groups where you are a current Telegram admin. The keyboard pauses/resumes future automatic join removals and lists recent automatic join bans; select one, confirm **Override / allow return** to record a local correction and request safe unban without requiring the member to appeal. Failed unbans expose **Retry unban**. Pause state applies only to future removals and is separate from reversing an existing ban. Bot owners and non-admins cannot use these controls for a group.
@@ -152,6 +156,23 @@ Admins keep enforcement guarded and auditable:
 - Reply naturally to review alerts with an explicit verdict to resolve appeals or false positives. Review decisions are written to DKG Shared Memory.
 - Open `/start` and use Stats/Campaigns to understand recent detections, repeated scam waves, and recommended follow-up.
 - Open `/start` and use Settings/Status to verify bot permissions, DKG/OpenClaw adapter versions and memory capabilities, thresholds, learning policy, and conversational mode without exposing secrets.
+
+## Effective Per-Group Mode
+
+TRACaBot resolves its mode for each group from live `getMe`/`getChatMember` results. A configured admin ID, a desired policy, or a previous cache never grants admin capabilities.
+
+| Live bot status | Effective mode | Permitted coverage |
+| --- | --- | --- |
+| Administrator/creator | **Admin protection** | Live `chat_member` ban/join events, native admin ban context, and only the actions allowed by the exact rights present. Delete requires Telegram's explicit `can_delete_messages=true`; creator is the exception. |
+| Administrator without Restrict/Ban | **Admin event observation** | Receives permitted admin events and can delete only if delete permission exists, but cannot ban, restrict, unban, or run a restriction-based challenge. |
+| Ordinary group member | **Observer** | Partial: actual `new_chat_members` service messages and ordinary messages visible to the bot. It cannot ban, restrict, delete, unban, or challenge through any route, and it cannot claim a comprehensive ban or join feed. |
+| Lookup failed / unknown | **Degraded observer** | No destructive action. Status labels the mode degraded rather than “fully protected.” |
+
+`my_chat_member` promotion, demotion, restriction, and removal refresh the mode immediately. Destructive calls also re-check live rights immediately before acting, so a stale cached admin state cannot authorize a ban after demotion. If the bot is removed, group operations are disabled and active in-memory challenges for that group are cleared.
+
+Observer groups are quiet by default. Evidence checks and local logging continue, but warnings, pending-review notices, and challenges do not post automatically. `TRACABOT_OBSERVER_ADVISORIES=true` is an explicit operator opt-in for at most one bounded, cooldown-limited, evidence-backed advisory per six hours when the group permits bot sends. Advisories never include target names, private message text, or a definitive scam label. Admin groups keep the existing notification policy.
+
+Telegram privacy mode controls ordinary-message visibility. Turning Group Privacy off in BotFather is a broader delivery configuration, but it is not proof of effective coverage for an existing observer membership; Telegram may require removing and re-adding the bot for it to take effect. `/status` reports `broader delivery configured; effective coverage unverified` in that case. An administrator still receives all group messages under Telegram's permission semantics, while a removed bot has no group visibility. No mode can read chat history, Telegram Recent Actions, pre-install bans, or an unstated ban reason, and no user-account/MTProto collector is used.
 
 ## Native Admin Ban Logging
 
@@ -169,7 +190,7 @@ The context is classified with deterministic local signals into `unknown`, `beha
 
 A live admin ban is `admin_enforcement`, not `confirmed_scam`. With operator graph writes and automatic promotion enabled, eligible provenance-backed enforcement records are shared automatically as enforcement-only claims. Auto-sharing fails closed unless explicit consent, verified action provenance, and a valid target are present; high confidence or corroborating roots cannot bypass that gate. They do not carry scam verdicts and cannot by themselves trigger a cross-community ban. An observed unban records a `review_overturned` correction; the original enforcement record remains as history instead of being silently erased.
 
-Unavoidable setup requirements: the bot must be a group admin with ban/restrict visibility, exactly one process must poll the bot token, `allowed_updates` must include `chat_member` (TRACaBot already requests it), and the operator must enable DKG writes plus automatic evidence promotion for public SWM sharing. Set `TRACABOT_AUTO_PROMOTE_EVIDENCE=false` for local-only enforcement records.
+Unavoidable setup requirements: for admin protection the bot must be a group admin with ban/restrict visibility, exactly one process must poll the bot token, `allowed_updates` must include `chat_member` (TRACaBot already requests it), and the operator must enable DKG writes plus automatic evidence promotion for public SWM sharing. Set `TRACABOT_AUTO_PROMOTE_EVIDENCE=false` for local-only enforcement records. Missing admin rights or an unavailable permission lookup leave the group in quiet observer/degraded mode, not fully protected.
 
 ## Campaign Summaries
 
@@ -215,7 +236,7 @@ OpenClaw can also call `sort_conversation_artifact` to classify scam, spam, phis
 
 For autonomous LLM-Wiki-style learning, run `node ./bin/openclaw-learning-loop.js` beside the Telegram bot. TRACaBot keeps listening to Telegram and drafting local WM artifacts; the OpenClaw loop drains those drafts through `sort_conversation_artifact`, stamps committed artifacts with `commit_receipt_id`, and writes only committed artifacts to DKG Shared Memory. Use `--once` for a single pass or `--dry-run` to inspect pending draft inputs. Tune with `TRACABOT_LEARNING_LOOP_INTERVAL_MS` and `TRACABOT_LEARNING_LOOP_LIMIT`.
 
-The DKG-native curator runs with `node ./bin/tracabot-curator.js --once` (or without `--once` every 12 hours). Selected suspicious Telegram artefacts are staged as unsealed DKG Working Memory Knowledge Assets. A local script first filters drafts by score and concrete indicators; at most five per run are reviewed by the OpenCode `tracabot-curator` agent (`9router/cx/gpt-6-sol`, `medium`). Only explicit, reasoned fraud/impersonation/harmful-signal approvals are annotated in WM and shared to SWM. Invalid or unavailable LLM reviews never promote. Reviews are persisted in `data/curator-reviews.sqlite` to avoid repeat token use. Expired drafts are discarded after 48 hours. This script does not depend on the OpenClaw gateway. Ordinary low-risk chatter is skipped. With `TRACABOT_HIGH_CONFIDENCE_AUTO_BAN=true`, active Telegram polling script considers concrete wallet-verification lures with a link and pressure/authority cue, then requires exact-actor admin-verified scam history in DKG Shared Working Memory plus explicit OpenCode curator approval before ban. No history, later false-positive clear, DKG read error, curator hold/error, admin target, or missing bot ban rights blocks ban. Run one curator instance per bot identity. Start scheduling only after DKG `working-memory` reads succeed; a retryable authority error blocks curation and expiry.
+The DKG-native curator runs with `node ./bin/tracabot-curator.js --once` (or without `--once` every 12 hours). Selected suspicious Telegram artefacts are staged as unsealed DKG Working Memory Knowledge Assets. A local script first filters drafts by score and concrete indicators; at most five per run are reviewed by the OpenCode `tracabot-curator` agent (`9router/cx/gpt-6-sol`, `medium`). Only explicit, reasoned fraud/impersonation/harmful-signal approvals are annotated in WM and shared to SWM. The raw Working Memory artifact stays private; promotion writes a separate sanitized projection with bounded allowlisted indicators and provenance, never raw message text, email, phone, source IDs, URLs with paths/queries, or private identifiers. Invalid or unavailable LLM reviews never promote. Reviews are persisted in `data/curator-reviews.sqlite` to avoid repeat token use. Expired drafts are discarded after 48 hours. This script does not depend on the OpenClaw gateway. Ordinary low-risk chatter is skipped. The legacy `TRACABOT_HIGH_CONFIDENCE_AUTO_BAN` Telegram worker path is retired: it never performs a ban, model approval is not sanction authority, and queued legacy candidates are drained without action. Automatic removals use the exact-identity evidence policy in the main bot runtime. Run one curator instance per bot identity. Start scheduling only after DKG `working-memory` reads succeed; a retryable authority error blocks curation and expiry.
 
 TRACaBot can also run in conversational safety mode. It keeps its own standalone Telegram bot token and can use `9router`, an OpenClaw-discovered LLM account, a direct OpenAI-compatible API, or a local LLM gateway to draft short scam-safety replies and classify ambiguous natural-language intent. Deterministic routing handles obvious requests such as stats, digest, reviews, watchlist, campaigns, help, and private-info refusals before any LLM call, so tokens are reserved for ambiguous or genuinely conversational turns. Conversation is limited to scam/fraud/wallet-safety questions and TRACaBot capabilities; LLM text never executes Telegram bans, deletes, restrictions, or DKG writes by itself.
 
@@ -223,11 +244,11 @@ Local SQLite WAL state is the bot's operational working memory for weak reports,
 
 `channel_observation` events increase DKG v10 Shared Memory for spam/scam/fraud pattern analysis without capturing normal discussion. TRACaBot writes bounded raw `message_text` only for high-confidence public messages that look like real channel abuse: new-member scam channel promos, outside coin/token promotions, scam domains/wallets, fake airdrops, investment-profit lures, or admin/support impersonators asking users to DM. General discussion about scam coins or scam prevention stays local and is not shared as raw DKG text.
 
-The bot separates local analysis confidence from DKG confidence. Report-only evidence does not automatically snowball into high-confidence bans; DKG evidence must be credible, and non-admin reports cannot directly trigger a Telegram ban. Plain watchlist monitoring stays local-only; DKG writes are reserved for evidence-backed unsafe chat observations, actions, reports, campaigns, appeals, reviews, restrictions, and bans.
+The bot separates local analysis confidence from DKG confidence. Report-only evidence does not automatically snowball into high-confidence bans; DKG evidence must be credible, and non-admin reports cannot directly trigger a Telegram ban. Plain watchlist monitoring and all private appeals stay local-only; DKG writes are reserved for evidence-backed unsafe chat observations, actions, reports, campaigns, reviews, restrictions, and bans.
 
 TRACaBot applies graduated autonomous enforcement by default: low-confidence events are logged, medium-confidence events can be deleted and restricted, and high-confidence events can be deleted and banned. It also writes and queries scam domains in DKG Shared Memory, so a phishing or Telegram lure domain seen in one community can be flagged in another. Repeated domains, wallets, scam patterns, or text fingerprints are clustered into local campaign signals and can be written as `fraud_campaign` DKG events when the same wave repeats.
 
-Conversation artifact logging is controlled by `TRACABOT_WM_ARTIFACTS`, `TRACABOT_WM_ARTIFACT_MIN_CONFIDENCE`, `TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS`, `TRACABOT_WM_ARTIFACT_REDACT`, and `TRACABOT_WM_ARTIFACT_SHARE_LOW_CONFIDENCE`. By default, raw identifiers are redacted and low-quality artifacts stay local.
+Conversation artifact logging is controlled by `TRACABOT_WM_ARTIFACTS`, `TRACABOT_WM_ARTIFACT_MIN_CONFIDENCE`, `TRACABOT_WM_ARTIFACT_MAX_TEXT_CHARS`, `TRACABOT_WM_ARTIFACT_REDACT`, `TRACABOT_WM_ARTIFACT_SHARE_LOW_CONFIDENCE`, and `TRACABOT_ARTIFACT_OPT_OUT_CHATS`. The opt-out accepts strict numeric Telegram chat IDs and forces those artifacts to stay private. By default, raw identifiers are redacted and low-quality artifacts stay local.
 
 ## Public Reader and Bounded Community Writes
 
@@ -238,7 +259,7 @@ npm run web
 # local by default: http://127.0.0.1:8787
 ```
 
-The reader is free and unauthenticated. It returns only sanitized evidence already marked for shared/public memory: hashed public IDs, claim level, normalized domains/wallets/patterns, stable HMAC target/actor references, enforcement reason status, counts, timestamps, and provenance. It never returns raw Telegram IDs, usernames, chat titles, private messages, screenshots, or reporter data. Campaign summaries can also be read from DKG Shared Working Memory when `TRACABOT_PUBLIC_READ_DKG=true`.
+The reader is free and unauthenticated. It returns only sanitized evidence already marked for shared/public memory: hashed public IDs, claim level, normalized domains/wallets/patterns, stable HMAC target/actor references, enforcement reason status, counts, timestamps, and provenance. It also returns sanitized correction records so a shared enforcement or review record can show that it was later retracted; correction text, private appeal reasons, and raw evidence never leave local storage. It never returns raw Telegram IDs, usernames, chat titles, private messages, screenshots, or reporter data. Remote campaign fields from another graph are normalized or dropped when they are malformed, non-HMAC references, or contain raw URL credentials, paths, tokens, or private text. Campaign summaries can also be read from DKG Shared Working Memory when `TRACABOT_PUBLIC_READ_DKG=true`.
 
 Writes are closed by default. Configure an operator-issued token per community:
 
@@ -334,7 +355,7 @@ Transient DKG Shared Memory write failures such as temporary network errors, tim
 - Accepted DKG evidence is structured and bounded; duplicate, rate-limited, targetless, and no-pattern reports are local-only.
 - Reporter reputation is tracked locally from accepted/high-confidence reports so consistently helpful reporters receive more trust without letting them bypass duplicate or rate-limit controls.
 - High-confidence or admin-verified eligible fraud memory is published with a targeted OpenClaw adapter `publishSharedMemory` call.
-- Appeal and review events are evidence-backed DKG writes so operators can explain or correct decisions without silently mutating history. Plain watchlist state remains local-only.
+- Review decisions are evidence-backed DKG writes so operators can explain or correct shared findings without silently mutating history. Private appeals and appeal resolutions stay local-only; only a resulting correction becomes a sanitized shared retraction. Plain watchlist state remains local-only.
 
 ## Requirements
 
@@ -373,13 +394,17 @@ Paste this command list into BotFather:
 start - Open Tracabot protection menu
 scan - Check a user, wallet, or replied message for scam risk
 report - Report suspicious users, messages, links, wallets, or forwarded DMs
-ban - Ban a replied user and publish ban evidence (admin)
+ban - Admin: optional ban command; normal admin bans are logged automatically
 mute - Admin: mute a replied or mentioned user for a duration
+appeal - Private: appeal your own ban and review your local cases
+appeals - Admin: review pending ban appeals for chats you moderate
+controls - Private: current-admin protection controls and auto-ban overrides
+status - Private: capability, coverage, and mode summary for groups you administer
 ```
 
 Most other functions (stats, reviews, campaigns, enforcement history, explanations, settings/status, etc.) are available through the `/start` menu buttons or by speaking naturally to the bot when conversational mode is enabled.
 
-Invite the bot to your group and grant administrator rights for **Delete Messages**, **Restrict/Ban Users**, and the ability to see group messages. Telegram bots receive new messages and live `chat_member` updates only while they are in the group with the required visibility; a bot token by itself does not grant message or membership event access. Discord and other platforms are not implemented.
+Invite the bot to your group and grant administrator rights for **Delete Messages** and **Restrict/Ban Users** to enable admin protection; for ordinary-message visibility either keep those admin rights or turn Group Privacy off in BotFather. Telegram bots receive new messages and live `chat_member` updates only while they are in the group with the required visibility; a bot token by itself does not grant message or membership event access. Without admin rights the bot is an observer only: it can review service-message joins and visible messages, but it cannot enforce or guarantee complete ban/join history. Discord and other platforms are not implemented.
 
 3. Install TRACaBot:
 
@@ -416,6 +441,8 @@ TRACABOT_AUTO_BAN=false
 # Silent exact-identity join protection. Default is observe/log only.
 TRACABOT_JOIN_AUTO_REMOVE=false
 TRACABOT_JOIN_AUTO_REMOVE_CHATS=
+# Observer groups stay quiet unless explicitly opted in to bounded evidence advisories.
+TRACABOT_OBSERVER_ADVISORIES=false
 TRACABOT_JOIN_EVIDENCE_MAX_AGE_DAYS=180
 TRACABOT_JOIN_MIN_CONFIRMED_ROOTS=1
 # Counts independent underlying findings; duplicate reviews/promoted copies count once.

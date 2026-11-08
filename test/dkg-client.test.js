@@ -159,6 +159,23 @@ test('text-derived campaign keys are hashed before shared graph writes', async (
   assert.ok(adapter.calls.some((call) => call[0] === 'createKnowledgeAsset'));
 });
 
+test('direct shared write rejects explicit privacy denial even when the caller asks for DKG', async () => {
+  const dkg = new DkgClient({ contextGraph: 'tracabot', dkgPseudonymKey: 'test-key-at-least-32-bytes-long-enough', dkgPublishVerified: false });
+  const adapter = makeAdapterClient();
+  dkg.client = async () => adapter;
+  await assert.rejects(() => dkg.writeEvent({
+    id: 'direct-denied',
+    event_type: 'fraud_finding',
+    payload: { confidence: 95, local_confidence: 90, consent_to_share: false }
+  }), /privacy denial/);
+  await assert.rejects(() => dkg.writeEvent({
+    id: 'direct-opt-out',
+    event_type: 'fraud_finding',
+    payload: { confidence: 95, local_confidence: 90, privacy_opt_out: true }
+  }), /privacy denial/);
+  assert.equal(adapter.calls.some((call) => call[0] === 'createKnowledgeAsset' || call[0] === 'share'), false);
+});
+
 test('public campaign query returns only sanitized shared-memory fields', async () => {
   const dkg = new DkgClient({ contextGraph: 'tracabot' });
   const rows = [

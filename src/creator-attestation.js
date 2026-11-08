@@ -1,4 +1,5 @@
 import { createHash, createPublicKey, sign, verify } from 'node:crypto';
+import { fetchService } from './secure-transport.js';
 
 export const CREATOR_ATTESTATION_VERSION = 'tracabot-creator-attestation-v1';
 export const CREATOR_STATUS_VERSION = 'tracabot-creator-status-v1';
@@ -282,12 +283,12 @@ export async function fetchCreatorAttestation({
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), Math.max(500, Number(timeoutMs) || 4000));
   try {
-    const response = await fetchImpl(url, {
+    const response = await fetchService(url, {
       method: 'GET',
       headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
       cache: 'no-store',
       signal: controller.signal
-    });
+    }, { fetchImpl, label: 'creator status read' });
     if (!response.ok) return { ok: false, configured: true, status: 'unavailable', evidence: [], complete: false, error: `creator status read failed with ${response.status}` };
     let envelope;
     try { envelope = await response.json(); } catch { envelope = null; }

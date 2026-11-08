@@ -105,6 +105,37 @@ test('Ed448 or other asymmetric keys are rejected even when labeled ed25519', ()
   assert.equal(verifyStatusEnvelope(signPayload({ probe: true }, privateKey), ed448Public).reason, 'invalid_key_type');
 });
 
+test('signed creator status reads reject insecure transport and redirects without forwarding bearer auth', async () => {
+  const calls = [];
+  const redirectFetch = async (url, init) => {
+    calls.push({ url, init });
+    return { ok: false, status: 302, headers: { get: () => 'https://other.example/collect' } };
+  };
+  const redirected = await fetchCreatorAttestation({
+    baseUrl: 'https://creator.example',
+    userId: '4242',
+    publicKey,
+    token: 'creator-read-token-123456',
+    fetchImpl: redirectFetch
+  });
+  assert.equal(redirected.ok, false);
+  assert.match(redirected.error, /redirects are not allowed/);
+  assert.equal(calls[0].init.redirect, 'manual');
+  assert.equal(calls[0].init.headers.authorization, 'Bearer creator-read-token-123456');
+
+  let insecureCalls = 0;
+  const insecure = await fetchCreatorAttestation({
+    baseUrl: 'http://creator.example',
+    userId: '4242',
+    publicKey,
+    token: 'creator-read-token-123456',
+    fetchImpl: async () => { insecureCalls += 1; throw new Error('must not fetch'); }
+  });
+  assert.equal(insecure.ok, false);
+  assert.match(insecure.error, /HTTPS outside exact loopback/);
+  assert.equal(insecureCalls, 0);
+});
+
 test('signed creator status reads expose fresh active, revoked, expired, and not-found states', () => {
   const dir = mkdtempSync(join(tmpdir(), 'tracabot-creator-'));
   const storePath = join(dir, 'attestations.json');
